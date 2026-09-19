@@ -1,0 +1,24 @@
+# ===== OS =====
+.DS_Store
+Thumbs.db
+
+# ===== IDE / Editor =====
+.idea/
+*.iml
+*.swp
+*~
+
+# ===== AI tools =====
+.trae/
+
+# ===== Rust / Tauri (desktop) =====
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+
+# ===== 密钥与签名（任何位置出现都忽略） =====
+*.jks
+*.keystore
+key.properties
+*.pem
+id_ed25519
+id_rsa
