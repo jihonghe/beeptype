@@ -546,7 +546,8 @@ log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
 ## 7. 构建与发布
 
 - **CI**：`.github/workflows/release.yml`，仅在推 `v*` tag 或手动触发时运行。
-  - `version` 从 tag 提取（`v0.2.0` → `0.2.0`），写入 `app/pubspec.yaml` 与 `desktop/src-tauri/tauri.conf.json`（**版本以 tag 为唯一来源**，仓库里的字面量不参与发布）。
+  - `version` 从 tag 提取（`v0.2.0` → `0.2.0`），写入 `app/pubspec.yaml` 与 `desktop/src-tauri/tauri.conf.json`——**git tag 是版本唯一来源**。
+  - **版本的三层关系**（别搞混）：tag → CI 改写 → ① `pubspec.yaml` 决定 Android 包版本，② `tauri.conf.json` 决定安装包版本**且被 tauri-codegen 烘焙进二进制**，所以设置页「关于」用 `app.package_info().version` 读的就是它（与安装包一致）；③ `Cargo.toml` 的 `version` 只是 crate 版本，**不参与展示**（曾经用 `env!("CARGO_PKG_VERSION")` 取它，导致发布包的关于页一直显示旧号）。仓库里的这三个字面量都只服务本地开发构建，保持与最近一次发布一致即可，CI 每次都会按 tag 覆盖前两个。
   - Android：`flutter build apk --release --target-platform android-arm64`，签名 keystore 由 Secrets 还原并生成 `key.properties`。
   - 桌面：矩阵 `ubuntu-22.04`（GLIBC 兼容性）/ `macos-latest` / `windows-latest`，`tauri build` 后分别产出 `.deb` + `.AppImage`、`.dmg`、`.msi`。
   - Release job 汇总所有产物，`workflow_dispatch` 触发时先建 draft。

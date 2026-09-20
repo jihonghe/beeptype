@@ -56,8 +56,10 @@ struct SettingsInfo {
     has_primary: bool,
     /// 已绑定主力机名称
     primary_name: Option<String>,
-    /// 应用版本（编译期注入）
-    version: &'static str,
+    /// 应用版本：取自构建时的 tauri.conf.json（发布时由 CI 按 git tag 改写），
+    /// 因此与安装包/发布产物一致。不要用 env!("CARGO_PKG_VERSION")——那是
+    /// Cargo.toml 的 crate 版本，CI 不同步它，会一直显示旧号
+    version: String,
 }
 
 fn build_pairing_info(server: &ServerState) -> PairingInfo {
@@ -204,7 +206,7 @@ fn get_settings(
         autostart,
         has_primary,
         primary_name,
-        version: env!("CARGO_PKG_VERSION"),
+        version: app.package_info().version.to_string(),
     }
 }
 

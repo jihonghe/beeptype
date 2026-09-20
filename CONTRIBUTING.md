@@ -82,6 +82,8 @@ cd app && flutter build apk --release --target-platform android-arm64
 # 产物：app/build/app/outputs/flutter-apk/app-release.apk
 ```
 
+**版本号规则**：**git tag 是唯一来源**。发布时 CI 会把 tag 版本写进 `app/pubspec.yaml` 和 `desktop/src-tauri/tauri.conf.json`（前者决定 Android 包版本，后者决定安装包版本并被烘焙进二进制，设置页「关于」显示的就是它）。仓库里 `pubspec.yaml` / `tauri.conf.json` / `Cargo.toml` 的三个字面量只服务本地开发构建，保持与最近一次发布一致即可，**不要用 `Cargo.toml` 的版本做展示**（CI 不同步它）。
+
 ### 6. 跑起来验证
 
 1. 启动 PC 端 `cargo tauri dev`（或 `cargo build` 后直接跑 `target/debug/beetype`）→ 托盘图标出现
