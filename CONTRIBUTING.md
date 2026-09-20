@@ -106,6 +106,7 @@ cd app && flutter build apk --release --target-platform android-arm64
 - **测试包不改版本号语义**：仓库里 `pubspec.yaml` / `tauri.conf.json` / `Cargo.toml` 的字面量只在正式发版时更新；测试包用 `<下一版本>-test` 这样的版本（`dpkg -i` 能正常覆盖升级，设置页也会显示出来，一眼能看出是测试包）。
 - **不要每改一处就发版**：正式版攒批次发，版本号才不碎、发布说明才好写；期间要验证就用测试包。
 - 本地构建 `.deb` 需要 `libayatana-appindicator3-dev`（官方打包器靠 pkg-config 探测 appindicator，缺了会报 `Can't detect any appindicator library`）：`sudo apt install libayatana-appindicator3-dev`。
+- 测试包与正式版之间会有一次 dpkg 的"降级"提示：`0.2.5-test` 在 dpkg 的版本序里**大于** `0.2.5`（预发布串没有 `~`，Debian 会把它当成更高的修订号），所以装正式版时会提示一次降级——**正常**，装完就是正式版。想彻底避免就得跳过版本号（测试包用 `0.2.5-test`、正式版发 `0.2.6`），按需取舍。
 
 ## 提交流程
 
