@@ -4,6 +4,7 @@ mod discovery;
 mod paste;
 mod protocol;
 mod server;
+mod winicon;
 
 use config::Config;
 use log::info;
@@ -312,6 +313,11 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            // 任务栏/dock 图标：tauri 的 window.set_icon() 在这套 GTK/tao 栈上实测
+            // 无效（调用成功但 _NET_WM_ICON 属性不写），而缺这个属性的窗口在 Deepin
+            // 等桌面的任务栏里会显示通用图标。改为自己把属性写上去（见 winicon.rs）。
+            winicon::apply_to_main_window();
+
             // 加载配置（首次运行会补建设备 ID/设备名）
             let mut config = Config::load_or_create().unwrap_or_default();
             let port = config.port;

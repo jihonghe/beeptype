@@ -61,6 +61,7 @@ desktop/
         ├── server.rs       # TCP 服务、认证、席位状态机
         ├── clipboard.rs    # 剪贴板写入 + 读回校验
         ├── paste.rs        # 按键模拟（自动粘贴/自动发送）
+        ├── winicon.rs      # 任务栏图标：自己写 _NET_WM_ICON（Linux/X11）
         └── discovery.rs    # UDP 凭证门控发现
 ```
 
@@ -541,6 +542,8 @@ log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
 
 依赖都不需要用户安装外部命令（剪贴板走 arboard、按键走 enigo + X11 XTest），发行包不再依赖 `xdotool`/`xclip`。
 
+**Linux 任务栏图标（winicon.rs）**：Tauri 的 `window.set_icon()` 在这套 GTK/tao 栈上**实测无效**——调用返回成功，但窗口的 `_NET_WM_ICON` 属性始终不写（立即调用与延后 2 秒调用都试过）。而缺该属性的窗口在 Deepin 的任务栏里会退回通用图标（现象：显示"两个齿轮"）；同机对照，Edge / ZCode 都设了这个属性、图标正常。因此改为自己实现：连 X server，从 `_NET_CLIENT_LIST` 里按 `_NET_WM_PID` == 本进程 pid 且 `WM_CLASS` 含 `beetype` 找到自己的窗口，把 128×128 图标按 `[宽, 高, ARGB...]` 写入该属性（带重试，失败只记日志）。仅作用于 Linux/X11；Wayland 用 app_id 关联，Windows/macOS 用可执行文件图标。
+
 ---
 
 ## 7. 构建与发布
@@ -558,7 +561,7 @@ log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
 
 ## 8. 测试与验证
 
-**Rust 单测（20 个，`cargo test`）**
+**Rust 单测（21 个，`cargo test`）**
 
 | 文件 | 覆盖 |
 |---|---|
@@ -567,6 +570,7 @@ log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
 | `server.rs` | 席位仲裁三分支（空席接入/同主力替换/被临时方占用）、踢人原因映射、QR 内容格式 |
 | `discovery.rs` | 请求解析的合法/畸形样本、应答 JSON 字段 |
 | `paste.rs` | 回车余量的边界（基准值、按长度递增、上限、整体 <1s） |
+| `winicon.rs` | 图标数据格式（`[宽, 高, ARGB...]` 长度自洽、含不透明像素） |
 
 **Flutter 测试**：`app/test/widget_test.dart` 覆盖 `TcpMessage` 编解码（JSON 行、字段往返、畸形行返回 null）。
 
