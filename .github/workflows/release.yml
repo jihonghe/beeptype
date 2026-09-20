@@ -1,6 +1,7 @@
 name: Release Build
 
-# 仅在推送 v* tag 或手动触发时运行，不在每次 commit 时构建
+# 推 v* tag：完整构建 + 发布 Release
+# 手动触发：只构建不发布（产物在该次运行的 Artifacts 里），用于验证 CI 改动
 on:
   push:
     tags:
@@ -21,7 +22,9 @@ jobs:
         id: get_version
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=0.0.0-manual" >> $GITHUB_OUTPUT
+            # 手动构建用占位版本。必须是纯数字的合法版本：MSI 不接受带字母的
+            # 预发布标识（0.0.0-manual 会让 Windows 打包直接失败）
+            echo "version=0.0.0" >> $GITHUB_OUTPUT
           else
             echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
           fi
@@ -91,7 +94,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 20
 
@@ -153,7 +156,10 @@ jobs:
           name: windows-desktop
           path: desktop/src-tauri/target/release/bundle/msi/*.msi
 
+  # 只在 tag 推送时发布 Release；手动触发（dry run）走到这里会被跳过，
+  # 以免用分支名当 tag 建出垃圾 release/tag
   release:
+    if: github.event_name != 'workflow_dispatch'
     needs: [android, desktop]
     runs-on: ubuntu-latest
     steps:
@@ -183,7 +189,8 @@ jobs:
           name: BeeType ${{ github.ref_name }}
           body_path: ${{ steps.notes.outputs.path }}
           generate_release_notes: ${{ steps.notes.outputs.path == '' }}
-          draft: ${{ github.event_name == 'workflow_dispatch' }}
+          # 这个作业只可能由 tag 推送触发（手动 dry run 已被上面的 if 跳过）
+          draft: false
           files: |
             android-apk/app-release.apk
             linux-desktop/**/*.deb
