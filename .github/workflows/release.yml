@@ -129,6 +129,12 @@ jobs:
           key: ${{ matrix.platform }}-cargo-target-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
           restore-keys: ${{ matrix.platform }}-cargo-target-
 
+      # 缓存里带着上一次构建的 bundle 目录（target 整体被缓存），不清理会让
+      # release 混进旧版本安装包——实测 v0.2.3 就混进了手动 dry run 的 0.0.0-manual
+      - name: Clean stale bundle output
+        shell: bash
+        run: rm -rf desktop/src-tauri/target/release/bundle
+
       - name: Build Tauri app
         working-directory: desktop
         run: tauri build
