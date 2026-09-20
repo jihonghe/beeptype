@@ -1,0 +1,68 @@
+name: CI
+
+# 轻量检查：推送到 main、开 PR、或手动触发时运行。
+# 只做"编译 + 跑测试"，不产出任何安装包——打包与发布见 release.yml（仅 v* tag 触发）。
+# 目的：改坏了当场能发现，成本约 2~3 分钟（两个 job 并行，带缓存）。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支上连续推送时，取消排队中的旧运行（只保留最后一次）
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # 编译需要 tauri 的系统依赖（与 release.yml 保持一致）
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev
+
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/src-tauri/target
+          key: ci-cargo-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+          restore-keys: ci-cargo-
+
+      # cargo test 会连带编译 lib/bin/tests，因此也能挡住"测试代码编译不过"这类问题
+      - name: cargo test
+        working-directory: desktop/src-tauri
+        run: cargo test
+
+  mobile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.x'
+          channel: stable
+          cache: true
+
+      - name: flutter analyze
+        working-directory: app
+        run: |
+          flutter pub get
+          flutter analyze
+
+      - name: flutter test
+        working-directory: app
+        run: flutter test

@@ -92,6 +92,21 @@ cd app && flutter build apk --release --target-platform android-arm64
 4. 主力绑定 → 卸载重装手机 APP → 再扫码 → 确认 hardware_id 恢复主力身份
 5. 桌面端单测：`cd desktop/src-tauri && cargo test`
 
+## 开发与发布流程（三条轨道）
+
+日常改动、测试包、正式版本是**三件不同的事**，不要混在一起：
+
+| 轨道 | 触发方式 | 做什么 | 成本 |
+|---|---|---|---|
+| **日常检查** | push 到 `main` / 开 PR | `ci.yml`：`cargo test` + `flutter analyze` + `flutter test`，**不打包** | 约 2~3 分钟 |
+| **测试包** | 维护者在本地构建 | 用官方打包器出 `.deb`：`cd desktop && cargo tauri build --bundles deb --config '{"version":"<下一版本>-test"}'`，产物直接装来验证；**不动仓库里的版本字面量** | 约 8 分钟本机 CPU，0 CI 分钟 |
+| **正式版本** | 攒够一批改动后打 tag | 写 `docs/releases/<tag>.md` → 三个版本字面量同步到该版本 → 打 tag 推送 → `release.yml` 全平台构建并发布 Release | 约 22~24 分钟（5 个 runner） |
+
+要点：
+- **测试包不改版本号语义**：仓库里 `pubspec.yaml` / `tauri.conf.json` / `Cargo.toml` 的字面量只在正式发版时更新；测试包用 `<下一版本>-test` 这样的版本（`dpkg -i` 能正常覆盖升级，设置页也会显示出来，一眼能看出是测试包）。
+- **不要每改一处就发版**：正式版攒批次发，版本号才不碎、发布说明才好写；期间要验证就用测试包。
+- 本地构建 `.deb` 需要 `libayatana-appindicator3-dev`（官方打包器靠 pkg-config 探测 appindicator，缺了会报 `Can't detect any appindicator library`）：`sudo apt install libayatana-appindicator3-dev`。
+
 ## 提交流程
 
 1. **Fork 本仓库** → 创建你的功能分支（`feature/xxx` 或 `fix/xxx`）

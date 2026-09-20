@@ -550,7 +550,8 @@ log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
 
 ## 7. 构建与发布
 
-- **CI**：`.github/workflows/release.yml`，仅在推 `v*` tag 或手动触发时运行。
+- **CI 分成两条**：`.github/workflows/ci.yml` 在 push 到 main / PR / 手动触发时跑轻量检查（`cargo test` + `flutter analyze` + `flutter test`，**不打包**，约 2~3 分钟）；`.github/workflows/release.yml` 只在推 `v*` tag（或手动 dry run）时做全平台打包与发布。日常迭代用本地构建的测试包（见 CONTRIBUTING 的「开发与发布流程」），**不每个改动都发版**。
+- **发布（release.yml）**：仅在推 `v*` tag 或手动触发时运行。
   - `version` 从 tag 提取（`v0.2.0` → `0.2.0`），写入 `app/pubspec.yaml` 与 `desktop/src-tauri/tauri.conf.json`——**git tag 是版本唯一来源**。
   - **版本的三层关系**（别搞混）：tag → CI 改写 → ① `pubspec.yaml` 决定 Android 包版本，② `tauri.conf.json` 决定安装包版本**且被 tauri-codegen 烘焙进二进制**，所以设置页「关于」用 `app.package_info().version` 读的就是它（与安装包一致）；③ `Cargo.toml` 的 `version` 只是 crate 版本，**不参与展示**（曾经用 `env!("CARGO_PKG_VERSION")` 取它，导致发布包的关于页一直显示旧号）。仓库里的这三个字面量都只服务本地开发构建，保持与最近一次发布一致即可，CI 每次都会按 tag 覆盖前两个。
   - Android：`flutter build apk --release --target-platform android-arm64`，签名 keystore 由 Secrets 还原并生成 `key.properties`。
