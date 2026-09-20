@@ -44,7 +44,16 @@
 
 ### PC 端
 
-#### 方式一：下载预编译版本（即将提供）
+#### 方式一：下载预编译版本
+
+前往 [GitHub Releases](https://github.com/jihonghe/beetype/releases) 下载对应平台的安装包：
+
+| 平台 | 文件 |
+|------|------|
+| Linux | `.deb` 或 `.AppImage` |
+| Windows | `.msi` |
+| macOS | `.dmg` |
+| Android | `.apk` |
 
 #### 方式二：从源码构建
 
