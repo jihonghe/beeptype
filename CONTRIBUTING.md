@@ -98,7 +98,7 @@ cd app && flutter build apk --release --target-platform android-arm64
 
 | 轨道 | 触发方式 | 做什么 | 成本 |
 |---|---|---|---|
-| **日常检查** | push 到 `main` / 开 PR | `ci.yml`：`cargo test` + `flutter analyze` + `flutter test`，**不打包** | 约 2~3 分钟 |
+| **日常检查** | push 到 `main` / 开 PR | `ci.yml`：`cargo test`（含真实 TCP 的集成测试）+ `flutter analyze` + `flutter test`，**不打包** | 约 2~3 分钟 |
 | **测试包** | 维护者在本地构建 | 用官方打包器出 `.deb`：`cd desktop && cargo tauri build --bundles deb --config '{"version":"<下一版本>-test"}'`，产物直接装来验证；**不动仓库里的版本字面量** | 约 8 分钟本机 CPU，0 CI 分钟 |
 | **正式版本** | 攒够一批改动后打 tag | 写 `docs/releases/<tag>.md` → 三个版本字面量同步到该版本 → 打 tag 推送 → `release.yml` 全平台构建并发布 Release | 约 22~24 分钟（5 个 runner） |
 

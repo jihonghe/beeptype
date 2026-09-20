@@ -15,7 +15,7 @@
 //! 由"不支持自动粘贴的环境回退手动 Ctrl+V"兜底。
 
 use log::{info, warn};
-use tauri::AppHandle;
+use tauri::{AppHandle, Runtime};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 /// 写入尝试次数：首次 + 一次重写
@@ -29,7 +29,7 @@ const WRITE_ATTEMPTS: u8 = 2;
 ///
 /// 在 X11 上，我们持有所有权时读回是本地内存读（arboard 直接返回自己的数据），
 /// 不产生额外的 X 往返；只有当所有权已被别人抢走时才会真去读一次。
-pub fn write_verified(app: &AppHandle, text: &str) -> bool {
+pub fn write_verified<R: Runtime>(app: &AppHandle<R>, text: &str) -> bool {
     for attempt in 1..=WRITE_ATTEMPTS {
         if let Err(e) = app.clipboard().write_text(text) {
             warn!("Clipboard write failed (attempt {attempt}): {e}");

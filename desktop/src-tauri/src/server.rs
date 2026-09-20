@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 use tauri::menu::MenuItem;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_notification::NotificationExt;
 
 /// 鉴权失败冷却配置
@@ -197,13 +197,16 @@ fn arbitrate_primary(current: Option<&ActiveSession>, client_id: &str) -> Primar
     }
 }
 
-/// 服务端共享状态
-#[derive(Clone)]
-pub struct ServerState {
+/// 服务端共享状态。
+///
+/// 对运行时泛型化（`R: Runtime`）是为了能在无显示器环境下用 tauri 的 mock 运行时
+/// 起一个实例，从而对握手/席位/凭证这套状态机做**真实 TCP 连接**的集成测试
+/// （见文件末尾的 integration_tests）。桌面应用固定用 `AppServerState = ServerState<Wry>`。
+pub struct ServerState<R: Runtime> {
     pub state: Arc<Mutex<ConnState>>,
     pub auth_fails: Arc<Mutex<HashMap<IpAddr, u32>>>,
     pub auth_cooldowns: Arc<Mutex<HashMap<IpAddr, Instant>>>,
-    pub app_handle: AppHandle,
+    pub app_handle: AppHandle<R>,
     pub port: u16,
     pub pairing_code: Arc<Mutex<String>>,
     /// 持久配置（device_id/device_name/primary）
@@ -213,9 +216,9 @@ pub struct ServerState {
     /// 配对窗口"记住此手机"勾选：对下一次码配对生效；已绑主力时忽略
     pub remember_next: Arc<AtomicBool>,
     /// 托盘菜单第一行状态项（setup 建完托盘后注入）
-    pub status_item: Arc<Mutex<Option<MenuItem<tauri::Wry>>>>,
+    pub status_item: Arc<Mutex<Option<MenuItem<R>>>>,
     /// 托盘"断开当前手机"项（有会话时可点）
-    pub disconnect_item: Arc<Mutex<Option<MenuItem<tauri::Wry>>>>,
+    pub disconnect_item: Arc<Mutex<Option<MenuItem<R>>>>,
     /// 自动粘贴开关（实际生效值：用户开关 && 平台支持）
     pub auto_paste: Arc<AtomicBool>,
     /// 自动发送开关（粘贴后模拟 Enter）。实际生效值：auto_paste 生效 && 平台支持
@@ -226,9 +229,34 @@ pub struct ServerState {
     pub transient_resume: Arc<Mutex<Option<TransientResume>>>,
 }
 
-impl ServerState {
+impl<R: Runtime> Clone for ServerState<R> {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+            auth_fails: self.auth_fails.clone(),
+            auth_cooldowns: self.auth_cooldowns.clone(),
+            app_handle: self.app_handle.clone(),
+            port: self.port,
+            pairing_code: self.pairing_code.clone(),
+            config: self.config.clone(),
+            session: self.session.clone(),
+            remember_next: self.remember_next.clone(),
+            status_item: self.status_item.clone(),
+            disconnect_item: self.disconnect_item.clone(),
+            auto_paste: self.auto_paste.clone(),
+            auto_send: self.auto_send.clone(),
+            auto_hide: self.auto_hide.clone(),
+            transient_resume: self.transient_resume.clone(),
+        }
+    }
+}
+
+/// 桌面应用实际使用的状态类型
+pub type AppServerState = ServerState<tauri::Wry>;
+
+impl<R: Runtime> ServerState<R> {
     pub fn new(
-        app_handle: AppHandle,
+        app_handle: AppHandle<R>,
         port: u16,
         code: String,
         auto_paste: bool,
@@ -258,7 +286,7 @@ impl ServerState {
     }
 
     /// setup 建完托盘后注入菜单项句柄
-    pub fn set_menu_items(&self, disconnect: Option<MenuItem<tauri::Wry>>) {
+    pub fn set_menu_items(&self, disconnect: Option<MenuItem<R>>) {
         *self.disconnect_item.lock().unwrap() = disconnect;
     }
 
@@ -970,8 +998,8 @@ impl ServerState {
 /// 用户无需手动点叉。断线自动重连成功时同样触发（窗口本就隐藏时 hide 为空操作）。
 ///
 /// 关掉该设置后窗口一直留在桌面（便于盯着状态、管理设备）。
-fn auto_hide_after_pairing(app: &AppHandle) {
-    let state = app.state::<Arc<Mutex<ServerState>>>();
+fn auto_hide_after_pairing<R: Runtime>(app: &AppHandle<R>) {
+    let state = app.state::<Arc<Mutex<ServerState<R>>>>();
     let server = state.lock().unwrap();
     let _ = app.emit("pairing-show", ());
     if !server.auto_hide.load(Ordering::Relaxed) {
@@ -981,7 +1009,7 @@ fn auto_hide_after_pairing(app: &AppHandle) {
     thread::spawn(move || {
         thread::sleep(std::time::Duration::from_millis(900));
         // 隐藏前再查一次：用户可能在 0.9s 内把设置关掉了
-        let state = app.state::<Arc<Mutex<ServerState>>>();
+        let state = app.state::<Arc<Mutex<ServerState<R>>>>();
         let enabled = state
             .lock()
             .unwrap()
@@ -996,7 +1024,7 @@ fn auto_hide_after_pairing(app: &AppHandle) {
 }
 
 /// 启动 TCP 服务端（在后台线程运行）
-pub fn serve(state: ServerState) {
+pub fn serve<R: Runtime>(state: ServerState<R>) {
     let port = state.port;
     let listener = match TcpListener::bind(format!("0.0.0.0:{}", port)) {
         Ok(l) => {
@@ -1023,7 +1051,7 @@ pub fn serve(state: ServerState) {
 }
 
 /// 处理单个客户端连接
-fn handle_connection(stream: TcpStream, state: ServerState) {
+fn handle_connection<R: Runtime>(stream: TcpStream, state: ServerState<R>) {
     let peer_ip = stream.peer_addr().ok().map(|a| a.ip());
 
     // TCP keepalive
@@ -1259,3 +1287,195 @@ mod tests {
     }
 }
 
+
+/// 集成测试：用**真实 TCP 连接**扮演手机，验证握手/席位/凭证这套状态机。
+///
+/// 之所以能做到无头运行：`ServerState` 对运行时泛型化后，测试里可以用 tauri 的
+/// `mock_app()`（MockRuntime）起一个实例。这里覆盖的正是"某条路径忘了做某事"
+/// 这类单测挡不住的漏洞——例如曾经的"解绑降级后没有补发续连凭证"。
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+
+    type TestState = ServerState<tauri::test::MockRuntime>;
+
+    /// 读一行并解析成 JSON
+    fn read_json(reader: &mut BufReader<TcpStream>) -> serde_json::Value {
+        let mut line = String::new();
+        let n = reader.read_line(&mut line).expect("read_line");
+        assert!(n > 0, "连接被对端关闭");
+        serde_json::from_str(line.trim()).expect("应当是一行合法 JSON")
+    }
+
+    /// 读到指定 type 的消息为止（心跳等可能交错）
+    fn read_until(reader: &mut BufReader<TcpStream>, kind: &str) -> serde_json::Value {
+        for _ in 0..8 {
+            let v = read_json(reader);
+            if v["type"] == kind {
+                return v;
+            }
+        }
+        panic!("没有等到 {kind} 消息");
+    }
+
+    /// 建一个测试用服务端：配对码已知（regenerate_code 返回明文）
+    fn test_state() -> (TestState, String) {
+        let app = tauri::test::mock_app();
+        let mut config = crate::config::Config::default();
+        let code = config.regenerate_code();
+        let state = ServerState::new(
+            app.handle().clone(),
+            8765,
+            code.clone(),
+            false, // auto_paste
+            false, // auto_send
+            true,  // auto_hide
+            config,
+        );
+        // 配对成功/降级的回调里会通过 app.state() 取它
+        app.manage(Arc::new(Mutex::new(state.clone())));
+        (state, code)
+    }
+
+    /// 起一个只接受一条连接的"服务端"，返回客户端要连的地址
+    fn spawn_server(state: TestState) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                handle_connection(stream, state);
+            }
+        });
+        addr
+    }
+
+    /// 扮演手机连上去
+    fn connect_as_phone(addr: SocketAddr) -> (TcpStream, BufReader<TcpStream>) {
+        let sock = TcpStream::connect(addr).expect("connect");
+        sock.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .expect("set_read_timeout");
+        let reader = BufReader::new(sock.try_clone().expect("clone"));
+        (sock, reader)
+    }
+
+    fn send_hello(sock: &mut TcpStream, hello: serde_json::Value) {
+        sock.write_all(format!("{hello}\n").as_bytes()).expect("write hello");
+    }
+
+    /// 主人解绑 → 连接降级为临时，**必须补发续连凭证**，且该凭证能真的用
+    /// （这条正是用户实测发现的 bug：降级来的临时会话被系统杀进程后回不来）
+    #[test]
+    fn test_downgrade_issues_resume_and_grant_works() {
+        let (state, code) = test_state();
+        state.set_remember_next(true); // 这次码配对绑定为主力
+        let (mut sock, mut reader) = connect_as_phone(spawn_server(state.clone()));
+
+        send_hello(
+            &mut sock,
+            serde_json::json!({"type":"hello","code":code,"client_id":"cid-1","device_name":"测试手机"}),
+        );
+        let ack = read_until(&mut reader, "hello_ack");
+        assert_eq!(ack["ok"], true);
+        assert_eq!(ack["session"], "primary");
+        assert!(ack["token"].is_string(), "绑定主力应下发 token");
+        assert!(ack["resume_token"].is_null(), "主力不需要续连凭证");
+
+        // 主人解绑 → 降级；发一次心跳促使连接线程处理降级标志（真机是每 5s 一次 ping）
+        state.unbind_primary();
+        sock.write_all(b"{\"type\":\"ping\"}\n").expect("write ping");
+        let ev = read_until(&mut reader, "session_downgraded");
+        let resume_token = ev["resume_token"].as_str().unwrap_or_default().to_string();
+        assert!(
+            !resume_token.is_empty(),
+            "降级为临时必须补发续连凭证，否则杀进程后回不来"
+        );
+        assert!(ev["resume_expires_in"].as_u64().unwrap_or(0) > 0, "应带窗口时长");
+
+        // 断开旧连接（释放席位），用补发的凭证续连
+        drop(sock);
+        drop(reader);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let (mut sock2, mut reader2) = connect_as_phone(spawn_server(state.clone()));
+        send_hello(
+            &mut sock2,
+            serde_json::json!({"type":"hello","resume":resume_token,
+                               "client_id":"cid-1","device_name":"测试手机"}),
+        );
+        let ack2 = read_until(&mut reader2, "hello_ack");
+        assert_eq!(ack2["ok"], true, "凭补发的凭证应当能续连");
+        assert_eq!(ack2["session"], "transient");
+        assert!(
+            ack2["resume_expires_in"].as_u64().unwrap_or(0) > 0,
+            "续连成功应回传窗口时长"
+        );
+    }
+
+    /// 扫码来的临时连接同样拿到凭证，并可用它续连（原本就正常，留作回归护栏）
+    #[test]
+    fn test_code_transient_gets_grant_and_resume_works() {
+        let (state, code) = test_state();
+        let (mut sock, mut reader) = connect_as_phone(spawn_server(state.clone()));
+
+        send_hello(
+            &mut sock,
+            serde_json::json!({"type":"hello","code":code,"client_id":"cid-t","device_name":"临时手机"}),
+        );
+        let ack = read_until(&mut reader, "hello_ack");
+        assert_eq!(ack["session"], "transient", "未勾选记住 → 临时身份");
+        let token = ack["resume_token"].as_str().unwrap_or_default().to_string();
+        assert!(!token.is_empty(), "临时会话应拿到续连凭证");
+
+        drop(sock);
+        drop(reader);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let (mut sock2, mut reader2) = connect_as_phone(spawn_server(state.clone()));
+        send_hello(
+            &mut sock2,
+            serde_json::json!({"type":"hello","resume":token,
+                               "client_id":"cid-t","device_name":"临时手机"}),
+        );
+        let ack2 = read_until(&mut reader2, "hello_ack");
+        assert_eq!(ack2["ok"], true);
+        assert_eq!(ack2["session"], "transient");
+    }
+
+    /// 续连窗口被关闭（0 分钟）时不签发凭证，降级消息也不带
+    #[test]
+    fn test_no_grant_when_resume_disabled() {
+        let (state, code) = test_state();
+        state.config.lock().unwrap().resume_ttl_min = 0;
+        state.set_remember_next(true);
+        let (mut sock, mut reader) = connect_as_phone(spawn_server(state.clone()));
+
+        send_hello(
+            &mut sock,
+            serde_json::json!({"type":"hello","code":code,"client_id":"cid-2","device_name":"测试手机"}),
+        );
+        assert_eq!(read_until(&mut reader, "hello_ack")["session"], "primary");
+
+        state.unbind_primary();
+        sock.write_all(b"{\"type\":\"ping\"}\n").expect("write ping");
+        let ev = read_until(&mut reader, "session_downgraded");
+        assert!(ev["resume_token"].is_null(), "关闭续连时不应签发凭证");
+    }
+
+    /// 陌生/伪造的续连凭证必须被拒，且不会让连接进入席位
+    #[test]
+    fn test_bogus_resume_rejected() {
+        let (state, _code) = test_state();
+        let (mut sock, mut reader) = connect_as_phone(spawn_server(state.clone()));
+
+        send_hello(
+            &mut sock,
+            serde_json::json!({"type":"hello","resume":"deadbeef","client_id":"cid-x","device_name":"陌生手机"}),
+        );
+        let ack = read_until(&mut reader, "hello_ack");
+        assert_eq!(ack["ok"], false);
+        assert_eq!(ack["status"], "unauthorized");
+        assert!(state.session.lock().unwrap().is_none(), "不应占用席位");
+    }
+}

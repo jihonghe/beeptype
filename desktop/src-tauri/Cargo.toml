@@ -32,6 +32,11 @@ x11rb = "0.13"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# 测试用：tauri 的 mock 运行时（无头，不需要显示器），用来做"真实 TCP 连接"的
+# 集成测试——覆盖握手/席位/凭证这套状态机（曾经漏掉过"降级必须补发凭证"）
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
+
 
 # Release 体积优化（Tauri 官方推荐）
 [profile.release]

@@ -6,6 +6,7 @@
 //! 3. 完全匹配 → 对请求来源单播应答，busy 只给布尔值，不泄露占用者。
 
 use crate::server::ServerState;
+use tauri::Runtime;
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::net::UdpSocket;
@@ -45,7 +46,7 @@ struct DiscCapabilities {
 }
 
 /// 启动 UDP 发现监听（常驻线程；绑定失败直接退出并记日志，不影响 TCP 主服务）
-pub fn serve_discovery(state: ServerState) {
+pub fn serve_discovery<R: Runtime>(state: ServerState<R>) {
     // 发现端口必须与 TCP 端口一致：手机只知道一个端口，广播与应答都围绕它
     let port = state
         .config
@@ -83,7 +84,7 @@ pub fn serve_discovery(state: ServerState) {
 }
 
 /// 解析并门控请求；通过则构造应答 JSON 字符串，否则 None。
-fn build_response(state: &ServerState, payload: &[u8]) -> Option<String> {
+fn build_response<R: Runtime>(state: &ServerState<R>, payload: &[u8]) -> Option<String> {
     let req: DiscRequest = serde_json::from_slice(payload).ok()?;
     if req.msg_type != "vl_disc_req" || req.protocol != PROTOCOL_VERSION {
         return None;

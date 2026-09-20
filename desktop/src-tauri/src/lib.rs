@@ -11,7 +11,7 @@ use log::info;
 use qrcode::render::svg;
 use qrcode::QrCode;
 use serde::Serialize;
-use server::{lan_ip, qr_content, serve, ConnState, ServerState};
+use server::{lan_ip, qr_content, serve, AppServerState, ConnState};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use tauri::{
@@ -67,7 +67,7 @@ struct SettingsInfo {
     version: String,
 }
 
-fn build_pairing_info(server: &ServerState) -> PairingInfo {
+fn build_pairing_info(server: &AppServerState) -> PairingInfo {
     let ip = lan_ip().unwrap_or_else(|| "127.0.0.1".to_string());
     let (connected, connected_name, session_is_primary) = server.session_summary();
     let (has_primary, primary_name) = {
@@ -132,7 +132,7 @@ fn show_main_window(app: &tauri::AppHandle) {
 }
 
 #[tauri::command]
-fn get_status(state: tauri::State<'_, Arc<Mutex<ServerState>>>) -> String {
+fn get_status(state: tauri::State<'_, Arc<Mutex<AppServerState>>>) -> String {
     let server = state.lock().unwrap();
     let conn_state = server.state.lock().unwrap();
     match &*conn_state {
@@ -143,26 +143,26 @@ fn get_status(state: tauri::State<'_, Arc<Mutex<ServerState>>>) -> String {
 
 #[tauri::command]
 fn get_pairing_info(
-    state: tauri::State<'_, Arc<Mutex<ServerState>>>,
+    state: tauri::State<'_, Arc<Mutex<AppServerState>>>,
 ) -> PairingInfo {
     let server = state.lock().unwrap();
     build_pairing_info(&server)
 }
 
 #[tauri::command]
-fn set_remember_next(value: bool, state: tauri::State<'_, Arc<Mutex<ServerState>>>) {
+fn set_remember_next(value: bool, state: tauri::State<'_, Arc<Mutex<AppServerState>>>) {
     let server = state.lock().unwrap();
     server.set_remember_next(value);
 }
 
 #[tauri::command]
-fn disconnect_session(state: tauri::State<'_, Arc<Mutex<ServerState>>>) {
+fn disconnect_session(state: tauri::State<'_, Arc<Mutex<AppServerState>>>) {
     let server = state.lock().unwrap();
     server.disconnect_current();
 }
 
 #[tauri::command]
-fn unbind_primary(state: tauri::State<'_, Arc<Mutex<ServerState>>>) {
+fn unbind_primary(state: tauri::State<'_, Arc<Mutex<AppServerState>>>) {
     let server = state.lock().unwrap();
     server.unbind_primary();
 }
@@ -171,7 +171,7 @@ fn unbind_primary(state: tauri::State<'_, Arc<Mutex<ServerState>>>) {
 #[tauri::command]
 fn get_settings(
     app: tauri::AppHandle,
-    state: tauri::State<'_, Arc<Mutex<ServerState>>>,
+    state: tauri::State<'_, Arc<Mutex<AppServerState>>>,
 ) -> SettingsInfo {
     let server = state.lock().unwrap();
     let auto_paste = server.auto_paste.load(Ordering::Relaxed);
@@ -221,7 +221,7 @@ fn set_window_height(app: tauri::AppHandle, height: f64) {
 #[tauri::command]
 fn set_auto_paste(
     value: bool,
-    state: tauri::State<'_, Arc<Mutex<ServerState>>>,
+    state: tauri::State<'_, Arc<Mutex<AppServerState>>>,
 ) {
     let server = state.lock().unwrap();
     let effective = value && paste::auto_paste_supported();
@@ -243,7 +243,7 @@ fn set_auto_paste(
 #[tauri::command]
 fn set_auto_send(
     value: bool,
-    state: tauri::State<'_, Arc<Mutex<ServerState>>>,
+    state: tauri::State<'_, Arc<Mutex<AppServerState>>>,
 ) {
     let server = state.lock().unwrap();
     let paste_on = server.auto_paste.load(Ordering::Relaxed);
@@ -261,7 +261,7 @@ fn set_auto_send(
 #[tauri::command]
 fn set_auto_hide(
     value: bool,
-    state: tauri::State<'_, Arc<Mutex<ServerState>>>,
+    state: tauri::State<'_, Arc<Mutex<AppServerState>>>,
 ) {
     let server = state.lock().unwrap();
     server.auto_hide.store(value, Ordering::Relaxed);
@@ -276,7 +276,7 @@ fn set_auto_hide(
 #[tauri::command]
 fn set_resume_ttl(
     minutes: u32,
-    state: tauri::State<'_, Arc<Mutex<ServerState>>>,
+    state: tauri::State<'_, Arc<Mutex<AppServerState>>>,
 ) {
     let server = state.lock().unwrap();
     let mut config = server.config.lock().unwrap();
@@ -290,7 +290,7 @@ fn set_resume_ttl(
 fn set_autostart(
     app: tauri::AppHandle,
     value: bool,
-    state: tauri::State<'_, Arc<Mutex<ServerState>>>,
+    state: tauri::State<'_, Arc<Mutex<AppServerState>>>,
 ) -> Result<(), String> {
     let autolaunch = app.autolaunch();
     let result = if value {
@@ -368,7 +368,7 @@ pub fn run() {
             let effective_auto_paste = auto_paste_config && paste_supported;
             let effective_auto_send = auto_send_config && effective_auto_paste && send_supported;
             info!("Auto-send supported: {send_supported}, effective: {effective_auto_send}");
-            let server_state = ServerState::new(
+            let server_state = AppServerState::new(
                 app.handle().clone(),
                 port,
                 code,
@@ -416,7 +416,7 @@ pub fn run() {
                     "quit" => app.exit(0),
                     "show_qr" => show_main_window(app),
                     "disconnect" => {
-                        let state = app.state::<Arc<Mutex<ServerState>>>();
+                        let state = app.state::<Arc<Mutex<AppServerState>>>();
                         let server = state.lock().unwrap();
                         server.disconnect_current();
                     }

@@ -588,7 +588,7 @@ log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
 
 ## 8. 测试与验证
 
-**Rust 单测（27 个，`cargo test`）**
+**Rust 测试（31 个，`cargo test`）**
 
 | 文件 | 覆盖 |
 |---|---|
@@ -599,6 +599,10 @@ log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
 | `paste.rs` | 回车余量的边界（基准值、按长度递增、上限、整体 <1s） |
 | `winicon.rs` | 图标数据格式（`[宽, 高, ARGB...]` 长度自洽、含不透明像素） |
 | 续连相关 | 续连凭证校验（哈希/client_id/过期三者缺一不可）、窗口边界、协议往返（含 `resume` / `resume_expires_in`）、`resume_ttl_min` 默认值与旧配置缺省 |
+
+**集成测试（4 个，`server::integration_tests`）**：用**真实 TCP 连接**扮演手机，驱动完整的握手/席位/凭证状态机——能挡住的正是"某条路径忘了做某事"这类单测覆盖不到的漏洞。
+
+做法：`ServerState` 对运行时泛型化（`ServerState<R: Runtime>`，桌面固定用 `AppServerState = ServerState<Wry>`），测试里换用 tauri 的 `mock_app()`（MockRuntime）即可无头运行，因此 CI 上也能跑。覆盖：解绑降级必须补发续连凭证且该凭证可用（用户实测发现的 bug，已验证"撤掉修复即失败"）、扫码临时会话拿到凭证并可续连、关闭续连时不签发、伪造凭证被拒且不占席位。
 
 **Flutter 测试**：`app/test/widget_test.dart` 覆盖 `TcpMessage` 编解码（JSON 行、字段往返、畸形行返回 null）。
 
