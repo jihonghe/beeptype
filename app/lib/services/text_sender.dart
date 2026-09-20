@@ -22,14 +22,15 @@ class TextSender {
   TcpService get tcp => _tcp;
   StorageService get storage => _storage;
 
-  /// 硬件指纹（Android ANDROID_ID）。从原生通道一次性获取，缓存在内存。
-  /// 同签名 APP 重装不变；用于 PC 端识别"重装后仍是同一台手机"。
+  /// 硬件指纹。Android: ANDROID_ID；iOS: Keychain 持久化 UUID。
+  /// 两端都在同一个 MethodChannel('beetype/device') 上响应 getHardwareId。
+  /// 跨 APP 重装稳定，用于 PC 端识别"重装后仍是同一台手机"。
   String? _hardwareId;
   Future<String?> get hardwareId async {
     if (_hardwareId != null) return _hardwareId;
     try {
       _hardwareId = await const MethodChannel('beetype/device')
-          .invokeMethod<String>('getAndroidId');
+          .invokeMethod<String>('getHardwareId');
     } catch (_) {
       _hardwareId = null;
     }

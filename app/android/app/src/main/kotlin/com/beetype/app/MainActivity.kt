@@ -13,7 +13,7 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "getDeviceName" -> result.success(deviceName())
-                    "getAndroidId" -> result.success(androidId())
+                    "getHardwareId" -> result.success(hardwareId())
                     else -> result.notImplemented()
                 }
             }
@@ -70,10 +70,9 @@ class MainActivity : FlutterActivity() {
 
     /**
      * 硬件指纹：Android ID（Settings.Secure）。
-     * 同签名 APP 重装不变、系统升级不变、无需特殊权限；
-     * 恢复出厂设置或换签名 APP 才会变（预期行为）。
+     * 同签名 APP 重装不变、系统升级不变、无需特殊权限。
      */
-    private fun androidId(): String? = try {
+    private fun hardwareId(): String? = try {
         Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
             ?.trim()
             ?.takeIf { it.isNotEmpty() }
