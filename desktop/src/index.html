@@ -299,6 +299,16 @@
             </div>
             <div class="setting-row">
                 <div class="setting-text">
+                    <div class="setting-title">粘贴后自动发送</div>
+                    <div class="setting-sub" id="as-note">粘贴完成后自动回车发送到聊天框</div>
+                </div>
+                <label class="switch">
+                    <input type="checkbox" id="set-autosend">
+                    <span class="track"></span>
+                </label>
+            </div>
+            <div class="setting-row">
+                <div class="setting-text">
                     <div class="setting-title">开机自动启动</div>
                     <div class="setting-sub">登录系统后在后台运行 BeeType</div>
                 </div>
@@ -544,10 +554,15 @@
             }
             const ap = document.getElementById('set-autopaste');
             const as = document.getElementById('set-autostart');
+            const ans = document.getElementById('set-autosend');
             const apNote = document.getElementById('ap-note');
+            const asNote = document.getElementById('as-note');
             ap.checked = !!s.autoPaste;
             as.checked = !!s.autostart;
+            ans.checked = !!s.autoSend;
             ap.disabled = !s.autoPasteSupported;
+            // 自动发送依赖自动粘贴：autoPaste 关 → autoSend 也 disabled
+            ans.disabled = !s.autoPaste || !s.autoSendSupported;
             if (!s.autoPasteSupported) {
                 apNote.textContent = '当前桌面会话不支持全局按键模拟（如 Wayland），自动粘贴不可用';
                 apNote.classList.add('bad');
@@ -555,9 +570,35 @@
                 apNote.textContent = '模拟快捷键把剪贴板内容粘贴到当前光标处';
                 apNote.classList.remove('bad');
             }
+            if (!s.autoSendSupported) {
+                asNote.textContent = '当前会话不支持自动发送';
+                asNote.classList.add('bad');
+            } else if (!s.autoPaste) {
+                asNote.textContent = '请先开启自动粘贴';
+                asNote.classList.add('bad');
+            } else {
+                asNote.textContent = '粘贴完成后自动回车发送到聊天框';
+                asNote.classList.remove('bad');
+            }
             ap.onchange = async () => {
-                try { await invoke('set_auto_paste', { value: ap.checked }); }
-                catch (e) { alert('设置失败：' + e); ap.checked = !ap.checked; }
+                try {
+                    await invoke('set_auto_paste', { value: ap.checked });
+                    // 刷新设置——后端会联动关 auto_send
+                    const ss = await invoke('get_settings');
+                    ans.checked = !!ss.autoSend;
+                    ans.disabled = !ss.autoPaste || !ss.autoSendSupported;
+                    if (!ss.autoPaste) {
+                        asNote.textContent = '请先开启自动粘贴';
+                        asNote.classList.add('bad');
+                    } else {
+                        asNote.textContent = '粘贴完成后自动回车发送到聊天框';
+                        asNote.classList.remove('bad');
+                    }
+                } catch (e) { alert('设置失败：' + e); ap.checked = !ap.checked; }
+            };
+            ans.onchange = async () => {
+                try { await invoke('set_auto_send', { value: ans.checked }); }
+                catch (e) { alert('设置失败：' + e); ans.checked = !ans.checked; }
             };
             as.onchange = async () => {
                 try { await invoke('set_autostart', { value: as.checked }); }

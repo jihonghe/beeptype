@@ -20,6 +20,9 @@ const PRE_PASTE_DELAY: Duration = Duration::from_millis(50);
 /// 向上遍历窗口树的最大层数（焦点常落在终端内部的 VTE 子窗口上）
 const MAX_WINDOW_TRAVERSAL: u32 = 20;
 
+/// 发 Enter 前的等待：让粘贴内容先渲染进目标窗口
+const PRE_ENTER_DELAY: Duration = Duration::from_millis(50);
+
 /// WM_CLASS 精确命中这些值时视为终端（名字不含 "terminal" 的异类）。
 /// 其余终端只要类名包含 "terminal" 即自动覆盖（deepin-terminal、
 /// gnome-terminal、xfce4-terminal、terminator、tilix、ptyxis 等）。
@@ -72,6 +75,21 @@ pub fn auto_paste_supported() -> bool {
         return false;
     }
     true
+}
+
+/// 粘贴完成后模拟 Enter 键发送。
+/// 必须在 simulate_paste() 成功之后调用；阻塞约 50ms。
+pub fn simulate_enter() -> Result<(), String> {
+    std::thread::sleep(PRE_ENTER_DELAY);
+    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| format!("Enigo init: {e}"))?;
+    enigo
+        .key(Key::Unicode('\r'), Direction::Click)
+        .map_err(|e| format!("enter key: {e}"))
+}
+
+/// 自动发送的可用条件和自动粘贴完全一致（同依赖 enigo + 平台输入注入）。
+pub fn auto_send_supported() -> bool {
+    auto_paste_supported()
 }
 
 /// 向当前焦点窗口发送"粘贴"快捷键：

@@ -14,6 +14,9 @@ pub struct Config {
     /// 收到手机文本后自动模拟粘贴到光标处（默认开启）
     #[serde(default = "default_true")]
     pub auto_paste: bool,
+    /// 粘贴完成后自动发送（模拟 Enter）。仅在 auto_paste=true 时生效。
+    #[serde(default)]
+    pub auto_send: bool,
     pub code_hash: Option<String>,
     pub code_expires_at: Option<u64>,
 
@@ -86,6 +89,7 @@ impl Default for Config {
             port: 8765,
             autostart: false,
             auto_paste: true,
+            auto_send: false,
             code_hash: None,
             code_expires_at: None,
             device_id: String::new(),

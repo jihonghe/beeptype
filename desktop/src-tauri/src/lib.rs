@@ -43,8 +43,12 @@ struct PairingInfo {
 struct SettingsInfo {
     /// 自动粘贴是否实际生效（用户开关 && 当前会话支持）
     auto_paste: bool,
+    /// 自动发送是否实际生效（auto_paste 生效 && auto_send 开关 && 平台支持）
+    auto_send: bool,
     /// 当前桌面会话是否支持全局按键模拟（Wayland 等不支持）
     auto_paste_supported: bool,
+    /// 当前会话是否支持自动发送（条件和 auto_paste 完全一致）
+    auto_send_supported: bool,
     /// 开机自启是否开启（读系统实际状态）
     autostart: bool,
     /// 是否已绑定主力手机
@@ -181,6 +185,7 @@ fn get_settings(
 ) -> SettingsInfo {
     let server = state.lock().unwrap();
     let auto_paste = server.auto_paste.load(Ordering::Relaxed);
+    let auto_send = server.auto_send.load(Ordering::Relaxed);
     let (has_primary, primary_name) = {
         let config = server.config.lock().unwrap();
         (
@@ -192,7 +197,9 @@ fn get_settings(
     let autostart = app.autolaunch().is_enabled().unwrap_or(false);
     SettingsInfo {
         auto_paste,
+        auto_send,
         auto_paste_supported: paste::auto_paste_supported(),
+        auto_send_supported: paste::auto_send_supported(),
         autostart,
         has_primary,
         primary_name,
@@ -215,7 +222,8 @@ fn set_window_height(app: tauri::AppHandle, height: f64) {
     }
 }
 
-/// 切换自动粘贴：运行态存"用户开关 && 平台支持"，配置只存用户意愿
+/// 切换自动粘贴：运行态存"用户开关 && 平台支持"，配置只存用户意愿；
+/// 关闭自动粘贴时联动关闭自动发送（Enter 没东西发了）
 #[tauri::command]
 fn set_auto_paste(
     value: bool,
@@ -224,10 +232,34 @@ fn set_auto_paste(
     let server = state.lock().unwrap();
     let effective = value && paste::auto_paste_supported();
     server.auto_paste.store(effective, Ordering::Relaxed);
+    // 依赖关系：auto_paste 关 → auto_send 也必须关
+    if !value {
+        server.auto_send.store(false, Ordering::Relaxed);
+    }
     let mut config = server.config.lock().unwrap();
     config.auto_paste = value;
+    if !value {
+        config.auto_send = false;
+    }
     let _ = config.save();
     info!("Auto-paste toggled: {value} (effective: {effective})");
+}
+
+/// 切换自动发送：运行态存"用户开关 && auto_paste 生效 && 平台支持"，配置存用户意愿
+#[tauri::command]
+fn set_auto_send(
+    value: bool,
+    state: tauri::State<'_, Arc<Mutex<ServerState>>>,
+) {
+    let server = state.lock().unwrap();
+    let paste_on = server.auto_paste.load(Ordering::Relaxed);
+    let send_supported = paste::auto_send_supported();
+    let effective = value && paste_on && send_supported;
+    server.auto_send.store(effective, Ordering::Relaxed);
+    let mut config = server.config.lock().unwrap();
+    config.auto_send = value;
+    let _ = config.save();
+    info!("Auto-send toggled: {value} (effective: {effective}, paste_on: {paste_on})");
 }
 
 /// 切换开机自启：操作系统自启项 + 持久化用户意愿
@@ -283,6 +315,7 @@ pub fn run() {
             let code = config.regenerate_code();
             let autostart_on = config.autostart;
             let auto_paste_config = config.auto_paste;
+            let auto_send_config = config.auto_send;
             let ip = lan_ip().unwrap_or_else(|| "127.0.0.1".to_string());
             info!("BeeType starting on {}:{} (device {})", ip, port, config.device_name);
 
@@ -303,10 +336,19 @@ pub fn run() {
 
             // 创建服务端状态
             let paste_supported = paste::auto_paste_supported();
+            let send_supported = paste::auto_send_supported();
             info!("Auto-paste supported on this session: {paste_supported}");
             let effective_auto_paste = auto_paste_config && paste_supported;
-            let server_state =
-                ServerState::new(app.handle().clone(), port, code, effective_auto_paste, config);
+            let effective_auto_send = auto_send_config && effective_auto_paste && send_supported;
+            info!("Auto-send supported: {send_supported}, effective: {effective_auto_send}");
+            let server_state = ServerState::new(
+                app.handle().clone(),
+                port,
+                code,
+                effective_auto_paste,
+                effective_auto_send,
+                config,
+            );
             let shared_state = Arc::new(Mutex::new(server_state.clone()));
 
             app.manage(shared_state.clone());
@@ -390,6 +432,7 @@ pub fn run() {
             unbind_primary,
             get_settings,
             set_auto_paste,
+            set_auto_send,
             set_autostart,
             set_window_height
         ])

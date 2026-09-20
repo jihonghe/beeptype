@@ -188,12 +188,21 @@ pub struct ServerState {
     pub disconnect_item: Arc<Mutex<Option<MenuItem<tauri::Wry>>>>,
     /// 自动粘贴开关（实际生效值：用户开关 && 平台支持）
     pub auto_paste: Arc<AtomicBool>,
+    /// 自动发送开关（粘贴后模拟 Enter）。实际生效值：auto_paste 生效 && 平台支持
+    pub auto_send: Arc<AtomicBool>,
     /// 主窗口是否为用户手动打开：手动打开时连接成功不自动收回窗口
     pub manual_window: Arc<AtomicBool>,
 }
 
 impl ServerState {
-    pub fn new(app_handle: AppHandle, port: u16, code: String, auto_paste: bool, config: Config) -> Self {
+    pub fn new(
+        app_handle: AppHandle,
+        port: u16,
+        code: String,
+        auto_paste: bool,
+        auto_send: bool,
+        config: Config,
+    ) -> Self {
         // 扫码默认就是临时连接：勾选"绑为主力"必须是用户的主动行为
         let remember_default = false;
         Self {
@@ -209,6 +218,7 @@ impl ServerState {
             status_item: Arc::new(Mutex::new(None)),
             disconnect_item: Arc::new(Mutex::new(None)),
             auto_paste: Arc::new(AtomicBool::new(auto_paste)),
+            auto_send: Arc::new(AtomicBool::new(auto_send)),
             manual_window: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -721,7 +731,17 @@ impl ServerState {
             .unwrap_or(false);
         if enabled && crate::paste::auto_paste_supported() && !own_window_focused {
             match crate::paste::simulate_paste() {
-                Ok(()) => pasted = true,
+                Ok(()) => {
+                    pasted = true;
+                    // 自动发送：粘贴成功后模拟 Enter
+                    let auto_send = self.auto_send.load(Ordering::Relaxed);
+                    if auto_send && crate::paste::auto_send_supported() {
+                        match crate::paste::simulate_enter() {
+                            Ok(()) => info!("Auto-send: Enter sent"),
+                            Err(e) => warn!("Auto-send failed: {}", e),
+                        }
+                    }
+                }
                 Err(e) => warn!("Auto-paste failed (text stays in clipboard): {}", e),
             }
         } else if enabled && own_window_focused {
