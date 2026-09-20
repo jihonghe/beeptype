@@ -120,7 +120,7 @@ flutter install --release  # 装 release 包到真机
 
 - [ ] iOS 手机端适配（扫码、硬件指纹 Keychain 持久化）
 - [ ] Linux Wayland 会话：评估 RemoteDesktop 门户自动授权可行性
-- [ ] GitHub Release 自动构建（CI）
+- [x] GitHub Release 自动构建（CI）
 - [ ] 桌面通知（新手机连接、token 认证失败提示）
 - [ ] 历史文本快捷重发（手机端）
 
