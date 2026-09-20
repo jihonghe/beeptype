@@ -41,7 +41,7 @@ pub enum Message {
     /// PC → 手机端：握手响应。
     /// status: "ok" | "occupied" | "bad_code" | "unauthorized" | "cooldown"
     /// session: "primary" | "transient"（仅成功时出现）
-    /// token: 仅新绑定主力的那一次响应出现，明文仅此下发一次
+    /// token: 仅新绑定常用设备的那一次响应出现，明文仅此下发一次
     #[serde(rename = "hello_ack")]
     HelloAck {
         ok: bool,
@@ -91,11 +91,17 @@ pub enum Message {
     #[serde(rename = "ping")]
     Ping,
 
-    /// PC → 手机端：心跳响应
+    /// PC → 手机端：心跳响应。
+    /// session 是 PC 侧的**权威身份**（"primary" 常用设备 / "transient" 临时设备），
+    /// 手机端据此自愈：身份推送万一丢了，一次心跳（约 5 秒）内也能纠正过来。
+    /// 只对真正持席的连接给出；等待接管或不持席时省略（手机收到空值即忽略，不做推断）。
     #[serde(rename = "pong")]
-    Pong,
+    Pong {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
+    },
 
-    /// 手机端 → PC：主力机请求接管被占用的电脑
+    /// 手机端 → PC：常用设备请求接管被占用的电脑
     #[serde(rename = "takeover")]
     Takeover,
 
@@ -117,7 +123,7 @@ pub enum Message {
     #[serde(rename = "session_ended")]
     SessionEnded { reason: String },
 
-    /// PC → 手机：把这台手机设为主力（设置页「常用手机」里点"设为主力手机"）。
+    /// PC → 手机：把这台手机设为常用设备（设置页「常用设备」里点"设为常用设备"）。
     /// token 为长期凭证，明文仅此一次；手机端应像扫码绑定那样落盘，并回 promoted_ack。
     #[serde(rename = "promoted")]
     Promoted {
@@ -130,13 +136,13 @@ pub enum Message {
         capabilities: Option<Capabilities>,
     },
 
-    /// 手机 → PC：已保存主力凭证
+    /// 手机 → PC：已保存常用设备凭证
     #[serde(rename = "promoted_ack")]
     PromotedAck,
 
-    /// PC → 手机端：主力已解绑，当前连接降级为临时（会话保持，不断开）。
-    /// 手机端收到后应删除本地凭证、把当前会话标记为临时，并保存随之补发的续连凭证
-    /// （否则"降级来的临时会话"就享受不到断线续连，与扫码临时连接不一致）。
+    /// PC → 手机端：常用设备已解绑，当前连接降级为临时设备（会话保持，不断开）。
+    /// 手机端收到后应删除本地凭证、把当前会话标记为临时设备，并保存随之补发的续连凭证
+    /// （否则"降级来的临时设备"就享受不到断线续连，与扫码临时设备不一致）。
     #[serde(rename = "session_downgraded")]
     SessionDowngraded {
         /// 降级后补发的续连凭证；续连窗口被关掉时为空
@@ -153,6 +159,13 @@ fn ack_status_default() -> String {
 
 impl Message {
     /// 编码为 JSON 行（以 \n 结尾）
+    /// 心跳响应（session: Some("primary"|"transient") 或 None 表示不给身份声明）
+    pub fn pong(session: Option<&str>) -> Self {
+        Message::Pong {
+            session: session.map(|s| s.to_string()),
+        }
+    }
+
     pub fn encode(&self) -> Result<String, serde_json::Error> {
         let json = serde_json::to_string(self)?;
         Ok(format!("{}\n", json))
@@ -201,7 +214,7 @@ impl Message {
         }
     }
 
-    /// 构造"转正为主力"的推送（长期凭证明文仅此一次）
+    /// 构造"设为常用设备"的推送（长期凭证明文仅此一次）
     pub fn promoted(
         token: &str,
         device_id: &str,
@@ -230,7 +243,7 @@ impl Message {
     }
 
     /// 构造成功的握手响应
-    /// `resume`: (续连凭证明文, 窗口秒数)。仅临时会话用；主力传 None。
+    /// `resume`: (续连凭证明文, 窗口秒数)。仅临时会话用；常用设备传 None。
     pub fn hello_ack_ok(
         session: &str,
         device_id: &str,

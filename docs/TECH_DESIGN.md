@@ -33,7 +33,7 @@ v0.1 设计稿与最终实现的差异汇总在[第 9 节](#9-与-v01-设计稿�
 | | 手机端 | PC 端 |
 |---|---|---|
 | 本机身份 | `client_id`（首启生成的 UUIDv4）+ `hardware_id`（Android ANDROID_ID / iOS Keychain UUID） | `device_id`（首启生成的 UUIDv4）+ `device_name`（hostname） |
-| 对端凭证 | 已绑定电脑列表（含明文 token） | 唯一主力手机记录（含 `token_hash`） |
+| 对端凭证 | 已绑定电脑列表（含明文 token） | 唯一常用设备记录（含 `token_hash`） |
 | 临时关系 | 不落**长期**凭证；仅落一条短期续连记录（窗口期内有效，过期即清） | 仅内存（续连记录的哈希）；进程退出即消失 |
 
 **端口**：TCP 与 UDP 使用同一个端口号（`config.port`，默认 8765）。TCP 承载全部业务消息，UDP 只承载凭证门控的设备发现。
@@ -86,12 +86,12 @@ pub struct Config {
     #[serde(default)]
     pub auto_send: bool,              // 默认 false，依赖 auto_paste
     pub auto_hide: bool,              // 默认 true：手机连上后自动隐藏主窗口到托盘
-    pub resume_ttl_min: u32,          // 默认 5：临时连接断线后免扫码续连的窗口（分钟），0=关闭
+    pub resume_ttl_min: u32,          // 默认 5：临时设备断线后免扫码续连的窗口（分钟），0=关闭
     pub code_hash: Option<String>,    // SHA-256(配对码)
     pub code_expires_at: Option<u64>, // 毫秒时间戳
     pub device_id: String,            // 本机 UUIDv4
     pub device_name: String,          // 默认 hostname
-    pub primary: Option<PrimaryDevice>, // 唯一主力手机（None = 主力位空缺）
+    pub primary: Option<PrimaryDevice>, // 唯一常用设备（None = 还没有常用设备）
 }
 
 pub struct PrimaryDevice {
@@ -116,7 +116,7 @@ pub struct PrimaryDevice {
 | `bind_primary(client_id, name, ip, hardware_id)` | 生成 32 字节 token，存 `token_hash`，返回明文 token（仅此一次下发） |
 | `verify_token(client_id, token, name, ip)` | `client_id` 与 `token_hash` 双匹配；命中时刷新 `name`/`last_ip`/`last_seen` 并落盘 |
 | `matches_discovery(client_id, proof)` | 纯比对不写盘（UDP 发现高频路径专用，避免反复落盘） |
-| `unbind_primary()` | 清空主力记录，旧凭证立即失效 |
+| `unbind_primary()` | 清空常用设备记录，旧凭证立即失效 |
 
 随机与哈希都是手写实现（`/dev/urandom` + `sha2`），没有引入 uuid/rand 依赖；旧版配置里的未知字段（如 `paired_device`）由 serde 默认忽略，向后兼容。
 
@@ -131,11 +131,11 @@ pub struct PrimaryDevice {
 |---|---|
 | `hello` / `hello_ack` | 手机 → PC / PC → 手机 |
 | `text` / `ack` | 手机 → PC / PC → 手机 |
-| `ping` / `pong` | 手机 → PC / PC → 手机 |
+| `ping` / `pong` | 手机 → PC / PC → 手机（`pong.session` 回报权威身份，见 §3.2） |
 | `takeover` / `takeover_ack` | 手机 → PC / PC → 手机 |
 | `bye` / `bye_ack` | 手机 → PC / PC → 手机 |
 | `session_ended` | PC → 手机（被踢前通知） |
-| `session_downgraded` | PC → 手机（解绑降级，会话保持） |
+| `session_downgraded` | PC → 手机（解绑降级，会话保持；由设置命令线程当场发出） |
 
 ### 2.4 server.rs — TCP 服务、认证与席位
 
@@ -164,9 +164,9 @@ pub struct ActiveSession {
 
 一台 PC 同时只有一个席位（单光标，单会话）。持有者身份用 **`client_id` + `Arc::ptr_eq(kick)` 双比对**判定，因此新连接顶替席位后，旧连接的退出清理不会误清新席位。
 
-`KICK_TAKEOVER = 1`（主力接管）、`KICK_DISCONNECT = 2`（托盘/窗口断开）、`KICK_REPLACED = 4`（同主力僵尸连接被替换），映射为 `session_ended.reason` 的 `owner_takeover` / `owner_disconnect` / `replaced`。
+`KICK_TAKEOVER = 1`（常用设备接管）、`KICK_DISCONNECT = 2`（托盘/窗口断开）、`KICK_REPLACED = 4`（同常用设备僵尸连接被替换），映射为 `session_ended.reason` 的 `owner_takeover` / `owner_disconnect` / `replaced`。
 
-**写入统一走一把锁**（`SharedWriter = Arc<Mutex<TcpStream>>`）：连接线程的回复与**命令线程的推送**（例如"设为主力手机"要从设置页往活动连接里推凭证）共用同一个句柄，避免两条线程各持 socket 克隆并发写、把一条 JSON 行写交错。踢人用的 `wake` 仍是独立克隆（只做 `shutdown(Read)`）。
+**写入统一走一把锁**（`SharedWriter = Arc<Mutex<TcpStream>>`）：连接线程的回复与**命令线程的推送**（例如"设为常用设备"要从设置页往活动连接里推凭证）共用同一个句柄，避免两条线程各持 socket 克隆并发写、把一条 JSON 行写交错。踢人用的 `wake` 仍是独立克隆（只做 `shutdown(Read)`）。
 
 踢人不靠等对端心跳：`kick_session()` 置标志后立即 `shutdown(Shutdown::Read)`，让阻塞在 `read_line` 的连接线程马上醒来自行发 `session_ended` 并退出，延迟从最长 5s 降到毫秒级。
 
@@ -203,19 +203,39 @@ accept
 续连（hello{resume, client_id}）：哈希与 client_id 都命中且未过期 → 接入临时席位，
                            并把窗口期往后推（滑动窗口）
 失效：TTL 到期 / PC 进程退出 / 主人点托盘"断开当前手机" / 手机端发 bye
-     （席位被占时按既有规则拒绝：临时续连不享受主力待遇）
+     （席位被占时按既有规则拒绝：临时续连不享受常用设备待遇）
 
-降级补发：主人解绑主力时，那条在线连接会降级为临时（`session_downgraded`）——
+降级补发：主人解绑常用设备时，那条在线连接会降级为临时（`session_downgraded`）——
 它同样是"临时会话"，因此**必须一并补发续连凭证**并放进该消息（字段 `resume_token` /
 `resume_expires_in`）。这一步曾经被漏掉，导致"降级来的临时会话"被杀进程后回不来
-（扫码来的临时连接却正常），用户实测发现。
+（扫码来的临时设备却正常），用户实测发现。
 ```
 
 窗口期由设置项 `resume_ttl_min`（默认 5 分钟，可关闭）决定，每次心跳与发文字都会刷新——
 "人还在用就一直有效，停手超过窗口才失效"。窗口时长通过 `hello_ack.resume_expires_in`
 告知手机（PC 是权威方）。测试可用环境变量 `BEETYPE_RESUME_TTL_SECS` 覆盖（不进 UI）。
 
-**token 分支（主力免配重连）**
+**身份标志与降级/升级通知（A+C 两处修复）**
+
+席位的身份不是散落的多个 bool，而是**一个跨线程共享的原子量**：`ActiveSession.identity`
+（true = 常用设备）。命令线程写它（解绑降级 / 设为常用设备），连接线程读它（决定心跳里
+回报什么身份、临时设备要不要刷新续连窗口）。唯一真源，避免"两处各存一个、忘了同步"。
+
+身份变化的消息**由设置命令线程当场发出**（`unbind_primary` / `promote_current_session`
+都走席位里的 `SharedWriter`，与连接线程的回复共用同一把写锁，不会写交错）：
+
+- 为什么不在连接线程里发：它平时阻塞在 socket 读上，靠轮询发现标志要等最长 5 秒
+  （下一次心跳或 socket 读超时），用户看到的就是"手机上标签慢半拍"。
+- 为什么不能只置一个"发过了"的布尔闩：那条闩只置位、不复位，于是同一条连接里
+  **只有第一次解绑发得出去**——"解绑 → 设为常用设备 → 再解绑"时，后面几次电脑端一声不吭，
+  手机端标签永远停在"常用设备"。旧实现正是这样，用户实测发现。
+
+另有一层兜底：心跳（`pong`）带回权威身份（`session: "primary" | "transient"`），手机端
+发现与自己认知不一致就当场纠正——即使某次推送因为任何原因丢了，一个心跳周期（约 5 秒）
+内标签也会自愈。只有真正持席的连接才给身份声明：等待接管、未认证的连接一律省略
+（手机收到空值就忽略，绝不瞎猜）。
+
+**token 分支（常用设备免配重连）**
 
 1. `verify_token(client_id, token, ...)` 失败 → 记一次失败，回 `unauthorized`。
 2. 成功则清空该 IP 的失败计数，按下述仲裁结果处理：席位空闲 → 直接接入（`session = primary`）；席位被**同一 `client_id`** 占着（僵尸重连）→ 踢旧接新；席位被他人（临时方）占用 → 回 `status = "occupied"`，**连接保持**并标记 `waiting_takeover`，等手机发 `takeover`。
@@ -225,16 +245,16 @@ accept
 1. `verify_code(code)` 失败 → 记失败，回 `bad_code`。
 2. 席位已被占用 → 回 `occupied`，不认证、不绑定、**不换码**。
 3. 席位空闲时判定身份：
-   - `returning`：来者的 `client_id` 命中主力记录，**或** `hardware_id` 命中主力记录（APP 重装后 `client_id` 会变，硬件指纹不会）→ 直接恢复主力席位，**不下发 token**（手机本来就有）。
-   - `bind`：勾选了「记住这台手机」且主力位空缺且有 `client_id` → 绑定为新主力并一次性下发 token。
+   - `returning`：来者的 `client_id` 命中常用设备记录，**或** `hardware_id` 命中常用设备记录（APP 重装后 `client_id` 会变，硬件指纹不会）→ 直接恢复常用设备席位，**不下发 token**（手机本来就有）。
+   - `bind`：勾选了「记住这台手机」且还没有常用设备且有 `client_id` → 绑定为新常用设备并一次性下发 token。
    - 其余 → 临时会话（`session = "transient"`）：PC 端不落盘任何东西，但会签发一个**续连凭证**（见下）。
 4. 无论哪种结果，配对码都立即 `regenerate_code()`（**一次性**，杜绝重放），并写回内存中的二维码内容。
 
 两分支成功后都会：写席位、刷新托盘、通知前端（`pairing-show`）、日志记录。
 
-#### `takeover`（主力接管被占用的电脑）
+#### `takeover`（常用设备接管被占用的电脑）
 
-仅当连接状态为「已认证 + 是主力 + 正在等待接管」时才受理：踢掉当前持有者（`owner_takeover`）、把席位交给发起方、回 `takeover_ack{ok:true}`；否则回 `ok:false`。**临时方发起的 takeover 必然被拒**——协议层不存在手机端篡位的路径。
+仅当连接状态为「已认证 + 是常用设备 + 正在等待接管」时才受理：踢掉当前持有者（`owner_takeover`）、把席位交给发起方、回 `takeover_ack{ok:true}`；否则回 `ok:false`。**临时方发起的 takeover 必然被拒**——协议层不存在手机端篡位的路径。
 
 #### 收到 `text` 的处理链
 
@@ -289,9 +309,11 @@ pub fn write_verified(app: &AppHandle, text: &str) -> bool
 PC 端处理规则：
 
 1. 不是 `vl_disc_req`、协议版本不是 1、`client_id`/`proof` 为空 → 静默丢弃。
-2. `primary` 为空（还没绑主力）→ 静默丢弃。
-3. `(client_id, proof)` 与主力记录不匹配 → 静默丢弃（**电脑对陌生设备隐身，不产生任何应答**）。
-4. 完全匹配 → 仅对请求来源**单播**：
+2. 凭证命中以下**任一**才继续，否则静默丢弃（**电脑对陌生设备隐身，不产生任何应答**）：
+   - 常用设备的长期 token：`(client_id, proof)` 与 `primary` 记录匹配；
+   - **窗口期内仍有效的临时续连凭证**：`(client_id, proof)` 与内存中的续连记录匹配
+     （只读校验、不续期；主人一旦断开、手机 bye、TTL 到期即失效）。
+3. 命中 → 仅对请求来源**单播**：
 
 ```json
 {"type":"vl_disc_resp","protocol":1,"device_id":"<pc uuid>","device_name":"hejiong-PC",
@@ -299,6 +321,11 @@ PC 端处理规则：
 ```
 
 `busy` 只给布尔值，不泄露占用者身份。用 `SHA-256(token)` 而非 token 本身作 proof：抓到广播不足以通过 TCP 认证。发现线程与 TCP 服务同端口，绑定失败只记日志，不影响 TCP 主服务。
+
+**为什么也认临时续连凭证**：临时设备（断线续连窗口内）只记得 IP+端口，电脑换了 IP 就再也
+找不到——它连"常用设备"的持久凭证都没有，广播是唯一出路。放宽到"窗口期内的临时访客"后，
+临时设备与常用设备在"换 IP"这件事上体验一致（FR-15 的公平原则）。代价与边界写在
+SECURITY.md，并在 §8 有对应测试（有效凭证应答、错误凭证与已作废凭证仍然静默）。
 
 ### 2.8 lib.rs — 装配、托盘与 commands
 
@@ -330,24 +357,24 @@ Tauri commands（13 个）：
 | command | 作用 |
 |---|---|
 | `get_status` | 粗粒度状态文本（等待配对/已连接） |
-| `get_pairing_info` | 二维码内容 + SVG + 主力位 + 连接摘要（顺带续期配对码） |
-| `get_settings` | 自动粘贴/自动发送的实际生效值、平台支持情况、开机自启、主力机名、版本号 |
+| `get_pairing_info` | 二维码内容 + SVG + 常用设备席位 + 连接摘要（顺带续期配对码） |
+| `get_settings` | 自动粘贴/自动发送的实际生效值、平台支持情况、开机自启、常用设备名、版本号 |
 | `set_auto_paste` | 存用户意愿；运行态存「意愿 && 平台支持」；关闭时联动关闭 auto_send |
 | `set_auto_send` | 存用户意愿；运行态存「意愿 && auto_paste 生效 && 平台支持」 |
 | `set_auto_hide` | 「连接后自动隐藏窗口」开关（纯 PC 端行为，无平台能力判断） |
-| `set_resume_ttl` | 临时连接续连窗口（分钟，0=关闭）；改完立即生效（窗口期在每次活动时读取） |
-| `promote_session` | 把当前在线的**临时**手机设为主力（仅主力位空缺时；凭证推送失败会回滚绑定） |
+| `set_resume_ttl` | 临时设备续连窗口（分钟，0=关闭）；改完立即生效（窗口期在每次活动时读取） |
+| `promote_session` | 把当前在线的**临时**手机设为常用设备（仅还没有常用设备时；凭证推送失败会回滚绑定） |
 | `set_autostart` | 操作系统自启项 + 持久化 |
 | `set_remember_next` | 「记住这台手机」勾选（仅对下一次码配对生效） |
 | `disconnect_session` | 托盘/窗口断开当前手机 |
-| `unbind_primary` | 解绑主力（在线会话降级为临时，不断开） |
+| `unbind_primary` | 解绑常用设备（在线会话降级为临时，不断开） |
 | `set_window_height` | 前端启动时量一次真实高度后固定窗口高度 |
 
 ### 2.9 前端（desktop/src/index.html）
 
 - 主页与设置页**绝对定位叠放**，切换只改 `opacity`/`visibility`（交叉淡化），元素几何全程不变——规避 WebKitGTK 层重建导致的标题闪烁。
 - 窗口高度在启动时用离屏克隆渲染「等待态」量出真实高度（两种勾选文案取高者）后固定，之后不再随状态跳变：主页内容裁切、设置页内部滚动。
-- 渲染做了结构键缓存（`lastStatusKey`/`lastPairKey`/`lastDeviceKey`），避免 1s 轮询全量重绘导致 hover/勾选态丢失；只有「无连接 → 有连接」这类跨状态切换才播入场动画。轮询同时刷新设置页的「常用手机」卡（手机断开/转正后卡片立刻纠正，不会停在已被踢下线的旧卡片上、点下去才报错）。
+- 渲染做了结构键缓存（`lastStatusKey`/`lastPairKey`/`lastDeviceKey`），避免 1s 轮询全量重绘导致 hover/勾选态丢失；只有「无连接 → 有连接」这类跨状态切换才播入场动画。轮询同时刷新设置页的「常用设备」卡（手机断开/转正后卡片立刻纠正，不会停在已被踢下线的旧卡片上、点下去才报错）。
 - **每次唤起窗口都是"重新进入"**：托盘「打开主窗口」/「设置」带 payload 发 `view-request`，前端据此落到对应页面，并在 `showView()` 里把目标视图的 `scrollTop` 归零——不沿用上一次停留在哪一页、滚到哪里（`showView` 的"已在该视图"提前返回之前就要重置，否则托盘重复唤起会留在上次的滚动位置）。
 **重启应用**（托盘菜单 →「重启应用」）：用于"装好新版本后一键切换"。两个要点：
 
@@ -356,12 +383,12 @@ Tauri commands（13 个）：
 
 - 前端监听两个托盘事件：`view-request`（payload = `"home"`/`"settings"`，唤起窗口后落到指定页面 + 立即刷新一次，不等 1s 轮询）与 `pairing-show`（后端状态变化——配对成功、自动隐藏前——让前端立刻重绘）。
 - 设置失败一类提示走**页内浮动提示**（`.notice`，`textContent` 写入、4 秒自隐），不用 `alert()`：系统弹窗会带出页面 URL/标题等实现细节，而且要用户点掉才继续。错误文案经 `errText()` 剥掉 `Error:` 这类实现前缀。
-- 设置页每次进入都拉一次 `get_settings`；分区顺序是**定死的规则**：**粘贴与发送 → 连接行为 → 启动 → 常用手机 → 关于**。新增设置项按这条线归位，不要再"就近插入"——之前"临时连接断线后自动续连"被插到开机自启前面，就是随手追加造成的排序漂移（用户反馈过）。
+- 设置页每次进入都拉一次 `get_settings`；分区顺序是**定死的规则**：**粘贴与发送 → 连接行为 → 启动 → 常用设备 → 关于**。新增设置项按这条线归位，不要再"就近插入"——之前"临时设备断线后自动续连"被插到开机自启前面，就是随手追加造成的排序漂移（用户反馈过）。
   - 粘贴与发送：接收后自动粘贴 / 粘贴后自动发送
-  - 连接行为：连接后自动隐藏窗口 / 临时连接断线后自动续连
+  - 连接行为：连接后自动隐藏窗口 / 临时设备断线后自动续连
   - 启动：开机自动启动
-  - 常用手机：主力机卡片（解绑）／**临时手机一键转正**／空态引导
-  - 关于：版本（重启入口在托盘菜单，不放在设置页）「记住这台手机」勾选框仅在主力位空缺时出现，默认不勾（扫码默认即临时连接）。
+  - 常用设备：常用设备卡片（解绑）／**临时手机一键转正**／空态引导
+  - 关于：版本（重启入口在托盘菜单，不放在设置页）「记住这台手机」勾选框仅在还没有常用设备时出现，默认不勾（扫码默认即临时设备）。
 
 ---
 
@@ -391,7 +418,7 @@ TCP 长连接，UTF-8，每条消息一行 JSON 以 `\n` 结尾，单行上限 2
 | `error` | string? | 人话错误描述（如「尝试过于频繁，请 60 秒后再试」） |
 | `session` | string? | `primary` / `transient`（仅成功时出现） |
 | `device_id` / `device_name` / `device_type` | string? | PC 身份，`device_type` 固定 `pc` |
-| `token` | string? | **仅新绑定主力那一次**出现，明文只下发一次 |
+| `token` | string? | **仅新绑定常用设备那一次**出现，明文只下发一次 |
 | `capabilities` | object? | `{"auto_paste": bool}` |
 
 #### text（手机 → PC）
@@ -416,13 +443,14 @@ TCP 长连接，UTF-8，每条消息一行 JSON 以 `\n` 结尾，单行上限 2
 
 | 消息 | 方向 | 说明 |
 |---|---|---|
+| `ping` / `pong` | 手机 → PC / PC → 手机 | `ping` 无字段；`pong` 可带 `session: "primary" \| "transient"`（**权威身份**，仅持席连接给出；手机据此自愈，缺省表示"不给声明"，手机忽略） |
 | `{"type":"ping"}` / `{"type":"pong"}` | 手机 ↔ PC | 心跳，任何连接都可发 |
-| `{"type":"takeover"}` / `{"type":"takeover_ack","ok":bool}` | 手机 → PC → 手机 | 主力接管被占用的席位 |
+| `{"type":"takeover"}` / `{"type":"takeover_ack","ok":bool}` | 手机 → PC → 手机 | 常用设备接管被占用的席位 |
 | `{"type":"bye"}` / `{"type":"bye_ack"}` | 手机 → PC → 手机 | 优雅断开，PC 随即释放席位 |
 | `{"type":"session_ended","reason":"..."}` | PC → 手机 | 被踢前通知；`owner_takeover` / `owner_disconnect` / `replaced` |
-| `{"type":"session_downgraded"}` | PC → 手机 | 主力被解绑，当前会话降级为临时（连接保持）；可携带补发的续连凭证 |
-| `{"type":"promoted","token":"…","device_id":"…","device_name":"…","device_type":"pc","capabilities":{…}}` | PC → 手机 | 在设置页把这台临时手机设为主力：长期凭证明文仅此一次下发 |
-| `{"type":"promoted_ack"}` | 手机 → PC | 已保存主力凭证（PC 只记日志） |
+| `{"type":"session_downgraded"}` | PC → 手机 | 常用设备被解绑，当前会话降级为临时（连接保持）；可携带补发的续连凭证 |
+| `{"type":"promoted","token":"…","device_id":"…","device_name":"…","device_type":"pc","capabilities":{…}}` | PC → 手机 | 在设置页把这台临时手机设为常用设备：长期凭证明文仅此一次下发 |
+| `{"type":"promoted_ack"}` | 手机 → PC | 已保存长期凭证（PC 只记日志） |
 
 ### 3.3 容错与兼容
 
@@ -461,7 +489,9 @@ app/lib/
 | crypto | 计算 `SHA-256(token)` 作为发现 proof |
 | `dart:io` Socket / RawDatagramSocket | TCP 与 UDP（标准库） |
 
-`connectivity_plus` 仍在依赖里，但连接状态判定已不依赖它（靠 socket 事件与心跳）。
+`connectivity_plus`：**网络变化触发器**（换 Wi-Fi / 切回原网络 / 开关移动数据时立刻重试一次，不干等退避周期）。连接状态的判定仍不依赖它（靠 socket 事件与心跳）。
+
+`lan_check.dart` 只用 `dart:io` 的 `NetworkInterface.list()` 读本机网卡地址来推断"是否可能不在同一局域网"——**不需要任何权限**（读 Wi-Fi 名称才需要位置权限，所以不用）。
 
 ### 4.3 tcp_service.dart
 
@@ -473,6 +503,15 @@ app/lib/
 - `session_ended` 与 `session_downgraded` 分别以 reason 字符串（含 `downgraded`）推给 UI 层。
 
 ### 4.4 text_sender.dart — 编排层
+
+本轮加的三件事（都在这一层）：
+
+- **身份自愈**：订阅 `tcp.authoritativeIdentityStream`（心跳里的权威身份）。电脑说"你是临时设备"而本机以为是常用设备 → 走与收到降级推送完全一样的处理（删本地凭证 + 会话标记为临时 + 通知界面刷新）。
+- **续连兜底**：临时设备续连时，直连失败就广播找一次（发现服务认得窗口期内的续连凭证），找到新 IP 再连——临时设备因此也能挺过电脑换 IP。
+- **旧记录不再挡路**：常用记录网络层不可达、广播也没人应时，若还留着一条**同一台电脑**的有效临时续连记录，就改走它（"解绑后用临时设备身份重连过"就会留下这种组合，旧实现会一直死磕失效的常用记录）。
+
+凭证是否该删只认"电脑**明确拒绝**"（`unauthorized`）：被限流（`cooldown`）不算——那只是
+"尝试太频繁，等 60 秒再来"，删绑定等于"一次限流换一台好设备重扫"。
 
 `autoConnect()`（打开 APP 的默认路径）：
 
@@ -504,15 +543,30 @@ app/lib/
 
 `home_page.dart` 的 UI 骨架不随连接状态跳变，只有顶部状态胶囊变色与标签、主体区换视图：
 
-| 状态 | 状态胶囊 | 主体 |
+| 状态 | 状态胶囊（只讲事实） | 打字区（只讲"该做什么"） |
 |---|---|---|
-| `paired` | 绿点 + 电脑名（临时会话加「临时连接」灰标）+「断开」 | 可输入的输入卡 |
-| `occupied` | 橙点 + 电脑名 +「另一台手机正在使用」 | 「电脑使用中」页 +「接管电脑」按钮 |
-| `connecting`/`pairing` | 转圈 +「正在连接…」 | 输入卡（禁用） |
+| `paired` 常用设备 | 绿点 + 电脑名 +「断开」 | 长按键盘语音键即可语音输入文字 |
+| `paired` 临时设备 | 绿点 + 电脑名 +「临时设备」灰标 +「断开」 | 同上 |
+| `occupied`（凭凭证回来） | 橙点 + 电脑名 +「另一台手机正在使用」 | 主体区：「电脑使用中」+「接管电脑」按钮 |
+| `occupied`（扫码撞上） | 同上 | 主体区：只留说明「请在电脑上点「断开」腾出席位后再扫码」，**不给按钮**（那个按钮点了必然失败） |
+| `connecting`/`pairing` | 转圈 +「正在连接…」 | 连接成功后即可语音输入文字 |
 | `disconnected` 且无绑定 | 灰点 +「未连接电脑」 | 扫码引导页 |
-| `disconnected` 且有绑定 | 灰点 + 电脑名 +「连不上，重试中…」或「重新连接」 | 输入卡（禁用） |
+| `disconnected` 且有绑定 | 灰点 + 电脑名 +「连接失败，重试中…」或「重新连接」 | 默认「连接成功后即可语音输入文字」；**能判断不在同一局域网时**换成「请确认手机和电脑连着同一个 Wi-Fi」 |
 
-自动重连：退避 1s → 2s → 4s → 8s，之后固定 10s 一直重试（不做「N 次后放弃」）；切回前台立即补试一次；手动断开后完全停止。
+**三个面的分工**（新增 UI 文案时按这条走，别再让两处说同一件事）：
+
+- **状态胶囊 = 只讲事实**：现在是什么状态（已连接 / 常用设备 / 临时设备 / 正在连接 / 连接失败，重试中 / 另一台手机正在使用）。
+- **打字区 = 只讲"该做什么"**：默认一句功能说明，有可执行建议时替换；**永不复述胶囊里的事实**。所以"两处都有话说"不构成冲突，而是各就各位。
+- **一次性轻提示（snack）= 只讲"刚刚发生了什么"**：被解绑、临时会话过期这类事件——它们出现时界面往往已切走（没有打字区），只能靠一次性提示说明。
+
+**"不在同一个局域网"怎么判断**（`lan_check.dart`，决定要不要给那句 Wi-Fi 建议）：
+拿**目标电脑的地址**与手机当前所有 IPv4 地址按 /24 比——目标不在任何一个网段里，
+才提示"请确认手机和电脑连着同一个 Wi-Fi"（手机用移动数据、连了另一个 Wi-Fi 都归这类）；
+网段相同就**一句话都不说**。故意保守：私网网段到处复用（192.168.1.x 几乎是路由器默认值），
+同网段既可能真的同网、也可能只是撞段；而且公共 Wi-Fi 常禁止设备互访——那种"同网也连不上"
+不该甩锅给用户去查 Wi-Fi。读网卡地址不需要任何权限（读 Wi-Fi 名称才需要位置权限，所以不用）。
+
+自动重连：退避 1s → 2s → 4s → 8s，之后固定 10s 一直重试（不做「N 次后放弃」）；切回前台立即补试一次；**网络变化（换 Wi-Fi / 切回原网络 / 开关移动数据）也立即补试一次**（`connectivity_plus`）；手动断开后完全停止。
 
 扫码页：同一张二维码只发起一次配对请求（去重），否则取景框不挪开时会连发请求，5 次 `bad_code` 就把自己关进 60 秒冷却。
 
@@ -541,19 +595,19 @@ app/lib/
 启动：每次启动都 regenerate_code() → 新配对码（旧码立即失效）
 展示：窗口轮询时若码已过期或剩余 <2 分钟则自动换新（未连接时才换）
 配对：hello{code} → 校验通过 → 立即换新码（一次性）
-        勾选「记住」且主力位空缺 → 生成 token，明文随 hello_ack 下发一次
-        主力位已有主人 → 临时会话：PC 不落盘，但签发短期续连凭证（窗口期内可免扫码续连）
+        勾选「记住」且还没有常用设备 → 生成 token，明文随 hello_ack 下发一次
+        常用设备席位已有主人 → 临时会话：PC 不落盘，但签发短期续连凭证（窗口期内可免扫码续连）
 重连：hello{token} → SHA-256 比对命中 → 免码接入
-转正：在设置页把在线的临时手机设为主力 → PC 生成 token 并推送 promoted
-        （写入主力记录前先确认推送成功，失败回滚）→ 手机落盘为常用电脑
-解绑：config.primary 清空 → 在线主力会话降级为临时（session_downgraded，不断开）→ 旧 token 立即失效
+转正：在设置页把在线的临时手机设为常用设备 → PC 生成 token 并推送 promoted
+        （写入常用设备记录前先确认推送成功，失败回滚）→ 手机落盘为常用电脑
+解绑：config.primary 清空 → 在线常用设备会话降级为临时（session_downgraded，不断开）→ 旧 token 立即失效
 ```
 
 ### 5.2 权限边界
 
-- 绑定主力的唯一入口是 **PC 端窗口的勾选框**，协议里没有任何手机端可以修改信任关系的指令。
+- 绑定常用设备的唯一入口是 **PC 端窗口的勾选框**，协议里没有任何手机端可以修改信任关系的指令。
 - 临时手机拿不到 token，也发不出有效 proof，设备发现对它不存在。
-- 主力遇到席位被占只能等或接管，**绝不自动踢人**；临时方发 `takeover` 一律被拒。
+- 常用设备遇到席位被占只能等或接管，**绝不自动踢人**；临时方发 `takeover` 一律被拒。
 - 能物理操作 PC 的人即可信（托盘/窗口操作）。
 
 ### 5.3 日志脱敏
@@ -572,7 +626,7 @@ log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
 | 配对码形态 | 6 位数字，可手输 | 64 位 hex 随机串，只随二维码下发 | 6 位码在局域网内可暴力枚举；取消手输入口后没有可读性需求 |
 | 剪贴板非文本保护 | 检测到图片/文件则不覆盖 | 一律覆盖；仅空文本会被拒绝 | `arboard`/Tauri 插件不暴露「非文本 target」检测；家用场景价值有限 |
 | 监听地址 | 仅绑局域网网卡 | `0.0.0.0`（TCP 与 UDP） | 多网卡/虚拟网卡环境（Docker、VPN）下判定「哪个是局域网网卡」易出错；改由高熵凭证 + 冷却承担 |
-| 解绑行为 | 踢掉在线主力 | 降级为临时连接，不断开 | 用户解绑通常是想换机，打断正在进行的输入没有收益 |
+| 解绑行为 | 踢掉在线常用设备 | 降级为临时设备，不断开 | 用户解绑通常是想换机，打断正在进行的输入没有收益 |
 | 模块划分 | 独立 clipboard/tray/qr 模块 | 并入 server.rs / lib.rs | 每个模块只有几十行，拆开后调用链更绕 |
 | 心跳超时 | 手机 15s ping + 10s pong 超时 | 手机 5s ping；PC 15s 收尸；手机靠 socket 事件感知 | 少一个定时器，且避免 Doze 延迟导致误判断线 |
 
@@ -610,26 +664,33 @@ log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
 
 ## 8. 测试与验证
 
-**Rust 测试（34 个，`cargo test`）**
+**Rust 测试（37 个，`cargo test`）**
 
 | 文件 | 覆盖 |
 |---|---|
-| `config.rs` | 配对码校验与过期、UUIDv4 形态、主力绑定/校验/解绑全生命周期、硬件指纹随主力记录持久化、落盘不含明文 token、旧配置迁移、`auto_hide` 缺省视为开启 |
+| `config.rs` | 配对码校验与过期、UUIDv4 形态、常用设备绑定/校验/解绑全生命周期、硬件指纹随常用设备记录持久化、落盘不含明文 token、旧配置迁移、`auto_hide` 缺省视为开启 |
 | `protocol.rs` | 各消息 encode/decode 往返、旧客户端字段缺省兼容、畸形 JSON 不 panic |
-| `server.rs` | 席位仲裁三分支（空席接入/同主力替换/被临时方占用）、踢人原因映射、QR 内容格式 |
+| `server.rs` | 席位仲裁三分支（空席接入/同常用设备替换/被临时方占用）、踢人原因映射、QR 内容格式 |
 | `discovery.rs` | 请求解析的合法/畸形样本、应答 JSON 字段 |
 | `paste.rs` | 回车余量的边界（基准值、按长度递增、上限、整体 <1s） |
 | `winicon.rs` | 图标数据格式（`[宽, 高, ARGB...]` 长度自洽、含不透明像素） |
 | 续连相关 | 续连凭证校验（哈希/client_id/过期三者缺一不可）、窗口边界、协议往返（含 `resume` / `resume_expires_in`）、`resume_ttl_min` 默认值与旧配置缺省 |
-| 转正相关 | 转正的端到端集成测试（推送凭证 → 用该 token 换到 primary 席位）、无连接时拒绝、重启命令的形状（延迟启动 + 路径作为参数传入） |
+| 设为常用相关 | 端到端集成测试（推送凭证 → 用该 token 换到 primary 席位）、无连接时拒绝、重启命令的形状（延迟启动 + 路径作为参数传入） |
 
-**集成测试（4 个，`server::integration_tests`）**：用**真实 TCP 连接**扮演手机，驱动完整的握手/席位/凭证状态机——能挡住的正是"某条路径忘了做某事"这类单测覆盖不到的漏洞。
+**集成测试（9 个，`server::integration_tests`）**：用**真实 TCP 连接**扮演手机，驱动完整的握手/席位/凭证状态机——能挡住的正是"某条路径忘了做某事"这类单测覆盖不到的漏洞。
 
-做法：`ServerState` 对运行时泛型化（`ServerState<R: Runtime>`，桌面固定用 `AppServerState = ServerState<Wry>`），测试里换用 tauri 的 `mock_app()`（MockRuntime）即可无头运行，因此 CI 上也能跑。覆盖：解绑降级必须补发续连凭证且该凭证可用（用户实测发现的 bug，已验证"撤掉修复即失败"）、扫码临时会话拿到凭证并可续连、关闭续连时不签发、伪造凭证被拒且不占席位。
+做法：`ServerState` 对运行时泛型化（`ServerState<R: Runtime>`，桌面固定用 `AppServerState = ServerState<Wry>`），测试里换用 tauri 的 `mock_app()`（MockRuntime）即可无头运行，因此 CI 上也能跑。覆盖：
 
-**Flutter 测试**：`app/test/widget_test.dart` 覆盖 `TcpMessage` 编解码（JSON 行、字段往返、畸形行返回 null）。
+- 解绑降级必须补发续连凭证且该凭证可用（用户实测发现的 bug，已验证"撤掉修复即失败"）；
+- **解绑通知不依赖手机说话**：客户端只等 1 秒，靠连接线程轮询的旧实现在这里必然超时；
+- **反复解绑每次都通知**（解绑 → 设为常用设备 → 再解绑 ×3），旧的"只发一次"实现会静默；
+- **心跳回报权威身份**：常用设备回报 `primary`、降级后回报 `transient`；
+- **发现门控**：有效临时续连凭证得到应答，错误 proof / 错误 client_id / 已作废凭证一律静默；
+- 扫码临时设备拿到凭证并可续连、关闭续连时不签发、伪造凭证被拒且不占席位、无连接时"设为常用"被拒。
 
-**尚未自动化**（当前最薄弱的两块）：`home_page` 的 composing 下降沿发送判定、`text_sender` 的「直连 + 发现并行 / 凭证被拒 / 降级」编排路径。
+**Flutter 测试（16 个）**：`app/test/widget_test.dart` 覆盖 `TcpMessage` 编解码（JSON 行、字段往返、畸形行返回 null）；`app/test/lan_check_test.dart` 覆盖「是否不在同一局域网」的判断（移动数据 / 换了 Wi-Fi / 同网 / 热点 / 多网卡 / 无 IPv4 / 地址非法 / 同网段撞车）、"凭证被拒 vs 被限流"的区分（决定删不删绑定）、心跳身份字段的解码。
+
+**尚未自动化**（当前最薄弱的两块）：`home_page` 的 composing 下降沿发送判定、`text_sender` 的「直连 + 发现并行 / 降级 / 续连兜底」编排路径（这两块靠真机验证）。
 
 **真机联调**：双端部署、装机、抓日志的固定流程见工作区内的 `.trae/skills/beetype-deploy`（本地私有，未纳入版本库）；其中的环境事实（无线 adb 地址、Flutter 路径、日志文件位置）只对本机有效。
 
@@ -640,9 +701,9 @@ log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
 | v0.1 设计稿 | 现状 |
 |---|---|
 | 6 位数字配对码 + 手动输码 | 64 位 hex 一次性随机串，仅二维码下发；无手输页面 |
-| `paired_device` 单条配对记录 | 主力手机记录 `primary`（token_hash + client_id + hardware_id）+ 手机端多设备列表 |
-| 无 token、无免配重连 | token 持久化 + 免码重连；APP 重装靠硬件指纹恢复主力身份 |
-| 无设备发现 | 凭证门控 UDP 发现（换 IP 无感），对非主力设备静默 |
+| `paired_device` 单条配对记录 | 常用设备记录 `primary`（token_hash + client_id + hardware_id）+ 手机端多设备列表 |
+| 无 token、无免配重连 | token 持久化 + 免码重连；APP 重装靠硬件指纹恢复常用设备身份 |
+| 无设备发现 | 凭证门控 UDP 发现（换 IP 无感），对非常用设备设备静默 |
 | 无席位概念 | 单席位 + 仲裁 + 接管 + 踢人（`session_ended`）+ 解绑降级（`session_downgraded`） |
 | v0.1 的 `clipboard.rs`（非文本保护）、`ack.clipboard_non_text` | 非文本保护未实现（ack 字段为 `code`/`pasted`/`srv_recv_ms`）；现有的 `clipboard.rs` 做的是"写入 + 读回校验"，见 2.5、第 10 节 |
 | `tray.rs`（显示配对码/开机自启/关于菜单） | 托盘精简为 5 项，管理操作全部移入主窗口设置页 |

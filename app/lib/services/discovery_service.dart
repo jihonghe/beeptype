@@ -32,7 +32,7 @@ class DiscoveredDevice {
 /// - 应答  vl_disc_resp{protocol:1, device_id, device_name, device_type,
 ///                       port, busy, capabilities}
 ///
-/// PC 端凭 (client_id, proof) 门控：不是该机的主力，一律静默。
+/// PC 端凭 (client_id, proof) 门控：不是该机的常用设备，一律静默。
 /// 因此本服务收到的应答必然属于【持有该 token 的那台电脑】，无需再猜。
 class DiscoveryService {
   static const int _protocolVersion = 1;

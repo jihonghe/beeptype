@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'dart:async';
 import '../services/text_sender.dart';
 import '../services/tcp_service.dart';
@@ -46,6 +47,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _connecting = false;
   int _reconnectAttempt = 0;
 
+  /// 最近一次失败"看起来不在同一局域网"（决定打字区要不要提示检查 Wi-Fi）
+  bool _offLan = false;
+
+  /// 当前占用态是不是"扫码"撞上的：只有凭凭证回来的常用设备才配显示接管按钮
+  bool _occupiedViaScan = false;
+
+  StreamSubscription<List<ConnectivityResult>>? _netSub;
+
   // 上一次回调是否处于 composing（组合态），用于检测"有效→无效"的下降沿
   bool _wasComposing = false;
   // 上一次回调的文本，用于在非 composing 模式下区分真正的文本变化
@@ -61,9 +70,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _statusSub = widget.sender.tcp.statusStream.listen(_onStatus);
     _sessionEndedSub =
         widget.sender.tcp.sessionEndedStream.listen(_onSessionEnded);
-    // 电脑端可能随时把本机设为主力（身份变化），刷新界面
+    // 电脑端可能随时把本机设为常用设备（身份变化），刷新界面
     _sessionUpdatedSub = widget.sender.sessionUpdated.listen((_) {
       if (mounted) setState(() {});
+    });
+    // 网络一变（换 Wi-Fi / 切回原网络 / 开关数据）立刻重试，不干等退避周期
+    _netSub = Connectivity().onConnectivityChanged.listen((_) {
+      if (!mounted || _connecting) return;
+      if (_status == ConnectionStatus.paired) return;
+      if (!_canAutoConnect()) return;
+      _reconnectTimer?.cancel();
+      _reconnectAttempt = 0;
+      unawaited(_attemptConnect());
     });
 
     // 冷启动：有绑定电脑且不是"本进程已手动断开"状态时自动连接
@@ -78,6 +96,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _statusSub.cancel();
     _sessionEndedSub.cancel();
     _sessionUpdatedSub.cancel();
+    _netSub?.cancel();
     _debounce?.cancel();
     _reconnectTimer?.cancel();
     _inputController.dispose();
@@ -88,7 +107,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   // ----------------------------------------------------------------------
   // 连接生命周期：冷启自动连、断线退避自动连、切回前台立即试
   //
-  // 规则：主力/临时切后台行为一致——不主动断开，5s 心跳继续，断线同样
+  // 规则：常用设备/临时切后台行为一致——不主动断开，5s 心跳继续，断线同样
   // 按退避重连（Doze 下 Timer 会被系统延迟，切回前台立即补一次）。
   // ----------------------------------------------------------------------
 
@@ -107,7 +126,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _onResumed();
     }
     // 进入后台：不取消重连排程、不停心跳——切后台不是断开理由，
-    // 主力/临时行为一致。Doze 下 Timer 被延迟，切回前台在 _onResumed 立即补试。
+    // 常用设备/临时行为一致。Doze 下 Timer 被延迟，切回前台在 _onResumed 立即补试。
   }
 
   AppLifecycleState? _lastLifecycleState;
@@ -163,7 +182,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  /// 服务端主动推送的会话事件（PC 托盘断开、解绑降级、主力接管、同身份替换）
+  /// 服务端主动推送的会话事件（PC 托盘断开、解绑降级、常用设备接管、同身份替换）
   void _onSessionEnded(String reason) {
     switch (reason) {
       case 'owner_disconnect':
@@ -174,14 +193,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         break;
       case 'downgraded':
         // 电脑端解绑本机：连接降级为临时（会话保持），静默删除本地凭证。
-        // 不弹提示：解绑是用户在电脑上的主动操作，胶囊出现"临时连接"灰标即是反馈
+        // 不弹提示：解绑是用户在电脑上的主动操作，胶囊出现"临时设备"灰标即是反馈
         unawaited(widget.sender.downgradeToTemp().then((_) {
           if (mounted) setState(() {});
         }));
         break;
       case 'owner_takeover':
-        // 自己是临时方：该机的常用手机接管，中性提示
-        _showSnack('这台电脑的常用手机已接管');
+        // 自己是临时方：该机的常用设备接管，中性提示
+        _showSnack('这台电脑的常用设备已接管');
         break;
       case 'replaced':
       default:
@@ -208,7 +227,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         Timer(Duration(milliseconds: delayMs), _attemptConnect);
   }
 
-  /// 尝试连接最近使用的主力电脑（缓存 IP 直连 + UDP 发现并行，见 TextSender）
+  /// 尝试连接最近使用的常用电脑（缓存 IP 直连 + UDP 发现并行，见 TextSender）
   Future<void> _attemptConnect() async {
     _reconnectTimer?.cancel();
     if (_connecting) return;
@@ -219,6 +238,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
 
     _connecting = true;
+    _occupiedViaScan = false; // 自动连接走的是凭证路径，接管按钮才有效
     HelloOutcome? outcome;
     try {
       outcome = await widget.sender.autoConnect();
@@ -231,17 +251,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _showSnack('临时会话已过期，请重新扫码');
     }
 
-    // token 被电脑拒绝（典型：电脑端解绑了本机）：凭证已失效，删除后停手
+    // 电脑**明确拒绝**本机凭证（典型：电脑端解除了与这台设备的绑定）：
+    // 凭证已失效 → 删除并回扫码页，并且要说明原因（否则用户莫名其妙）
     if (outcome != null && outcome.isUnauthorized) {
       final id = widget.sender.storage.primaryDevice?.deviceId;
       await widget.sender.forgetDevice(id);
       _connecting = false;
-      if (mounted) setState(() {});
+      if (mounted) {
+        _showSnack('电脑已解除与你的绑定，请重新扫码');
+        setState(() {});
+      }
       return;
     }
 
+    // 连不上：判断"是不是根本不在同一个局域网"（能判断才提示，判断不了就沉默）
+    final off = await widget.sender.targetLooksOffLan();
     _connecting = false;
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    _offLan = off;
+    setState(() {});
     if (_canAutoConnect() &&
         _status == ConnectionStatus.disconnected) {
       _scheduleReconnect();
@@ -413,8 +441,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         final isPrimary = session?.isPrimary == true;
         leading = _StatusDot(Colors.green.shade600);
         title = knownName ?? '电脑';
-        // 永久配对是默认态，不标注；临时连接在设备名右侧给灰字小标签
-        if (!isPrimary) tag = '临时连接';
+        // 常用设备是默认态，不标注；临时设备在名字右侧给灰字小标签
+        if (!isPrimary) tag = '临时设备';
         // "断开"是低频操作：明确置灰，不与主色行动争抢
         trailing = TextButton(
           onPressed: _manualDisconnect,
@@ -445,7 +473,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           title = '未连接电脑';
         } else {
           title = knownName ?? '电脑';
-          tag = widget.sender.manualDisconnected ? '重新连接' : '连不上，重试中…';
+          tag = widget.sender.manualDisconnected ? '重新连接' : '连接失败，重试中…';
           trailing = TextButton(
             onPressed: _manualConnect,
             style: pillButtonStyle(null),
@@ -510,13 +538,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   /// 主体输入卡：已连接可输入，其余状态同卡原位禁用，骨架不跳变。
   Widget _buildEditorCard(ColorScheme scheme, {required bool enabled}) {
+    // 打字区只讲"该做什么"（状态由胶囊区讲，不复述）：默认一句功能说明，
+    // 能判断"不在同一个局域网"时换成那条唯一有用的建议
     final String hintText;
     if (enabled) {
       hintText = '长按键盘语音键即可语音输入文字';
-    } else if (widget.sender.manualDisconnected) {
-      hintText = '已断开连接，重连后即可语音输入文字';
+    } else if (_offLan) {
+      hintText = '请确认手机和电脑连着同一个 Wi-Fi';
     } else {
-      hintText = '正在连接，连接后即可语音输入文字';
+      hintText = '连接成功后即可语音输入文字';
     }
 
     return Card(
@@ -619,21 +649,29 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 style: TextStyle(
                     fontSize: 14, color: scheme.onSurfaceVariant)),
             const SizedBox(height: 28),
-            FilledButton.icon(
-              onPressed: _takeover,
-              style: FilledButton.styleFrom(
-                backgroundColor: Colors.orange.shade700,
-                minimumSize: const Size.fromHeight(48),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(14)),
+            // 接管只对"凭长期凭证回来的常用设备"有效（电脑端只放行这种连接）。
+            // 扫码撞上占用的人点了必然失败，所以干脆不给按钮，只留上面那句说明。
+            if (!_occupiedViaScan) ...[
+              FilledButton.icon(
+                onPressed: _takeover,
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.orange.shade700,
+                  minimumSize: const Size.fromHeight(48),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14)),
+                ),
+                icon: const Icon(Icons.login_rounded),
+                label: const Text('接管电脑'),
               ),
-              icon: const Icon(Icons.login_rounded),
-              label: const Text('接管电脑'),
-            ),
-            const SizedBox(height: 12),
-            Text('接管后对方将收到提示；不操作则保持等待',
-                style: TextStyle(
-                    fontSize: 12, color: scheme.onSurfaceVariant)),
+              const SizedBox(height: 12),
+              Text('接管后对方将收到提示；不操作则保持等待',
+                  style: TextStyle(
+                      fontSize: 12, color: scheme.onSurfaceVariant)),
+            ] else
+              Text('请在电脑上点「断开」腾出席位后再扫码',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                      fontSize: 12, color: scheme.onSurfaceVariant)),
           ],
         ),
       ),
@@ -733,6 +771,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _navigateToScan() async {
+    // 记下来源：扫码撞上"电脑使用中"时不该给接管按钮（那按钮点了必然失败）
+    _occupiedViaScan = true;
     final result = await Navigator.of(context).pushNamed('/scan');
     if (result == true && mounted) {
       setState(() {});

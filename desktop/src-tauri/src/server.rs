@@ -25,7 +25,7 @@ const HEARTBEAT_TIMEOUT_SECS: u64 = 15;
 /// 席位持有者被踢原因（AtomicU8 取值）
 pub const KICK_TAKEOVER: u8 = 1;
 pub const KICK_DISCONNECT: u8 = 2;
-/// 同一主力的旧僵尸连接被新连接替换
+/// 同一常用设备的旧僵尸连接被新连接替换
 pub const KICK_REPLACED: u8 = 4;
 
 fn kick_reason(k: u8) -> &'static str {
@@ -47,24 +47,25 @@ pub enum ConnState {
 pub struct ActiveSession {
     pub client_id: String,
     pub name: String,
-    pub is_primary: bool,
+    /// 本席位的权威身份（true = 常用设备）。同时被两端共享：
+    /// 命令线程改它（解绑降级 / 设为常用），连接线程读它（续连窗口、心跳里回报身份）。
+    /// 唯一真源，不额外复制一份 bool，避免"两边各存一个、忘了同步"。
+    pub identity: Arc<AtomicBool>,
     /// 非 0 表示持有者被要求结束，连接线程读到后发 session_ended 并退出
     pub kick: Arc<AtomicU8>,
-    /// 解绑降级标志：置位后连接线程发一次 session_downgraded，会话以临时身份继续
-    pub downgrade: Arc<AtomicBool>,
     /// 连接 socket 的克隆：踢人时 shutdown(Read) 唤醒阻塞中的 read_line，
     /// 让 session_ended 与席位释放立刻完成，而不用等对端下一条心跳（最长 5s）
     pub wake: Mutex<Option<TcpStream>>,
-    /// 本连接的共享写句柄：转正要从命令线程往连接里推消息（见 SharedWriter）
+    /// 本连接的共享写句柄：身份变化要从命令线程往连接里推消息（见 SharedWriter）
     pub writer: Option<SharedWriter>,
-    /// 该手机上报的硬件指纹（转正时写入主力记录，保住"重装后仍认得出"）
+    /// 该手机上报的硬件指纹（转正时写入常用设备记录，保住"重装后仍认得出"）
     pub hardware_id: Option<String>,
-    /// 对端 IP（写进主力记录的 last_ip，仅供参考）
+    /// 对端 IP（写进常用设备记录的 last_ip，仅供参考）
     pub ip: String,
 }
 
 impl ActiveSession {
-    /// 建一个新席位，并把它的 kick/downgrade 标志交回调用方（供 `ctx.admit` 绑定）
+    /// 建一个新席位，并把它的 kick/identity 标志交回调用方（供 `ctx.admit` 绑定）
     fn new(
         client_id: String,
         name: String,
@@ -72,19 +73,18 @@ impl ActiveSession {
         ctx: &ConnCtx,
     ) -> (Self, Arc<AtomicU8>, Arc<AtomicBool>) {
         let kick = Arc::new(AtomicU8::new(0));
-        let downgrade = Arc::new(AtomicBool::new(false));
+        let identity = Arc::new(AtomicBool::new(is_primary));
         let session = Self {
             client_id,
             name,
-            is_primary,
+            identity: identity.clone(),
             kick: kick.clone(),
-            downgrade: downgrade.clone(),
             wake: Mutex::new(clone_wake(&ctx.wake)),
             writer: ctx.writer.clone(),
             hardware_id: ctx.hardware_id.clone(),
             ip: ctx.peer_ip.map(|ip| ip.to_string()).unwrap_or_default(),
         };
-        (session, kick, downgrade)
+        (session, kick, identity)
     }
 }
 
@@ -126,7 +126,7 @@ fn send_session_ended(writer: &SharedWriter, name: &str, reason: u8) {
     warn!("Session ended for {} ({})", name, kick_reason(reason));
 }
 
-/// 通知席位持有者：主力已解绑，连接降级为临时（会话保持）
+/// 通知席位持有者：常用设备已解绑，连接降级为临时（会话保持）
 fn send_session_downgraded(writer: &SharedWriter, name: &str, resume: Option<(String, u64)>) {
     let with_resume = resume.is_some();
     let _ = send(writer, &Message::session_downgraded(resume));
@@ -146,13 +146,12 @@ struct ConnCtx {
     name: String,
     /// 是否已通过认证（码或 token）
     authed: bool,
-    is_primary: bool,
-    /// 已认证主力但席位被占，连接保持、等待 takeover
+    /// 已认证常用设备但席位被占，连接保持、等待 takeover
     waiting_takeover: bool,
     /// 本连接持有席位时对应的 kick 标志（用于与全局席位比对）
     kick: Arc<AtomicU8>,
-    /// 本连接持有席位时对应的解绑降级标志（与席位共享）
-    downgrade: Arc<AtomicBool>,
+    /// 本连接持有席位时对应的身份标志（与席位共享，命令线程改、这里读）
+    identity: Arc<AtomicBool>,
     /// 本连接 socket 的克隆，admit 时存入席位供远端踢人唤醒
     wake: Option<TcpStream>,
     last_active: Instant,
@@ -172,10 +171,9 @@ impl Default for ConnCtx {
             client_id: String::new(),
             name: String::new(),
             authed: false,
-            is_primary: false,
             waiting_takeover: false,
             kick: Arc::new(AtomicU8::new(0)),
-            downgrade: Arc::new(AtomicBool::new(false)),
+            identity: Arc::new(AtomicBool::new(false)),
             wake: None,
             last_active: Instant::now(),
             closing: false,
@@ -191,17 +189,15 @@ impl ConnCtx {
         &mut self,
         client_id: String,
         name: String,
-        is_primary: bool,
         kick: Arc<AtomicU8>,
-        downgrade: Arc<AtomicBool>,
+        identity: Arc<AtomicBool>,
     ) {
         self.client_id = client_id;
         self.name = name;
         self.authed = true;
-        self.is_primary = is_primary;
         self.waiting_takeover = false;
         self.kick = kick;
-        self.downgrade = downgrade;
+        self.identity = identity;
         self.last_active = Instant::now();
     }
 }
@@ -233,12 +229,12 @@ impl TransientResume {
     }
 }
 
-/// 主力 token 认证通过后的席位仲裁结果（纯逻辑，便于单测）
+/// 常用设备 token 认证通过后的席位仲裁结果（纯逻辑，便于单测）
 #[derive(Debug, PartialEq)]
 enum PrimaryArbitration {
     /// 席位空闲，直接接入
     Admit,
-    /// 被同一主力的旧连接占着（僵尸重连），踢旧接新
+    /// 被同一常用设备的旧连接占着（僵尸重连），踢旧接新
     ReplaceSelf,
     /// 被临时方占用，保持连接等待 takeover
     WaitTakeover,
@@ -268,7 +264,7 @@ pub struct ServerState<R: Runtime> {
     pub config: Arc<Mutex<Config>>,
     /// 唯一席位
     pub session: Arc<Mutex<Option<ActiveSession>>>,
-    /// 配对窗口"记住此手机"勾选：对下一次码配对生效；已绑主力时忽略
+    /// 配对窗口"记住此手机"勾选：对下一次码配对生效；已有常用设备时忽略
     pub remember_next: Arc<AtomicBool>,
     /// 托盘菜单第一行状态项（setup 建完托盘后注入）
     pub status_item: Arc<Mutex<Option<MenuItem<R>>>>,
@@ -324,7 +320,7 @@ impl<R: Runtime> ServerState<R> {
         auto_hide: bool,
         config: Config,
     ) -> Self {
-        // 扫码默认就是临时连接：勾选"绑为主力"必须是用户的主动行为
+        // 扫码默认就是临时设备：勾选"绑为常用设备"必须是用户的主动行为
         let remember_default = false;
         Self {
             state: Arc::new(Mutex::new(ConnState::Waiting)),
@@ -391,12 +387,12 @@ impl<R: Runtime> ServerState<R> {
             let session = self.session.lock().unwrap();
             match session.as_ref() {
                 None => (ConnState::Waiting, "⚪ 等待配对".to_string(), false),
-                Some(a) if a.is_primary => {
+                Some(a) if a.identity.load(Ordering::SeqCst) => {
                     (ConnState::Connected, format!("🟢 {}", a.name), true)
                 }
                 Some(a) => (
                     ConnState::Connected,
-                    format!("🟢 {} · 临时", a.name),
+                    format!("🟢 {} · 临时设备", a.name),
                     true,
                 ),
             }
@@ -484,6 +480,22 @@ impl<R: Runtime> ServerState<R> {
         }
     }
 
+    /// 只读校验一张临时续连凭证（**不续期**），供 UDP 发现门控使用。
+    ///
+    /// 临时设备被系统杀掉后，手机只记得 IP+端口；电脑换了 IP 就再也找不回来。
+    /// 让发现服务认得"窗口期内仍有效的临时凭证"，临时设备就能和常用设备一样
+    /// 用广播找到换过 IP 的电脑。续期仍只发生在真正意义上的活动（心跳/续连成功）。
+    pub fn transient_resume_matches(&self, client_id: &str, proof: &str) -> bool {
+        let Ok(guard) = self.transient_resume.lock() else {
+            return false;
+        };
+        guard.as_ref().is_some_and(|record| {
+            !record.is_expired(Instant::now())
+                && record.client_id == client_id
+                && record.token_hash == proof
+        })
+    }
+
     /// 获取当前配对码
     pub fn get_code(&self) -> String {
         self.pairing_code.lock().unwrap().clone()
@@ -529,11 +541,11 @@ impl<R: Runtime> ServerState<R> {
         self.remember_next.store(value, Ordering::Relaxed);
     }
 
-    /// 席位摘要：(是否连接中, 手机名, 是否主力)
+    /// 席位摘要：(是否连接中, 设备名, 是否常用设备)
     pub fn session_summary(&self) -> (bool, Option<String>, bool) {
         let s = self.session.lock().unwrap();
         match s.as_ref() {
-            Some(a) => (true, Some(a.name.clone()), a.is_primary),
+            Some(a) => (true, Some(a.name.clone()), a.identity.load(Ordering::SeqCst)),
             None => (false, None, false),
         }
     }
@@ -555,23 +567,40 @@ impl<R: Runtime> ServerState<R> {
         info!("Disconnect requested for {name} ({client_id})");
     }
 
-    /// 设置页/托盘"解除绑定"：凭证立即作废；若主力正在线，连接降级为
-    /// 临时连接继续服务（不断开）。手机端凭 session_downgraded 同步状态。
+    /// 设置页/托盘"解除绑定"：凭证立即作废；若常用设备正在线，连接降级为
+    /// 临时设备继续服务（不断开）。降级通知**当场从这里发**，不靠连接线程轮询：
+    /// 连接线程阻塞在 socket 读上，靠它发现标志要等最长 5 秒（下一次心跳/读超时），
+    /// 且历史上那个"只发一次"的闩会让重复解绑彻底静默。写操作都在 writer 锁后面，
+    /// 与连接线程的回复不会写交错（同 promote_current_session 的做法）。
     pub fn unbind_primary(&self) {
-        {
-            let mut config = self.config.lock().unwrap();
-            config.unbind_primary();
-        }
-        let mut session = self.session.lock().unwrap();
-        if let Some(a) = session.as_mut() {
-            if a.is_primary {
-                a.is_primary = false;
-                a.downgrade.store(true, Ordering::SeqCst);
+        // 锁顺序约定：config → session。先把 config 处理完，再去会话里取收件人，
+        // 拿到就立刻放锁——签发凭证要读 config（resume_ttl），持着 session 锁会反向加锁
+        self.config.lock().unwrap().unbind_primary();
+
+        let live = {
+            let session = self.session.lock().unwrap();
+            match session.as_ref() {
+                Some(a) if a.identity.load(Ordering::SeqCst) => {
+                    a.identity.store(false, Ordering::SeqCst);
+                    Some((a.client_id.clone(), a.name.clone(), a.writer.clone()))
+                }
+                _ => None,
             }
+        };
+
+        match live {
+            Some((client_id, name, writer)) => {
+                // 降级后的身份就是"临时设备"，凭证待遇必须与扫码临时设备一致：
+                // 补发续连凭证，否则这条会话被系统杀掉后就再也回不来
+                let grant = self.issue_transient_resume(&client_id, &name);
+                if let Some(w) = writer {
+                    send_session_downgraded(&w, &name, grant);
+                }
+                info!("Primary unbound; live connection downgraded to transient");
+            }
+            None => info!("Primary unbound; no live primary connection"),
         }
-        drop(session);
         self.publish_state();
-        info!("Primary unbound; live connection downgraded to transient");
     }
 
     /// 处理收到的消息行，返回需要回复的消息
@@ -617,8 +646,8 @@ impl<R: Runtime> ServerState<R> {
                     });
                 }
                 ctx.last_active = Instant::now();
-                // 临时会话仍在活跃：续连窗口往后推
-                if !ctx.is_primary {
+                // 临时设备仍在活跃：续连窗口往后推
+                if !ctx.identity.load(Ordering::SeqCst) {
                     self.touch_transient_resume(&ctx.client_id);
                 }
                 self.handle_text(id, text)
@@ -626,10 +655,24 @@ impl<R: Runtime> ServerState<R> {
 
             Message::Ping => {
                 ctx.last_active = Instant::now();
-                if !ctx.is_primary {
+                if !ctx.identity.load(Ordering::SeqCst) {
                     self.touch_transient_resume(&ctx.client_id);
                 }
-                Some(Message::Pong)
+                // 心跳顺带回报权威身份：手机据此自愈（推送万一丢了，5 秒内也能纠正）。
+                // 只有真正持席的连接才给身份声明——等待接管的连接还没拿到席位，
+                // 未认证连接更是无从谈起，一律不给（手机收到空身份就忽略）
+                let session = if self.is_session_holder(ctx) {
+                    if ctx.waiting_takeover {
+                        None
+                    } else if ctx.identity.load(Ordering::SeqCst) {
+                        Some("primary".to_string())
+                    } else {
+                        Some("transient".to_string())
+                    }
+                } else {
+                    None
+                };
+                Some(Message::pong(session.as_deref()))
             }
 
             Message::PromotedAck => {
@@ -686,7 +729,7 @@ impl<R: Runtime> ServerState<R> {
             ));
         }
 
-        // 记下硬件指纹：转正为主力时写进记录（"重装后仍认得出"靠它）
+        // 记下硬件指纹：设为常用设备时写进记录（"重装后仍认得出"靠它）
         ctx.hardware_id = hardware_id.clone();
 
         let caps = Capabilities {
@@ -712,15 +755,15 @@ impl<R: Runtime> ServerState<R> {
 
             let mut session = self.session.lock().unwrap();
             if session.is_some() {
-                // 席位被占（例如主力正在用）：按既有规则拒绝，连接不保持
+                // 席位被占（例如常用设备正在用）：按既有规则拒绝，连接不保持
                 return Some(Message::hello_ack_err("occupied", "电脑使用中"));
             }
-            let (seat, kick, downgrade) =
+            let (seat, kick, identity) =
                 ActiveSession::new(client_id.clone(), name.clone(), false, ctx);
             *session = Some(seat);
             drop(session);
 
-            ctx.admit(client_id, name.clone(), false, kick, downgrade);
+            ctx.admit(client_id, name.clone(), kick, identity);
             self.publish_state();
             auto_hide_after_pairing(&self.app_handle);
             let ttl_secs = self.resume_ttl().as_secs();
@@ -737,7 +780,7 @@ impl<R: Runtime> ServerState<R> {
             .with_resume_expires_in(ttl_secs));
         }
 
-        // ---- token 分支：持久主力免配重连 ----
+        // ---- token 分支：持久常用设备免配重连 ----
         if let Some(token) = token {
             let verified = {
                 let mut config = self.config.lock().unwrap();
@@ -757,7 +800,7 @@ impl<R: Runtime> ServerState<R> {
             let mut session = self.session.lock().unwrap();
             match arbitrate_primary(session.as_ref(), &client_id) {
                 PrimaryArbitration::Admit => {
-                    let (seat, kick, downgrade) = ActiveSession::new(
+                    let (seat, kick, identity) = ActiveSession::new(
                         client_id.clone(),
                         device_name.clone(),
                         true,
@@ -765,7 +808,7 @@ impl<R: Runtime> ServerState<R> {
                     );
                     *session = Some(seat);
                     drop(session);
-                    ctx.admit(client_id, device_name, true, kick, downgrade);
+                    ctx.admit(client_id, device_name, kick, identity);
                     self.publish_state();
                     auto_hide_after_pairing(&self.app_handle);
                     info!("Primary connected via token from {}", peer_ip);
@@ -779,11 +822,11 @@ impl<R: Runtime> ServerState<R> {
                     ))
                 }
                 PrimaryArbitration::ReplaceSelf => {
-                    // 同一主力的旧连接还挂着（僵尸重连）：要求旧连接退出，新连接接席
+                    // 同一常用设备的旧连接还挂着（僵尸重连）：要求旧连接退出，新连接接席
                     if let Some(old) = session.as_ref() {
                         kick_session(old, KICK_REPLACED);
                     }
-                    let (seat, kick, downgrade) = ActiveSession::new(
+                    let (seat, kick, identity) = ActiveSession::new(
                         client_id.clone(),
                         device_name.clone(),
                         true,
@@ -791,7 +834,7 @@ impl<R: Runtime> ServerState<R> {
                     );
                     *session = Some(seat);
                     drop(session);
-                    ctx.admit(client_id, device_name, true, kick, downgrade);
+                    ctx.admit(client_id, device_name, kick, identity);
                     self.publish_state();
                     auto_hide_after_pairing(&self.app_handle);
                     info!("Primary replaced stale connection from {}", peer_ip);
@@ -805,12 +848,12 @@ impl<R: Runtime> ServerState<R> {
                     ))
                 }
                 PrimaryArbitration::WaitTakeover => {
-                    // 席位被临时方占用：连接保持，等待手动接管
+                    // 席位被临时方占用：连接保持，等待手动接管。
+                    // 这里不设身份——席位还在别人手里，等接管成功由 admit 重新绑定
                     drop(session);
                     ctx.client_id = client_id;
                     ctx.name = device_name;
                     ctx.authed = true;
-                    ctx.is_primary = true;
                     ctx.waiting_takeover = true;
                     ctx.last_active = Instant::now();
                     info!("Primary arrives but seat occupied from {}", peer_ip);
@@ -837,17 +880,17 @@ impl<R: Runtime> ServerState<R> {
             }
 
             // 席位空闲：判定身份。
-            //  - 勾选"记住"且尚无主力：绑定为新主力，下发新 token
-            //  - 来者 client_id 就是已绑定主力（主力机手动断开后扫码回来）：
-            //    直接恢复主力席位，token 不下发（手机端本就保存着）
-            //  - 其余：临时连接
-            // 无 client_id 的旧客户端不允许占主力位
+            //  - 勾选"记住"且尚无常用设备：绑定为新常用设备，下发新 token
+            //  - 来者 client_id 就是已绑定常用设备（常用设备手动断开后扫码回来）：
+            //    直接恢复常用设备席位，token 不下发（手机端本就保存着）
+            //  - 其余：临时设备
+            // 无 client_id 的旧客户端不允许占常用设备席位
             let remember = self.remember_next.load(Ordering::Relaxed);
             let (is_primary, token_out, new_code, returning_primary) = {
                 let mut config = self.config.lock().unwrap();
                 // returning: client_id 匹配 OR hardware_id 匹配
                 // 硬件指纹是关键——手机重装后 client_id 变了，但 hardware_id 不变，
-                // 仍能被识别为"我认识这台手机"并恢复主力身份
+                // 仍能被识别为"我认识这台手机"并恢复常用设备身份
                 let client_match = !client_id.is_empty()
                     && config
                         .primary
@@ -878,7 +921,7 @@ impl<R: Runtime> ServerState<R> {
             self.set_code(new_code);
 
             // 临时会话：签发续连凭证（窗口期 0 = 关闭续连时不签发）。
-            // 主力不需要——它本来就有长期 token。
+            // 常用设备不需要——它本来就有长期 token。
             let resume_issue = if is_primary {
                 None
             } else {
@@ -886,12 +929,12 @@ impl<R: Runtime> ServerState<R> {
             };
 
             let (device_id, pc_name) = self.device_identity();
-            let (seat, kick, downgrade) =
+            let (seat, kick, identity) =
                 ActiveSession::new(client_id.clone(), device_name.clone(), is_primary, ctx);
             *session = Some(seat);
             drop(session);
 
-            ctx.admit(client_id, device_name, is_primary, kick, downgrade);
+            ctx.admit(client_id, device_name, kick, identity);
             self.publish_state();
             auto_hide_after_pairing(&self.app_handle);
             info!(
@@ -919,17 +962,17 @@ impl<R: Runtime> ServerState<R> {
         }
     }
 
-    /// 把当前在线席位上的**临时**手机设为主力（设置页「常用手机」的按钮）。
+    /// 把当前在线席位上的**临时**手机设为常用设备（设置页「常用设备」的按钮）。
     ///
-    /// 只在"主力位空缺 + 当前席位是临时身份"时允许。凭证由 PC 生成后推给手机，
-    /// 手机落盘即成为常用手机——效果等价于扫码时勾选"记住这台手机"。
+    /// 只在"还没有常用设备 + 当前席位是临时身份"时允许。凭证由 PC 生成后推给手机，
+    /// 手机落盘即成为常用设备——效果等价于扫码时勾选"记住这台手机"。
     /// 推送失败会回滚绑定，避免"PC 以为绑了、手机没凭据"的不一致。
     pub fn promote_current_session(&self) -> Result<(), String> {
         let (client_id, name, writer, hardware_id, ip) = {
             let session = self.session.lock().unwrap();
             let a = session.as_ref().ok_or("当前没有手机连接")?;
-            if a.is_primary {
-                return Err("当前连接已经是常用手机".to_string());
+            if a.identity.load(Ordering::SeqCst) {
+                return Err("当前连接已经是常用设备".to_string());
             }
             (
                 a.client_id.clone(),
@@ -943,7 +986,7 @@ impl<R: Runtime> ServerState<R> {
         let token = {
             let mut config = self.config.lock().unwrap();
             if config.has_primary() {
-                return Err("已经绑定了常用手机，请先解除绑定".to_string());
+                return Err("已经绑定了常用设备，请先解除绑定".to_string());
             }
             config.bind_primary(&client_id, &name, &ip, hardware_id.as_deref())
         };
@@ -960,12 +1003,12 @@ impl<R: Runtime> ServerState<R> {
             return Err("下发凭证失败，连接可能已断开".to_string());
         }
 
-        // 席位身份升级为常用；临时续连记录作废（手机接下来用长期 token）
+        // 席位身份升级为常用设备；临时续连记录作废（手机接下来用长期 token）
         {
-            let mut session = self.session.lock().unwrap();
-            if let Some(a) = session.as_mut() {
+            let session = self.session.lock().unwrap();
+            if let Some(a) = session.as_ref() {
                 if a.client_id == client_id {
-                    a.is_primary = true;
+                    a.identity.store(true, Ordering::SeqCst);
                 }
             }
         }
@@ -999,9 +1042,9 @@ impl<R: Runtime> ServerState<R> {
         (config.device_id.clone(), config.device_name.clone())
     }
 
-    /// 主力点击"接管电脑"
+    /// 常用设备点击"接管电脑"
     fn handle_takeover(&self, ctx: &mut ConnCtx) -> Option<Message> {
-        if !ctx.authed || !ctx.is_primary || !ctx.waiting_takeover {
+        if !ctx.authed || !ctx.waiting_takeover {
             warn!("Takeover rejected: connection not eligible");
             return Some(Message::TakeoverAck { ok: false });
         }
@@ -1011,14 +1054,14 @@ impl<R: Runtime> ServerState<R> {
         if let Some(cur) = session.as_ref() {
             kick_session(cur, KICK_TAKEOVER);
         }
-        let (seat, kick, downgrade) =
+        let (seat, kick, identity) =
             ActiveSession::new(ctx.client_id.clone(), ctx.name.clone(), true, ctx);
         *session = Some(seat);
         drop(session);
 
         ctx.waiting_takeover = false;
         ctx.kick = kick;
-        ctx.downgrade = downgrade;
+        ctx.identity = identity;
         ctx.last_active = Instant::now();
         self.publish_state();
         auto_hide_after_pairing(&self.app_handle);
@@ -1210,7 +1253,6 @@ fn handle_connection<R: Runtime>(stream: TcpStream, state: ServerState<R>) {
     ctx.writer = Some(writer.clone());
 
     let mut line = String::new();
-    let mut downgrade_sent = false;
     'conn: loop {
         // 被踢/被替换：发 session_ended 后退出（清理段靠 kick 指针比对不会误清新席位）
         let kicked = ctx.kick.load(Ordering::SeqCst);
@@ -1219,16 +1261,9 @@ fn handle_connection<R: Runtime>(stream: TcpStream, state: ServerState<R>) {
             break 'conn;
         }
 
-        // 解绑降级：发一次 session_downgraded，会话以临时身份继续（连接不断）
-        // 心跳最长 5s 一轮，本检查每轮循环都会执行，降级通知延迟因此有界
-        if !downgrade_sent && ctx.downgrade.load(Ordering::SeqCst) {
-            downgrade_sent = true;
-            ctx.is_primary = false;
-            // 降级后的身份就是"临时会话"，凭证待遇必须与扫码临时连接一致：
-            // 补发续连凭证，否则这条会话被系统杀掉后就再也回不来（曾经漏了这一步）
-            let grant = state.issue_transient_resume(&ctx.client_id, &ctx.name);
-            send_session_downgraded(&writer, &ctx.name, grant);
-        }
+        // 身份变化（解绑降级 / 设为常用）**不在这里发消息**：由命令线程当场通过
+        // 共享写句柄推送（见 unbind_primary / promote_current_session）。
+        // 本线程只负责"读"——续连窗口判定与心跳里的身份回报都直接读 ctx.identity。
 
         line.clear();
         match reader.read_line(&mut line) {
@@ -1378,10 +1413,9 @@ mod tests {
         let kick = Arc::new(AtomicU8::new(0));
         let primary_session = ActiveSession {
             client_id: "p1".to_string(),
-            name: "主力".to_string(),
-            is_primary: true,
+            name: "常用设备".to_string(),
+            identity: Arc::new(AtomicBool::new(true)),
             kick: kick.clone(),
-            downgrade: Arc::new(AtomicBool::new(false)),
             wake: Mutex::new(None),
             writer: None,
             hardware_id: None,
@@ -1389,10 +1423,9 @@ mod tests {
         };
         let transient_session = ActiveSession {
             client_id: "t1".to_string(),
-            name: "临时".to_string(),
-            is_primary: false,
+            name: "临时设备".to_string(),
+            identity: Arc::new(AtomicBool::new(false)),
             kick: Arc::new(AtomicU8::new(0)),
-            downgrade: Arc::new(AtomicBool::new(false)),
             wake: Mutex::new(None),
             writer: None,
             hardware_id: None,
@@ -1401,7 +1434,7 @@ mod tests {
 
         // 空席：直接接入
         assert_eq!(arbitrate_primary(None, "p1"), PrimaryArbitration::Admit);
-        // 同一主力旧连接：踢旧接新
+        // 同一常用设备旧连接：踢旧接新
         assert_eq!(
             arbitrate_primary(Some(&primary_session), "p1"),
             PrimaryArbitration::ReplaceSelf
@@ -1411,7 +1444,7 @@ mod tests {
             arbitrate_primary(Some(&transient_session), "p1"),
             PrimaryArbitration::WaitTakeover
         );
-        // 另一 client_id 面对主力占用（理论上一台 PC 只有一个主力，逻辑仍应等待）
+        // 另一 client_id 面对常用设备占用（理论上一台 PC 只有一个常用设备，逻辑仍应等待）
         assert_eq!(
             arbitrate_primary(Some(&primary_session), "p2"),
             PrimaryArbitration::WaitTakeover
@@ -1560,9 +1593,16 @@ mod integration_tests {
 
     /// 扮演手机连上去
     fn connect_as_phone(addr: SocketAddr) -> (TcpStream, BufReader<TcpStream>) {
+        connect_as_phone_timeout(addr, std::time::Duration::from_secs(5))
+    }
+
+    /// 同上，但指定读超时：用来断言"消息必须在 N 秒内到"
+    fn connect_as_phone_timeout(
+        addr: SocketAddr,
+        timeout: std::time::Duration,
+    ) -> (TcpStream, BufReader<TcpStream>) {
         let sock = TcpStream::connect(addr).expect("connect");
-        sock.set_read_timeout(Some(std::time::Duration::from_secs(5)))
-            .expect("set_read_timeout");
+        sock.set_read_timeout(Some(timeout)).expect("set_read_timeout");
         let reader = BufReader::new(sock.try_clone().expect("clone"));
         (sock, reader)
     }
@@ -1576,8 +1616,13 @@ mod integration_tests {
     #[test]
     fn test_downgrade_issues_resume_and_grant_works() {
         let (state, code) = test_state();
-        state.set_remember_next(true); // 这次码配对绑定为主力
-        let (mut sock, mut reader) = connect_as_phone(spawn_server(state.clone()));
+        state.set_remember_next(true); // 这次码配对绑定为常用设备
+        // 只等 1 秒：降级通知必须**当场**发出，不许等手机下一条心跳
+        // （历史上靠连接线程轮询的实现在这里必然超时——那正是"手机上标签慢半拍"的根因）
+        let (mut sock, mut reader) = connect_as_phone_timeout(
+            spawn_server(state.clone()),
+            std::time::Duration::from_secs(1),
+        );
 
         send_hello(
             &mut sock,
@@ -1586,12 +1631,11 @@ mod integration_tests {
         let ack = read_until(&mut reader, "hello_ack");
         assert_eq!(ack["ok"], true);
         assert_eq!(ack["session"], "primary");
-        assert!(ack["token"].is_string(), "绑定主力应下发 token");
-        assert!(ack["resume_token"].is_null(), "主力不需要续连凭证");
+        assert!(ack["token"].is_string(), "绑定常用设备应下发 token");
+        assert!(ack["resume_token"].is_null(), "常用设备不需要续连凭证");
 
-        // 主人解绑 → 降级；发一次心跳促使连接线程处理降级标志（真机是每 5s 一次 ping）
+        // 主人解绑 → 降级通知当场到达，手机全程一句话都没说
         state.unbind_primary();
-        sock.write_all(b"{\"type\":\"ping\"}\n").expect("write ping");
         let ev = read_until(&mut reader, "session_downgraded");
         let resume_token = ev["resume_token"].as_str().unwrap_or_default().to_string();
         assert!(
@@ -1620,7 +1664,7 @@ mod integration_tests {
         );
     }
 
-    /// 扫码来的临时连接同样拿到凭证，并可用它续连（原本就正常，留作回归护栏）
+    /// 扫码来的临时设备同样拿到凭证，并可用它续连（原本就正常，留作回归护栏）
     #[test]
     fn test_code_transient_gets_grant_and_resume_works() {
         let (state, code) = test_state();
@@ -1665,12 +1709,11 @@ mod integration_tests {
         assert_eq!(read_until(&mut reader, "hello_ack")["session"], "primary");
 
         state.unbind_primary();
-        sock.write_all(b"{\"type\":\"ping\"}\n").expect("write ping");
         let ev = read_until(&mut reader, "session_downgraded");
         assert!(ev["resume_token"].is_null(), "关闭续连时不应签发凭证");
     }
 
-    /// 转正：把在线的临时手机设为主力 → 手机收到带长期 token 的 promoted，
+    /// 转正：把在线的临时手机设为常用设备 → 手机收到带长期 token 的 promoted，
     /// 该 token 之后能换到 primary 席位（等价于扫码时勾选"记住这台手机"）
     #[test]
     fn test_promote_transient_to_primary() {
@@ -1683,11 +1726,11 @@ mod integration_tests {
         );
         let ack = read_until(&mut reader, "hello_ack");
         assert_eq!(ack["session"], "transient");
-        assert!(!state.config.lock().unwrap().has_primary(), "转正前不应有主力");
+        assert!(!state.config.lock().unwrap().has_primary(), "设为常用前不应有绑定");
 
-        // 主人点"设为主力手机"
+        // 主人在设置页点「设为常用设备」
         state.promote_current_session().expect("转正应当成功");
-        assert!(state.config.lock().unwrap().has_primary(), "应写入主力记录");
+        assert!(state.config.lock().unwrap().has_primary(), "应写入常用设备记录");
 
         let ev = read_until(&mut reader, "promoted");
         let token = ev["token"].as_str().unwrap_or_default().to_string();
@@ -1695,10 +1738,10 @@ mod integration_tests {
         assert_eq!(ev["device_name"], "测试电脑");
         sock.write_all(b"{\"type\":\"promoted_ack\"}\n").expect("ack");
 
-        // 再次转正应被拒（当前已是主力）
+        // 再次设为常用应被拒（当前已是常用设备）
         assert!(
             state.promote_current_session().is_err(),
-            "已经是主力时不应重复转正"
+            "已经是常用设备时不应重复设置"
         );
 
         // 手机端拿到 token 后重连 → 应直接进 primary 席位
@@ -1713,7 +1756,116 @@ mod integration_tests {
         );
         let ack2 = read_until(&mut reader2, "hello_ack");
         assert_eq!(ack2["ok"], true);
-        assert_eq!(ack2["session"], "primary", "转正后凭 token 应拿到主力席位");
+        assert_eq!(ack2["session"], "primary", "设为常用后凭 token 应拿到常用设备席位");
+    }
+
+    /// 反复"解绑 → 设为常用设备 → 再解绑"：每一次都必须通知到手机。
+    /// 回归护栏：历史上同一条连接里只有**第一次**解绑发得出去（一个只置位、
+    /// 不复位的闩），于是重复解绑时手机端标签永远停在"常用设备"。
+    #[test]
+    fn test_repeated_unbind_notifies_every_time() {
+        let (state, code) = test_state();
+        state.set_remember_next(true);
+        let (mut sock, mut reader) = connect_as_phone(spawn_server(state.clone()));
+        send_hello(
+            &mut sock,
+            serde_json::json!({"type":"hello","code":code,"client_id":"cid-r","device_name":"测试手机"}),
+        );
+        assert_eq!(read_until(&mut reader, "hello_ack")["session"], "primary");
+
+        for round in 1..=3 {
+            state.unbind_primary();
+            let ev = read_until(&mut reader, "session_downgraded");
+            assert!(
+                ev["resume_token"].is_string(),
+                "第 {round} 次解绑也必须通知，且带续连凭证"
+            );
+
+            // 手机被重新设为常用设备（等价于设置页点「设为常用设备」）
+            state.promote_current_session().expect("设为常用设备应当成功");
+            let promoted = read_until(&mut reader, "promoted");
+            assert_eq!(promoted["type"], "promoted");
+            sock.write_all(b"{\"type\":\"promoted_ack\"}\n").expect("ack");
+        }
+    }
+
+    /// 心跳回报权威身份：常用设备 primary、解绑降级后 transient。
+    /// 手机端据此自愈——就算那条身份推送丢了，一次心跳内也能纠正标签。
+    #[test]
+    fn test_pong_reports_authoritative_identity() {
+        let (state, code) = test_state();
+        state.set_remember_next(true);
+        let (mut sock, mut reader) = connect_as_phone(spawn_server(state.clone()));
+        send_hello(
+            &mut sock,
+            serde_json::json!({"type":"hello","code":code,"client_id":"cid-id","device_name":"测试手机"}),
+        );
+        assert_eq!(read_until(&mut reader, "hello_ack")["session"], "primary");
+
+        sock.write_all(b"{\"type\":\"ping\"}\n").expect("ping");
+        assert_eq!(
+            read_until(&mut reader, "pong")["session"],
+            "primary",
+            "常用设备的心跳应回报 primary"
+        );
+
+        state.unbind_primary();
+        read_until(&mut reader, "session_downgraded");
+        sock.write_all(b"{\"type\":\"ping\"}\n").expect("ping");
+        assert_eq!(
+            read_until(&mut reader, "pong")["session"],
+            "transient",
+            "降级后心跳必须回报临时设备身份"
+        );
+    }
+
+    /// 发现门控：**窗口期内有效的临时续连凭证**也应得到应答。
+    /// 临时设备只记得 IP+端口，电脑换 IP 时这是它唯一的找回路径；
+    /// 无效/无关/已作废的凭证仍然一律隐身。
+    #[test]
+    fn test_discovery_accepts_valid_transient_resume() {
+        use crate::config::sha256_hex;
+        use crate::discovery::build_response;
+
+        let (state, _code) = test_state();
+        let req = |client: &str, proof: &str| {
+            serde_json::json!({
+                "type": "vl_disc_req", "protocol": 1,
+                "client_id": client, "proof": proof
+            })
+            .to_string()
+        };
+
+        assert!(
+            build_response(&state, req("cid-t", &"00".repeat(32)).as_bytes()).is_none(),
+            "没有任何凭证时必须隐身"
+        );
+
+        let (token, ttl) = state
+            .issue_transient_resume("cid-t", "临时手机")
+            .expect("应签发续连凭证");
+        assert!(ttl > 0);
+        let proof = sha256_hex(&token);
+
+        assert!(
+            build_response(&state, req("cid-t", &proof).as_bytes()).is_some(),
+            "有效临时凭证应得到应答（临时设备换 IP 才找得回来）"
+        );
+        assert!(
+            build_response(&state, req("cid-x", &proof).as_bytes()).is_none(),
+            "client_id 不符仍隐身"
+        );
+        assert!(
+            build_response(&state, req("cid-t", &sha256_hex("nope")).as_bytes()).is_none(),
+            "proof 错误仍隐身"
+        );
+
+        // 主人断开 / 手机 bye → 记录作废，立刻回到隐身
+        state.clear_transient_resume("cid-t");
+        assert!(
+            build_response(&state, req("cid-t", &proof).as_bytes()).is_none(),
+            "作废后的临时凭证必须隐身"
+        );
     }
 
     /// 没有连接时转正应报错（界面据此提示）

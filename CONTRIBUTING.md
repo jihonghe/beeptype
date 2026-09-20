@@ -89,7 +89,7 @@ cd app && flutter build apk --release --target-platform android-arm64
 1. 启动 PC 端 `cargo tauri dev`（或 `cargo build` 后直接跑 `target/debug/beetype`）→ 托盘图标出现
 2. 手机 `flutter run` → 扫码 → 连 PC
 3. 发一条短消息，确认自动粘贴 / 自动发送正常
-4. 主力绑定 → 卸载重装手机 APP → 再扫码 → 确认 hardware_id 恢复主力身份
+4. 常用设备绑定 → 卸载重装手机 APP → 再扫码 → 确认 hardware_id 恢复常用设备身份
 5. 桌面端单测：`cd desktop/src-tauri && cargo test`
 
 ## 开发与发布流程（三条轨道）

@@ -39,7 +39,7 @@ class AckResult {
   });
 }
 
-/// PC 端把本机"设为主力"时下发的长期凭证（明文仅此一次）
+/// PC 端把本机"设为常用设备"时下发的长期凭证（明文仅此一次）
 class PromotedGrant {
   final String token;
   final String deviceId;
@@ -55,7 +55,7 @@ class PromotedGrant {
   });
 }
 
-/// 降级为临时连接时，PC 补发的续连凭证
+/// 降级为临时设备时，PC 补发的续连凭证
 class ResumeGrant {
   final String token;
   final int expiresInSec;
@@ -86,7 +86,15 @@ class HelloOutcome {
 
   bool get isPrimary => session == 'primary';
   bool get isOccupied => status == 'occupied';
-  bool get isUnauthorized => status == 'unauthorized' || status == 'cooldown';
+
+  /// 电脑**明确拒绝**了本机凭证（不认识这台设备）——凭证已失效，应删除并重扫。
+  ///
+  /// 刻意不含 cooldown：那只是"尝试太频繁，等 60 秒再来"的临时限流，
+  /// 把绑定删掉就成了"一次限流换一台好设备重扫"，属于误伤。
+  bool get isUnauthorized => status == 'unauthorized';
+
+  /// 被电脑限流（IP 冷却）：等一会儿再来，凭证原样保留
+  bool get isRateLimited => status == 'cooldown';
 
   HelloOutcome({
     required this.ok,
@@ -137,14 +145,19 @@ class TcpService {
   final _sessionEndedController = StreamController<String>.broadcast();
 
   /// 会话被降级为临时（PC 端解绑）时，PC 补发的续连凭证。
-  /// 降级来的临时会话必须和扫码临时连接一样能断线续连，否则体验不一致。
+  /// 降级来的临时会话必须和扫码临时设备一样能断线续连，否则体验不一致。
   final _downgradeGrantController = StreamController<ResumeGrant>.broadcast();
   Stream<ResumeGrant> get downgradeGrantStream =>
       _downgradeGrantController.stream;
 
-  /// PC 端在设置页把本机设为主力时的推送（手机据此落盘长期凭证）
+  /// PC 端在设置页把本机设为常用设备时的推送（手机据此落盘长期凭证）
   final _promotedController = StreamController<PromotedGrant>.broadcast();
   Stream<PromotedGrant> get promotedStream => _promotedController.stream;
+
+  /// 心跳（pong）里回报的**权威身份**："primary" 常用设备 / "transient" 临时设备。
+  /// 身份推送万一丢了，手机靠它在一个心跳周期（约 5 秒）内自愈。
+  final _identityController = StreamController<String>.broadcast();
+  Stream<String> get authoritativeIdentityStream => _identityController.stream;
 
   String? _lastIp;
   int? _lastPort;
@@ -211,7 +224,7 @@ class TcpService {
   /// 发送 hello。
   ///
   /// - 绑定/临时接入：传 [code]
-  /// - 已绑定主力自动连接：传 [token]
+  /// - 已绑定常用设备自动连接：传 [token]
   /// - 临时会话断线续连：传 [resume]（窗口期内的续连凭证）
   ///
   /// 返回结构化结果：成功（持席）/ occupied（等待接管）/ 各类拒绝。
@@ -264,7 +277,7 @@ class TcpService {
     }
   }
 
-  /// occupied 状态下请求接管电脑（仅认证主力可用）
+  /// occupied 状态下请求接管电脑（仅认证常用设备可用）
   Future<bool> takeover() async {
     if (!_isConnected) return false;
     final completer = Completer<bool>();
@@ -436,7 +449,7 @@ class TcpService {
         break;
 
       case 'promoted':
-        // PC 端把这台手机设为主力：落盘长期凭证（等同扫码勾选"记住这台手机"）
+        // PC 端把这台手机设为常用设备：落盘长期凭证（等同扫码勾选"记住这台手机"）
         final pToken = d['token'] as String?;
         final pDeviceId = d['device_id'] as String?;
         if (pToken != null && pToken.isNotEmpty && pDeviceId != null) {
@@ -480,6 +493,14 @@ class TcpService {
         break;
 
       case 'pong':
+        // 心跳顺带回报权威身份；没带（不持席/未认证）就什么都不做，绝不瞎猜
+        final authoritative = d['session'] as String?;
+        final isIdentityClaim =
+            authoritative == 'primary' || authoritative == 'transient';
+        if (isIdentityClaim && authoritative != null) {
+          _identityController.add(authoritative);
+        }
+        // 没带身份（不持席/未认证）时什么都不做，绝不瞎猜
         break;
     }
   }
@@ -531,6 +552,7 @@ class TcpService {
     _statusController.close();
     _sessionEndedController.close();
     _downgradeGrantController.close();
+    _identityController.close();
     _promotedController.close();
   }
 }

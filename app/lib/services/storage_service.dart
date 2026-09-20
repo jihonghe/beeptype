@@ -3,9 +3,9 @@ import 'dart:math';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// 一台已绑定的输出设备（持长期 token 的主力电脑）。
+/// 一台已绑定的输出设备（持长期 token 的常用电脑）。
 ///
-/// 临时会话（PC 主力位已被别的手机占用、扫码接入）不落盘，仅存内存。
+/// 临时会话（这台电脑已有别的常用设备、自己只是扫码接入）不落盘，仅存内存。
 class OutputDevice {
   final String deviceId;
   String name;
@@ -53,7 +53,7 @@ class OutputDevice {
 
 /// 一条**临时会话**的续连记录（与"已绑定电脑"分开存，不混进常用列表）。
 ///
-/// 临时连接本身不落长期凭证：只有在 PC 侧开启了"断线后自动续连"时，才会在配对
+/// 临时设备本身不落长期凭证：只有在 PC 侧开启了"断线后自动续连"时，才会在配对
 /// 成功时拿到续连凭证，并在窗口期内凭它免扫码回到同一台电脑；窗口过期或 PC 侧
 /// 作废（重启/主人断开）后即失效，需要重新扫码。
 class TransientSession {
@@ -106,7 +106,7 @@ class TransientSession {
 
 /// 存储服务：手机身份 + 已绑定电脑列表。
 ///
-/// 单主力机模型体现在 PC 端（一台 PC 只记一部主力手机）；手机端可记住多台
+/// 单常用设备模型体现在 PC 端（一台 PC 只记一部常用设备）；手机端可记住多台
 /// 电脑（公司/家里），v1 自动连接最近使用的一台（[primaryDevice]）。
 class StorageService {
   static const _keyClientId = 'client_id';

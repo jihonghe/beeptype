@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
+
+import 'lan_check.dart';
 import 'package:flutter/services.dart';
 import 'tcp_service.dart';
 import 'storage_service.dart';
@@ -32,10 +34,10 @@ class TextSender {
     return name;
   }
 
-  /// 是否有可自动连接的目标：已绑定主力电脑，或未过期的临时会话记录
+  /// 是否有可自动连接的目标：已绑定常用电脑，或未过期的临时会话记录
   bool get hasAnyTarget => _storage.hasDevices || hasTransientSession;
 
-  /// 是否有未过期的临时会话记录（临时连接的续连窗口内）
+  /// 是否有未过期的临时会话记录（临时设备的续连窗口内）
   bool get hasTransientSession {
     final t = _storage.transientSession;
     return t != null && !t.isExpired;
@@ -63,21 +65,24 @@ class TextSender {
   Future<void> init() async {
     if (_initialized) return;
     await _storage.init();
-    // 被降级为临时连接时，PC 会补发续连凭证：立刻落盘，
-    // 这样"降级来的临时会话"和扫码临时连接一样能断线续连
+    // 被降级为临时设备时，PC 会补发续连凭证：立刻落盘，
+    // 这样"降级来的临时会话"和扫码临时设备一样能断线续连
     _downgradeSub = _tcp.downgradeGrantStream.listen(_onDowngradeGrant);
     _promotedSub = _tcp.promotedStream.listen(_onPromoted);
+    // 心跳里的权威身份：身份推送万一丢了（任何原因），一次心跳内自愈
+    _identitySub = _tcp.authoritativeIdentityStream.listen(_onAuthoritativeIdentity);
     _initialized = true;
   }
 
   StreamSubscription<ResumeGrant>? _downgradeSub;
   StreamSubscription<PromotedGrant>? _promotedSub;
+  StreamSubscription<String>? _identitySub;
 
-  /// 会话身份发生变化（例如被电脑设为主力）时通知界面刷新
+  /// 会话身份发生变化（例如被电脑设为常用设备）时通知界面刷新
   final _sessionUpdatedController = StreamController<void>.broadcast();
   Stream<void> get sessionUpdated => _sessionUpdatedController.stream;
 
-  /// PC 端在设置页把本机设为主力：落盘长期凭证 + 作废临时续连记录 + 刷新界面
+  /// PC 端在设置页把本机设为常用设备：落盘长期凭证 + 作废临时续连记录 + 刷新界面
   Future<void> _onPromoted(PromotedGrant g) async {
     final ip = _tcp.lastIp;
     final port = _tcp.lastPort;
@@ -95,7 +100,7 @@ class TextSender {
       capabilities: g.capabilities,
       lastConnectedMs: DateTime.now().millisecondsSinceEpoch,
     ));
-    // 已是主力：临时续连记录不再需要
+    // 已是常用设备：临时续连记录不再需要
     await _storage.clearTransientSession();
     final s = session;
     if (s != null) {
@@ -110,7 +115,7 @@ class TextSender {
       );
     }
     _sessionUpdatedController.add(null);
-    debugPrint('VL_TCP 已被设为常用手机，凭证已落盘');
+    debugPrint('VL_TCP 已被设为常用设备，凭证已落盘');
   }
 
   void _onDowngradeGrant(ResumeGrant grant) {
@@ -130,6 +135,34 @@ class TextSender {
     debugPrint('VL_TCP 降级续连凭证已落盘（${grant.expiresInSec}s 窗口）');
   }
 
+  /// 电脑在心跳里回报的权威身份与本地认知不一致时纠正过来。
+  ///
+  /// 只处理"能确定"的方向：电脑说我是临时设备 → 我确实已不是常用设备
+  /// （删除本地凭证 + 会话标记为临时，与收到降级推送完全一致）。
+  /// 反方向（电脑说我是常用设备）只更新界面标签——长期凭证只在推送里给过一次，
+  /// 拿不到凭证明白写成常用设备反而是撒谎；实机上这条路径几乎不可达
+  /// （推送发不出去就等于连接已断，重连握手会给出真相）。
+  void _onAuthoritativeIdentity(String authoritative) {
+    final s = session;
+    if (s == null || !s.ok) return;
+    if (authoritative == 'transient' && s.isPrimary) {
+      debugPrint('VL_TCP 心跳纠正身份：常用设备 → 临时设备');
+      unawaited(downgradeToTemp().then((_) => _sessionUpdatedController.add(null)));
+    } else if (authoritative == 'primary' && !s.isPrimary) {
+      debugPrint('VL_TCP 心跳纠正身份：临时设备 → 常用设备');
+      session = HelloOutcome(
+        ok: s.ok,
+        status: s.status,
+        session: 'primary',
+        deviceId: s.deviceId,
+        deviceName: s.deviceName,
+        deviceType: s.deviceType,
+        capabilities: s.capabilities,
+      );
+      _sessionUpdatedController.add(null);
+    }
+  }
+
   /// 重新读取系统设备名（切回前台时调用；用户改手机名后，下次连接 PC 即显示新名）
   Future<void> refreshDeviceName() => _storage.syncDeviceName();
 
@@ -138,7 +171,18 @@ class TextSender {
   String get clientId => _storage.clientId;
   String get deviceName => _storage.getDeviceName();
 
-  /// 自动连接最近使用的主力电脑。
+  /// 上一次**实际尝试**过的目标地址（连接失败时也要有值——TCP 层的 lastIp
+  /// 只在连上后才记，判断"是不是不在同一网络"必须用尝试过的那个地址）
+  String? _lastAttemptTargetIp;
+
+  /// 目标地址是否看起来不在同一局域网（供失败提示；判断不了就说"否"）
+  Future<bool> targetLooksOffLan() async {
+    final ip = _lastAttemptTargetIp;
+    if (ip == null) return false;
+    return likelyOffLan(ip, await localIpv4Addresses());
+  }
+
+  /// 自动连接最近使用的常用电脑。
   ///
   /// 缓存 IP 直连与 UDP 发现并行：直连立即发起；直连网络层失败时，
   /// 用发现结果（proof 门控，应答必为该电脑）对新 IP 补连一次，
@@ -147,7 +191,7 @@ class TextSender {
     manualDisconnected = false;
     final dev = _storage.primaryDevice;
     if (dev == null) {
-      // 没有主力凭证：看看有没有"窗口期内"的临时会话可以续连
+      // 没有常用凭证：看看有没有"窗口期内"的临时会话可以续连
       return _resumeTransientIfAny();
     }
 
@@ -162,6 +206,7 @@ class TextSender {
 
     HelloOutcome? outcome;
     final hid = await hardwareId;
+    _lastAttemptTargetIp = dev.ip;
     try {
       await _tcp.connect(dev.ip, dev.port, timeout: _directConnectTimeout);
       outcome = await _tcp.hello(
@@ -195,10 +240,22 @@ class TextSender {
     }
     final cand = found.isEmpty ? null : found.first;
     if (cand == null || cand.ip == dev.ip) {
+      // 常用记录网络层不可达、广播也没人应：还留着一条**同一台电脑**的有效临时
+      // 续连记录时，改走它（解绑后用临时身份重连过就会这样：旧记录挡住能用的新记录）
+      final fallback = await _resumeTransientIfSameDevice(dev.deviceId);
+      // 临时续连给出明确结论就用它（成功/占用/被拒/被限流）；
+      // 只是网络层没连上，就仍旧按常用记录的结果回报
+      if (fallback.ok ||
+          fallback.isOccupied ||
+          fallback.isUnauthorized ||
+          fallback.isRateLimited) {
+        return fallback;
+      }
       return outcome ?? HelloOutcome.networkFail();
     }
 
     await _tcp.disconnect();
+    _lastAttemptTargetIp = cand.ip;
     try {
       await _tcp.connect(cand.ip, cand.port, timeout: _directConnectTimeout);
       outcome = await _tcp.hello(
@@ -219,15 +276,24 @@ class TextSender {
     return outcome;
   }
 
-  /// 临时会话续连：临时手机被系统杀进程后，凭窗口期内的凭证免扫码回到同一台电脑。
+  /// 临时设备续连：临时手机被系统杀进程后，凭窗口期内的凭证免扫码回到同一台电脑。
   ///
   /// 失败分三种，处理不同：
   /// - 网络层连不上 → 返回失败，留着记录等下次重试（可能是电脑睡了/换网了）
   /// - 凭证被拒（窗口过期 / PC 重启 / 主人在电脑上断开了它）→ 删记录 + 提示重新扫码
   /// - 席位被占 → 交给上层显示"电脑使用中"（临时方没有接管入口）
-  Future<HelloOutcome> _resumeTransientIfAny() async {
+  Future<HelloOutcome> _resumeTransientIfAny() => _resumeTransient(null);
+
+  /// 仅当临时记录属于指定电脑时续连（用于"旧常用记录挡路"的回退路径）
+  Future<HelloOutcome> _resumeTransientIfSameDevice(String deviceId) =>
+      _resumeTransient(deviceId);
+
+  Future<HelloOutcome> _resumeTransient(String? onlyDeviceId) async {
     final t = _storage.transientSession;
     if (t == null) return HelloOutcome.networkFail();
+    if (onlyDeviceId != null && t.deviceId != onlyDeviceId) {
+      return HelloOutcome.networkFail();
+    }
 
     if (t.isExpired) {
       await _storage.clearTransientSession();
@@ -236,10 +302,28 @@ class TextSender {
     }
 
     final hid = await hardwareId;
+    _lastAttemptTargetIp = t.ip;
     try {
       await _tcp.connect(t.ip, t.port, timeout: _directConnectTimeout);
     } catch (_) {
-      return HelloOutcome.networkFail();
+      // 直连不上（典型：电脑换了 IP）：广播找一次。发现服务认得窗口期内有效的
+      // 临时凭证，因此临时设备也能像常用设备那样找回换过地址的电脑。
+      // 换了网络（广播出不去）或窗口过期则找不到，保留记录等下次重试。
+      final found = await _discovery
+          .discover(
+            clientId: _storage.clientId,
+            token: t.token,
+            port: t.port,
+          )
+          .catchError((Object _) => <DiscoveredDevice>[]);
+      if (found.isEmpty) return HelloOutcome.networkFail();
+      _lastAttemptTargetIp = found.first.ip;
+      try {
+        await _tcp.connect(found.first.ip, found.first.port,
+            timeout: _directConnectTimeout);
+      } catch (_) {
+        return HelloOutcome.networkFail();
+      }
     }
 
     final outcome = await _tcp.hello(
@@ -265,7 +349,7 @@ class TextSender {
 
   /// 扫码配对入口。
   ///
-  /// - PC 勾选了"记住此手机"→ ack 带 token，落盘为主力电脑；
+  /// - PC 勾选了"记住此手机"→ ack 带 token，落盘为常用电脑；
   /// - 否则是临时会话，只存内存，不落任何凭证。
   Future<HelloOutcome> pairWithCode(
     String ip,
@@ -337,14 +421,23 @@ class TextSender {
     }
     final port = uri.hasPort ? uri.port : 8765;
     final outcome = await pairWithCode(uri.host, port, code);
-    return (ok: outcome.ok, error: outcome.ok ? null : _describe(outcome));
+    if (outcome.ok) return (ok: true, error: null);
+    // 网络层失败且能判断两者不在同一网络 → 直说是网络问题，别让用户去猜电脑
+    if (outcome.status == 'network_fail') {
+      final off = likelyOffLan(uri.host, await localIpv4Addresses());
+      return (
+        ok: false,
+        error: off ? '连接失败，请确认手机和电脑连着同一个 Wi-Fi' : '连接失败',
+      );
+    }
+    return (ok: false, error: _describe(outcome));
   }
 
   /// occupied 状态下用户点"接管电脑"
   Future<bool> takeover() async {
     final ok = await _tcp.takeover();
     if (ok && session != null) {
-      // takeover 后身份仍为 primary（能走到这的必然是认证主力）
+      // takeover 后身份仍为 primary（能走到这的必然是认证过的常用设备）
       session = HelloOutcome(
         ok: true,
         status: 'ok',
@@ -362,7 +455,7 @@ class TextSender {
   ///
   /// 同时作废本地的临时续连记录：主动断开 = 这次会话到此为止。
   /// 否则界面会因为"还有可连目标"而停在断开态、不回扫码引导页
-  /// （临时连接降级来的会话尤其明显：它已经没有常用电脑记录了）。
+  /// （临时设备降级来的会话尤其明显：它已经没有常用电脑记录了）。
   Future<void> userDisconnect() async {
     // 先置标记：bye 会同步广播 disconnected，避免那一帧排程出自动重连
     manualDisconnected = true;
@@ -377,10 +470,10 @@ class TextSender {
     unawaited(_storage.clearTransientSession());
   }
 
-  /// PC 端解绑本机：会话降级为临时连接（连接保持），删除本地落盘凭证。
+  /// PC 端解绑本机：会话降级为临时设备（连接保持），删除本地落盘凭证。
   ///
   /// 与 forgetDevice 的区别：不发 bye、不清理内存会话——TCP 会话继续用于
-  /// 打字粘贴，只是身份从主力变为临时；断线后不再自动重连（无凭证）。
+  /// 打字粘贴，只是身份从常用设备变为临时设备；断线后不再自动重连（无凭证）。
   Future<void> downgradeToTemp() async {
     final id = session?.deviceId;
     if (id != null) {
@@ -440,13 +533,14 @@ class TextSender {
         return '电脑正被另一台手机使用';
       case 'network_fail':
       default:
-        return '连不上电脑，请检查 IP 和网络';
+        return '连接失败';
     }
   }
 
   void dispose() {
     _downgradeSub?.cancel();
     _promotedSub?.cancel();
+    _identitySub?.cancel();
     _sessionUpdatedController.close();
     _tcp.dispose();
   }

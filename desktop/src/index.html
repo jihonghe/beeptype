@@ -240,7 +240,7 @@
         }
         .select:hover { background-color: #363c5c; }
 
-        /* ---- 主力机卡片 ---- */
+        /* ---- 常用设备卡片 ---- */
         .device-card { padding: 13px 14px; }
         .device-name { font-size: 13px; font-weight: 600;
                        overflow: hidden; text-overflow: ellipsis;
@@ -301,7 +301,7 @@
             </button>
         </header>
 
-        <!-- 状态卡：谁连着、主力/临时、断开 -->
+        <!-- 状态卡：谁连着、常用设备/临时、断开 -->
         <div id="status-card" class="status-card card"></div>
 
         <!-- 配对区：未连接显二维码卡；已连接折叠为入口卡 -->
@@ -321,7 +321,7 @@
             <span class="nav-title">设置</span>
         </header>
 
-        <!-- 分组规则（与 TECH_DESIGN 一致）：粘贴与发送 → 连接行为 → 启动 → 常用手机 → 关于。
+        <!-- 分组规则（与 TECH_DESIGN 一致）：粘贴与发送 → 连接行为 → 启动 → 常用设备 → 关于。
              新增设置项按这条线归位，不要再"就近插入"，否则排序会漂。 -->
         <p class="group-label">粘贴与发送</p>
         <div class="card">
@@ -361,8 +361,8 @@
             </div>
             <div class="setting-row">
                 <div class="setting-text">
-                    <div class="setting-title">临时连接断线后自动续连</div>
-                    <div class="setting-sub" id="rt-note">临时手机被系统杀掉后，这段时间内重开 App 可自动连回</div>
+                    <div class="setting-title">临时设备断线后自动续连</div>
+                    <div class="setting-sub" id="rt-note">临时设备被系统杀掉后，这段时间内重开 App 可自动连回</div>
                 </div>
                 <select class="select" id="set-resume-ttl">
                     <option value="0">关闭</option>
@@ -387,7 +387,7 @@
             </div>
         </div>
 
-        <p class="group-label">常用手机</p>
+        <p class="group-label">常用设备</p>
         <div class="card device-card" id="device-card"></div>
 
         <p class="group-label">关于</p>
@@ -404,7 +404,7 @@
         const invoke = window.__TAURI__?.core?.invoke;
         const listen = window.__TAURI__?.event?.listen;
 
-        // "绑为主力"勾选，仅在主力位空缺时有意义；默认不勾——扫码默认临时连接
+        // "绑为常用设备"勾选，仅在还没有常用设备时有意义；默认不勾——扫码默认临时设备
         let rememberChoice = false;
         // 各区上一次渲染的结构键，避免 1s 轮询全量重绘（会丢 hover/勾选态）
         let lastStatusKey = '';
@@ -421,7 +421,7 @@
         const QR_PLACEHOLDER = '<div style="width:128px;height:128px"></div>';
         const WAITING_VARIANTS = [
             '<label class="remember"><input type="checkbox"> 记住这台手机，以后自动连接</label>',
-            '<p class="bound-note">已有常用手机，其他手机扫码将以临时连接接入</p>'
+            '<p class="bound-note">已有常用设备，其他手机扫码将以临时设备接入</p>'
         ];
         function measureWaitingHeight() {
             let max = 0;
@@ -551,8 +551,8 @@
             }
             el.classList.remove('hidden');
             const tag = info.sessionIsPrimary
-                ? '<span class="sc-tag">常用</span>'
-                : '<span class="sc-tag temp">临时</span>';
+                ? '<span class="sc-tag">常用设备</span>'
+                : '<span class="sc-tag temp">临时设备</span>';
             el.innerHTML =
                 '<span class="dot dot-green"></span>' +
                 '<span class="sc-name">' + escapeHtml(info.connectedName || '手机') + '</span>' +
@@ -593,7 +593,7 @@
             }
             el.classList.remove('is-ready');
 
-            // 等待态：结构（主力位空/已绑）变化或配对码变化时才重绘
+            // 等待态：结构（还没有常用设备 / 已绑）变化或配对码变化时才重绘
             const structure = 'waiting:' + (info.hasPrimary ? 'bound' : 'free');
             // 二维码 3 分钟自动续期也会触发重绘，那种情况不播入场动画
             const enteringWaiting = lastPairKey !== 'waiting:free' &&
@@ -604,7 +604,7 @@
             el.dataset.code = info.code;
 
             const rememberRow = info.hasPrimary
-                ? '<p class="bound-note">已有常用手机，其他手机扫码将以临时连接接入</p>'
+                ? '<p class="bound-note">已有常用设备，其他手机扫码将以临时设备接入</p>'
                 : '<label class="remember"><input type="checkbox" id="remember"' + (rememberChoice ? ' checked' : '') +
                   '> 记住这台手机，以后自动连接</label>';
 
@@ -659,8 +659,8 @@
                 ? '手机连上电脑后，窗口自动收起到系统托盘'
                 : '窗口会一直留在桌面，方便查看状态和管理设备';
             const rtText = () => rt.value === '0'
-                ? '临时连接断开后需重新扫码'
-                : '临时手机被系统杀掉后，这段时间内重开 App 可自动连回（超时需重新扫码）';
+                ? '临时设备断开后需重新扫码'
+                : '临时设备被系统杀掉后，这段时间内重开 App 可自动连回（超时需重新扫码）';
             rt.value = String(s.resumeTtlMin ?? 5);
             rtNote.textContent = rtText();
             ap.disabled = !s.autoPasteSupported;
@@ -725,15 +725,15 @@
             document.getElementById('app-version').textContent = 'v' + escapeHtml(s.version || '');
 
             // 在线会话信息来自 get_pairing_info（1s 轮询同一份数据），
-            // 用来判断"主力位空缺且当前是临时连接"→ 可以一键转正
+            // 用来判断"还没有常用设备且当前是临时设备"→ 可以一键转正
             let pair = null;
             try { pair = await invoke('get_pairing_info'); } catch (e) { /* 忽略 */ }
             renderDeviceCard(s, pair);
         }
 
-        /* ---------------- 「常用手机」卡（设置页） ---------------- */
+        /* ---------------- 「常用设备」卡（设置页） ---------------- */
         // 同样按结构键增量更新：1s 轮询也会调它，因此手机断开/转正后卡片会
-        // 立刻纠正——不然它会一直停在"临时连接 + 设为主力手机"，用户点下去
+        // 立刻纠正——不然它会一直停在"临时设备 + 设为常用设备"，用户点下去
         // 才发现这台手机早就不在线了。
         let lastDeviceKey = '';
         function renderDeviceCard(s, pair) {
@@ -767,9 +767,9 @@
             } else if (canPromote) {
                 dc.innerHTML =
                     '<div class="device-name">' + escapeHtml(pair.connectedName || '这台手机') + '</div>' +
-                    '<div class="setting-sub">当前是临时连接。设为主力后，这台手机将获得长期凭证，' +
+                    '<div class="setting-sub">当前是临时设备。设为常用设备后，这台手机将获得长期凭证，' +
                     '以后打开 APP 自动连接。</div>' +
-                    '<button class="btn-primary-block" id="btn-promote">设为主力手机</button>';
+                    '<button class="btn-primary-block" id="btn-promote">设为常用设备</button>';
                 document.getElementById('btn-promote').onclick = async (e) => {
                     e.target.disabled = true;
                     e.target.textContent = '设置中…';
@@ -781,18 +781,18 @@
                         showNotice('设置失败：' + errText(err));
                         // 失败常见于"这台手机其实已经不在线"——重拉一次把卡片纠正回来
                         e.target.disabled = false;
-                        e.target.textContent = '设为主力手机';
+                        e.target.textContent = '设为常用设备';
                         refresh();
                     }
                 };
             } else {
                 dc.innerHTML =
-                    '<div class="device-empty">还没有常用手机。可以：在主页扫码连接时勾选「记住这台手机」；' +
-                    '或让手机先临时连接上，再回到这里点「设为主力手机」。</div>';
+                    '<div class="device-empty">还没有常用设备。可以：在主页扫码连接时勾选「记住这台手机」；' +
+                    '或让手机先以临时设备接入，再回到这里点「设为常用设备」。</div>';
             }
         }
 
-        /* ---------------- 轮询（主页数据 + 设置页「常用手机」卡） ---------------- */
+        /* ---------------- 轮询（主页数据 + 设置页「常用设备」卡） ---------------- */
         async function refresh() {
             try {
                 const [info, s] = await Promise.all([

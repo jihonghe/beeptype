@@ -21,10 +21,10 @@ pub struct Config {
     /// 手机连上后自动隐藏主窗口到托盘（关闭则窗口一直留在桌面，便于看状态/管理设备）
     #[serde(default = "default_true")]
     pub auto_hide: bool,
-    /// 临时连接断线后的续连窗口（分钟）：临时手机被系统杀进程后，这段时间内重开 App
+    /// 临时设备断线后的续连窗口（分钟）：临时手机被系统杀进程后，这段时间内重开 App
     /// 可免扫码自动连回。0 = 关闭续连（断开即需重新扫码）。默认 5 分钟。
     ///
-    /// 为什么默认这么短：临时连接不是核心场景（核心是"私人手机连自己的电脑、一直连着"），
+    /// 为什么默认这么短：临时设备不是核心场景（核心是"私人手机连自己的电脑、一直连着"），
     /// 临时主要用于"别人临时用我的电脑"或"公共电脑"，没有必要给长窗口。
     #[serde(default = "default_resume_ttl_min")]
     pub resume_ttl_min: u32,
@@ -37,7 +37,7 @@ pub struct Config {
     /// 本机设备名，默认取 hostname
     #[serde(default)]
     pub device_name: String,
-    /// 唯一主力手机（持久凭证）；None = 主力位空缺
+    /// 唯一常用设备（持久凭证）；None = 还没有常用设备
     #[serde(default)]
     pub primary: Option<PrimaryDevice>,
 }
@@ -46,12 +46,12 @@ fn default_true() -> bool {
     true
 }
 
-/// 临时连接续连窗口的默认值（分钟）
+/// 临时设备续连窗口的默认值（分钟）
 fn default_resume_ttl_min() -> u32 {
     5
 }
 
-/// 主力手机记录。token 明文只在绑定当下下发一次，此处仅存 SHA-256。
+/// 常用设备记录。token 明文只在绑定当下下发一次，此处仅存 SHA-256。
 #[derive(Serialize, Deserialize, Clone)]
 pub struct PrimaryDevice {
     /// 手机首启生成的 UUIDv4
@@ -63,7 +63,7 @@ pub struct PrimaryDevice {
     pub paired_at: u64,
     pub last_seen: u64,
     /// 手机硬件指纹（Android ANDROID_ID）。APP 重装不变，
-    /// 用于"重装后扫同一台手机仍能识别为已绑定主力"。
+    /// 用于"重装后扫同一台手机仍能识别为已绑定常用设备"。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hardware_id: Option<String>,
 }
@@ -301,7 +301,7 @@ impl Config {
             .unwrap_or(true)
     }
 
-    /// 临时连接的续连窗口时长。
+    /// 临时设备的续连窗口时长。
     ///
     /// 环境变量 `BEETYPE_RESUME_TTL_SECS` 优先——**仅供测试**（验证"过期后必须重新
     /// 扫码"这条路径不用真等 5 分钟），不进设置页、不写进用户文档。
@@ -314,12 +314,12 @@ impl Config {
         std::time::Duration::from_secs(self.resume_ttl_min as u64 * 60)
     }
 
-    /// 主力位是否已绑定
+    /// 常用设备席位是否已绑定
     pub fn has_primary(&self) -> bool {
         self.primary.is_some()
     }
 
-    /// 绑定主力手机：生成新 token，持久化 client_id/name/token_hash，
+    /// 绑定常用设备：生成新 token，持久化 client_id/name/token_hash，
     /// 返回 token 明文（仅此一次，调用方负责下发给手机）。
     /// hardware_id 可选——有则存，用于 APP 重装后识别同一物理设备。
     pub fn bind_primary(
@@ -344,7 +344,7 @@ impl Config {
         token
     }
 
-    /// 用主力 token 认证。成功时顺带刷新 name/last_ip/last_seen 并落盘。
+    /// 用常用设备 token 认证。成功时顺带刷新 name/last_ip/last_seen 并落盘。
     pub fn verify_token(&mut self, client_id: &str, token: &str, name: &str, ip: &str) -> bool {
         let hit = self.primary.as_ref().is_some_and(|p| {
             p.client_id == client_id && p.token_hash == sha256_hex(token)
@@ -369,7 +369,7 @@ impl Config {
             .is_some_and(|p| p.client_id == client_id && p.token_hash == proof)
     }
 
-    /// 解绑主力手机，旧 token 立即失效
+    /// 解绑常用设备，旧 token 立即失效
     pub fn unbind_primary(&mut self) {
         self.primary = None;
         let _ = self.save();
@@ -467,7 +467,7 @@ mod tests {
         let mut restored: Config = serde_json::from_str(&json).unwrap();
         assert!(restored.has_primary());
         assert_eq!(restored.device_id, config.device_id);
-        // 硬件指纹要跟着主力记录一起持久化（APP 重装后靠它认回主力身份）
+        // 硬件指纹要跟着常用设备记录一起持久化（APP 重装后靠它认回常用设备身份）
         assert_eq!(
             restored.primary.as_ref().unwrap().hardware_id.as_deref(),
             Some("android-id-1")

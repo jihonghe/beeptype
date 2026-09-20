@@ -31,9 +31,9 @@ struct PairingInfo {
     /// 连接中为空串，前端据此隐藏二维码区
     code: String,
     qr_svg: String,
-    /// 主力位是否已绑定（决定勾选框显隐）
+    /// 常用设备席位是否已绑定（决定勾选框显隐）
     has_primary: bool,
-    /// 已绑定主力手机的名称（设备管理区展示用）
+    /// 已绑定常用设备的名称（设备管理区展示用）
     primary_name: Option<String>,
     connected: bool,
     connected_name: Option<String>,
@@ -54,13 +54,13 @@ struct SettingsInfo {
     auto_send_supported: bool,
     /// 手机连上后是否自动隐藏主窗口到托盘
     auto_hide: bool,
-    /// 临时连接断线后的续连窗口（分钟；0 = 关闭）
+    /// 临时设备断线后的续连窗口（分钟；0 = 关闭）
     resume_ttl_min: u32,
     /// 开机自启是否开启（读系统实际状态）
     autostart: bool,
-    /// 是否已绑定主力手机
+    /// 是否已绑定常用设备
     has_primary: bool,
-    /// 已绑定主力机名称
+    /// 已绑定常用设备名称
     primary_name: Option<String>,
     /// 应用版本：取自构建时的 tauri.conf.json（发布时由 CI 按 git tag 改写），
     /// 因此与安装包/发布产物一致。不要用 env!("CARGO_PKG_VERSION")——那是
@@ -273,8 +273,8 @@ fn set_auto_hide(
     info!("Auto-hide toggled: {value}");
 }
 
-/// 把当前连接的临时手机设为主力（设置页「常用手机」按钮）。
-/// 只在"主力位空缺 + 当前是临时连接"时可用；失败原因会原样返回给界面。
+/// 把当前连接的临时手机设为常用设备（设置页「常用设备」按钮）。
+/// 只在"还没有常用设备 + 当前是临时设备"时可用；失败原因会原样返回给界面。
 #[tauri::command]
 fn promote_session(state: tauri::State<'_, Arc<Mutex<AppServerState>>>) -> Result<(), String> {
     let server = state.lock().unwrap();
@@ -294,7 +294,7 @@ fn restart_app_impl(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 设置临时连接的续连窗口（分钟；0 = 关闭连）。
+/// 设置临时设备的续连窗口（分钟；0 = 关闭连）。
 /// 改完立即生效：窗口期在每次活动/续连时读取，已签发的凭证最长活到下一个刷新点。
 #[tauri::command]
 fn set_resume_ttl(

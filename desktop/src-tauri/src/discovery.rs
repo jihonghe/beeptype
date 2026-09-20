@@ -1,7 +1,7 @@
 //! 凭证门控的局域网设备发现（UDP 8765）。
 //!
 //! 规则见实施计划 3.3：
-//! 1. 未绑定主力 → 对一切发现请求静默（隐身）；
+//! 1. 未绑定常用设备 → 对一切发现请求静默（隐身）；
 //! 2. client_id / proof(SHA-256(token)) 任一不匹配 → 静默；
 //! 3. 完全匹配 → 对请求来源单播应答，busy 只给布尔值，不泄露占用者。
 
@@ -84,7 +84,8 @@ pub fn serve_discovery<R: Runtime>(state: ServerState<R>) {
 }
 
 /// 解析并门控请求；通过则构造应答 JSON 字符串，否则 None。
-fn build_response<R: Runtime>(state: &ServerState<R>, payload: &[u8]) -> Option<String> {
+/// （pub(crate) 以便 server.rs 的集成测试直接验证门控规则）
+pub(crate) fn build_response<R: Runtime>(state: &ServerState<R>, payload: &[u8]) -> Option<String> {
     let req: DiscRequest = serde_json::from_slice(payload).ok()?;
     if req.msg_type != "vl_disc_req" || req.protocol != PROTOCOL_VERSION {
         return None;
@@ -96,8 +97,13 @@ fn build_response<R: Runtime>(state: &ServerState<R>, payload: &[u8]) -> Option<
     // 锁顺序 config → session（与全局约定一致）
     let (device_id, device_name, port, busy, auto_paste) = {
         let config = state.config.lock().unwrap();
-        if !config.matches_discovery(&req.client_id, &req.proof) {
-            // 隐身：无主力 / client 不符 / proof 错误，全部静默
+        // 门控只认两种凭证：常用设备的长期 token，或**窗口期内仍有效的**临时续连凭证。
+        // 后者是为"临时设备碰上电脑换 IP"准备的——只记得 IP+端口的临时手机，
+        // 只能靠广播找回换过地址的电脑。两者之外一律静默（隐身）。
+        let allowed = config.matches_discovery(&req.client_id, &req.proof)
+            || state.transient_resume_matches(&req.client_id, &req.proof);
+        if !allowed {
+            // 隐身：无常用设备 / client 不符 / proof 错误 / 凭证已过期，全部静默
             return None;
         }
         let busy = state.session.lock().unwrap().is_some();
