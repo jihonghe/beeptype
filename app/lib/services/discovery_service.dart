@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:network_info_plus/network_info_plus.dart';
 
+import 'lan_check.dart';
+
 /// PC 发现应答中的设备描述
 class DiscoveredDevice {
   final String deviceId;
@@ -66,6 +68,8 @@ class DiscoveryService {
     }
 
     final targets = await _broadcastTargets(port);
+    // 没有局域网网卡（例如只有移动数据）：广播无处可去，立即返回，不做无谓等待
+    if (targets.isEmpty) return const [];
     final found = <String, DiscoveredDevice>{}; // device_id 去重
 
     final completer = Completer<void>();
@@ -109,8 +113,23 @@ class DiscoveryService {
   }
 
   /// 广播目标：有限广播 + 当前 WiFi 子网定向广播（部分 ROM 会丢弃 255.255.255.255）
+  /// 广播目标：**枚举本机所有 IPv4 网卡**，每个网段各发一份定向广播。
+  ///
+  /// 不能用"Wi-Fi 客户端地址"代表全部：手机开热点时它是网关（ap0/swlan0），
+  /// 自己并没有作为客户端连着 Wi-Fi；那种情况下只有全局广播可用，而全局广播会从
+  /// 默认路由（移动数据）出去，永远到不了热点网段——"电脑明明连上手机热点了，
+  /// 手机却找不到电脑"就是这么来的（用户实测复现）。
+  ///
+  /// 没有任何局域网网卡时直接返回空集：广播只在同一局域网内有意义，
+  /// 在移动数据上发只是白耗电（调用方据此也不做等待）。
   Future<Set<InternetAddress>> _broadcastTargets(int port) async {
-    final targets = <InternetAddress>{InternetAddress('255.255.255.255')};
+    final targets = <InternetAddress>{};
+    final net = await localNetSnapshot();
+    if (net == null || !net.hasLan) return targets;
+    for (final bcast in net.broadcastTargets()) {
+      targets.add(InternetAddress(bcast));
+    }
+    // 补充一路：个别机型上网卡枚举受限，但 WiFi IP 能拿到
     try {
       final wifiIp = await NetworkInfo().getWifiIP().timeout(
             const Duration(seconds: 1),
@@ -120,7 +139,7 @@ class DiscoveryService {
         if (bcast != null) targets.add(InternetAddress(bcast));
       }
     } catch (_) {
-      // 拿不到 WiFi IP（无权限/非 WiFi）时只用有限广播
+      // 拿不到就算了：上面枚举出来的网段已经覆盖 Wi-Fi 与热点
     }
     return targets;
   }

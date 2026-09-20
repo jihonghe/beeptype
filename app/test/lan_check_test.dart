@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:beetype/services/lan_check.dart';
+import 'package:beetype/services/retry_policy.dart';
 import 'package:beetype/services/tcp_service.dart';
 
 /// 「不在同一个局域网」判断的护栏。
@@ -43,6 +44,63 @@ void main() {
 
     test('同网段撞车（不同网络恰好都用 192.168.1.x）→ 不提示，宁可沉默', () {
       expect(likelyOffLan('192.168.1.7', ['192.168.1.20']), isFalse);
+    });
+  });
+
+  group('本机是否有局域网（决定还要不要重试/广播）', () {
+    test('只有移动数据（rmnet）→ 没有局域网：不重试、不广播', () {
+      const net = LocalNet([(name: 'rmnet_data0', ip: '10.42.13.88')]);
+      expect(net.hasLan, isFalse);
+      expect(net.broadcastTargets(), {'255.255.255.255'});
+    });
+
+    test('连着 Wi-Fi → 有局域网', () {
+      const net = LocalNet([(name: 'wlan0', ip: '192.168.31.20')]);
+      expect(net.hasLan, isTrue);
+      expect(net.broadcastTargets(), contains('192.168.31.255'));
+    });
+
+    test('手机开着热点（作为网关 ap0）→ 有局域网，且广播打到热点网段', () {
+      // 这正是用户实测的场景：电脑连上手机热点后，手机必须能找到它
+      const net = LocalNet([
+        (name: 'rmnet_data0', ip: '10.42.13.88'),
+        (name: 'ap0', ip: '192.168.43.1'),
+      ]);
+      expect(net.hasLan, isTrue);
+      expect(net.broadcastTargets(), contains('192.168.43.255'));
+    });
+
+    test('认不出名字的网卡按"有局域网"处理（宁可多试一轮也不要停错）', () {
+      const net = LocalNet([(name: 'weird0', ip: '172.20.10.2')]);
+      expect(net.hasLan, isTrue);
+      expect(net.broadcastTargets(), contains('172.20.10.255'));
+    });
+
+    test('网卡名分类', () {
+      expect(isCellularInterface('rmnet_data0'), isTrue);
+      expect(isCellularInterface('ccmni0'), isTrue);
+      expect(isCellularInterface('wlan0'), isFalse);
+      expect(isCellularInterface('ap0'), isFalse);
+    });
+  });
+
+  group('重试节奏（快速试一阵就停手）', () {
+    test('一轮约 1 分钟就停：不再有"永远每 10 秒一次"', () {
+      expect(retryEpisodeMs, greaterThan(60000));
+      expect(retryEpisodeMs, lessThan(70000));
+      expect(retryAllowed(0), isTrue);
+      expect(retryAllowed(retryDelaysMs.length - 1), isTrue);
+      expect(retryAllowed(retryDelaysMs.length), isFalse);
+      expect(retryAllowed(99), isFalse, reason: '试满就该停手，交给用户点重新连接');
+    });
+
+    test('先快后慢：第 0 次 1 秒、第 4 次起 10 秒', () {
+      expect(retryDelayMs(0), 1000);
+      expect(retryDelayMs(1), 2000);
+      expect(retryDelayMs(2), 4000);
+      expect(retryDelayMs(3), 8000);
+      expect(retryDelayMs(4), 10000);
+      expect(retryDelayMs(100), 10000);
     });
   });
 

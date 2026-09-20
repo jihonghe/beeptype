@@ -175,11 +175,15 @@ class TextSender {
   /// 只在连上后才记，判断"是不是不在同一网络"必须用尝试过的那个地址）
   String? _lastAttemptTargetIp;
 
+  /// 上一次实际尝试过的目标地址（界面判断"是否不在同一网络"用）
+  String? get lastAttemptTargetIp => _lastAttemptTargetIp;
+
   /// 目标地址是否看起来不在同一局域网（供失败提示；判断不了就说"否"）
   Future<bool> targetLooksOffLan() async {
     final ip = _lastAttemptTargetIp;
     if (ip == null) return false;
-    return likelyOffLan(ip, await localIpv4Addresses());
+    final net = await localNetSnapshot();
+    return likelyOffLan(ip, net?.ips ?? const []);
   }
 
   /// 自动连接最近使用的常用电脑。
@@ -194,15 +198,6 @@ class TextSender {
       // 没有常用凭证：看看有没有"窗口期内"的临时会话可以续连
       return _resumeTransientIfAny();
     }
-
-    // 发现并行开跑（约 1.1s 出结果），不阻塞直连
-    final discFuture = _discovery
-        .discover(
-          clientId: _storage.clientId,
-          token: dev.token,
-          port: dev.port,
-        )
-        .catchError((Object _) => <DiscoveredDevice>[]);
 
     HelloOutcome? outcome;
     final hid = await hardwareId;
@@ -231,10 +226,19 @@ class TextSender {
       return outcome;
     }
 
-    // 网络层失败：取发现结果补连（DHCP 换 IP 的主路径）
+    // 网络层失败：广播找一次（DHCP 换 IP 的主路径）。
+    // 只在直连失败后才广播——正常重连（电脑还在、只是刚断）全程零广播，
+    // 省掉每次尝试那 1.4 秒的白等与无线电唤醒。
     List<DiscoveredDevice> found = const [];
     try {
-      found = await discFuture.timeout(const Duration(seconds: 2));
+      found = await _discovery
+          .discover(
+            clientId: _storage.clientId,
+            token: dev.token,
+            port: dev.port,
+          )
+          .timeout(const Duration(seconds: 2))
+          .catchError((Object _) => <DiscoveredDevice>[]);
     } catch (_) {
       found = const [];
     }
@@ -424,7 +428,8 @@ class TextSender {
     if (outcome.ok) return (ok: true, error: null);
     // 网络层失败且能判断两者不在同一网络 → 直说是网络问题，别让用户去猜电脑
     if (outcome.status == 'network_fail') {
-      final off = likelyOffLan(uri.host, await localIpv4Addresses());
+      final net = await localNetSnapshot();
+      final off = likelyOffLan(uri.host, net?.ips ?? const []);
       return (
         ok: false,
         error: off ? '连接失败，请确认手机和电脑连着同一个 Wi-Fi' : '连接失败',

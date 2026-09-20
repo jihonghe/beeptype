@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'dart:async';
+import '../services/lan_check.dart';
+import '../services/retry_policy.dart';
 import '../services/text_sender.dart';
 import '../services/tcp_service.dart';
 
@@ -28,9 +30,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 与"松手即发"不可兼得。
   static const int _voiceCommitDelayMs = 0;
 
-  /// 前台/后台断线后的自动重连退避序列（毫秒），超出后固定 10s 重试。
-  static const List<int> _reconnectDelaysMs = [1000, 2000, 4000, 8000];
-  static const int _reconnectMaxDelayMs = 10000;
 
   late TextEditingController _inputController;
   late FocusNode _focusNode;
@@ -49,6 +48,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   /// 最近一次失败"看起来不在同一局域网"（决定打字区要不要提示检查 Wi-Fi）
   bool _offLan = false;
+
+  /// 已停止自动重试（快速试满一轮，或根本不在局域网上）——零定时器零广播，
+  /// 直到切回前台 / 网络变化 / 用户点「重新连接」才会重新开始
+  bool _retryStopped = false;
 
   /// 当前占用态是不是"扫码"撞上的：只有凭凭证回来的常用设备才配显示接管按钮
   bool _occupiedViaScan = false;
@@ -80,7 +83,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (_status == ConnectionStatus.paired) return;
       if (!_canAutoConnect()) return;
       _reconnectTimer?.cancel();
-      _reconnectAttempt = 0;
+      _reconnectAttempt = 0; // 环境变了：重新开始一轮快速重试
       unawaited(_attemptConnect());
     });
 
@@ -171,7 +174,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _reconnectAttempt = 0;
         break;
       case ConnectionStatus.disconnected:
-        // 主动尝试中的连接失败由 _attemptConnect 的 finally 统一排程；
+        // 主动尝试中的连接失败由 _attemptConnect 收尾统一排程；
         // 这里处理"使用中突发断线"（WiFi 抖动、PC 退出、被踢等）。
         if (!_connecting && _canAutoConnect()) {
           _scheduleReconnect();
@@ -209,8 +212,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  /// 排程一次退避自动重连（前后台一致）
-  void _scheduleReconnect() {
+  /// 排程一次退避自动重连（前后台一致）。
+  ///
+  /// [net] 为本机网络快照：**只有移动数据时不重试**——本产品只在同一局域网下能工作，
+  /// 连上去也无从谈起，反复重试与广播只是白耗电；Wi-Fi 回来时由网络变化监听重新拉起。
+  /// 传 null 表示"还没来得及判断"（突发断线路径），按可能有局域网处理。
+  void _scheduleReconnect([LocalNet? net]) {
     if (!_canAutoConnect()) return;
     if (_status == ConnectionStatus.paired ||
         _status == ConnectionStatus.occupied ||
@@ -219,10 +226,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
 
     _reconnectTimer?.cancel();
-    final delayMs = _reconnectAttempt < _reconnectDelaysMs.length
-        ? _reconnectDelaysMs[_reconnectAttempt]
-        : _reconnectMaxDelayMs;
+
+    // 只有移动数据（枚举不到任何局域网网卡）→ 停手，不做无意义的尝试
+    if (net != null && !net.hasLan) {
+      _retryStopped = true;
+      return;
+    }
+    // 快速试满一轮就停手：慢速重试的价值极低，不如让用户当场点「重新连接」
+    if (!retryAllowed(_reconnectAttempt)) {
+      _retryStopped = true;
+      return;
+    }
+
+    final delayMs = retryDelayMs(_reconnectAttempt);
     _reconnectAttempt++;
+    _retryStopped = false;
     _reconnectTimer =
         Timer(Duration(milliseconds: delayMs), _attemptConnect);
   }
@@ -239,6 +257,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     _connecting = true;
     _occupiedViaScan = false; // 自动连接走的是凭证路径，接管按钮才有效
+    _retryStopped = false; // 重新开始一轮快速重试
     HelloOutcome? outcome;
     try {
       outcome = await widget.sender.autoConnect();
@@ -264,16 +283,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return;
     }
 
-    // 连不上：判断"是不是根本不在同一个局域网"（能判断才提示，判断不了就沉默）
-    final off = await widget.sender.targetLooksOffLan();
+    // 连不上：枚举一次本机网络，同时回答两个问题——
+    // ① 是不是根本不在同一个局域网（能判断才提示，判断不了就沉默）；
+    // ② 还有没有局域网可试（只有移动数据就不必再折腾了）
+    final net = await localNetSnapshot();
+    final target = widget.sender.lastAttemptTargetIp;
     _connecting = false;
     if (!mounted) return;
-    _offLan = off;
+    _offLan = target != null && likelyOffLan(target, net?.ips ?? const []);
+    _scheduleReconnect(net);
     setState(() {});
-    if (_canAutoConnect() &&
-        _status == ConnectionStatus.disconnected) {
-      _scheduleReconnect();
-    }
   }
 
   /// 手动点灰钮连接：清除手动断开标记，立即尝试
@@ -473,11 +492,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           title = '未连接电脑';
         } else {
           title = knownName ?? '电脑';
-          tag = widget.sender.manualDisconnected ? '重新连接' : '连接失败，重试中…';
+          final stopped = _retryStopped || widget.sender.manualDisconnected;
+          tag = stopped ? '已停止重试' : '连接失败，重试中…';
           trailing = TextButton(
             onPressed: _manualConnect,
             style: pillButtonStyle(null),
-            child: Text(widget.sender.manualDisconnected ? '重新连接' : '立即重试'),
+            child: Text(stopped ? '重新连接' : '立即重试'),
           );
         }
     }
