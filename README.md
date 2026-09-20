@@ -1,7 +1,6 @@
 <p align="center">
   <strong>BeeType</strong><br>
-  <sub>手机说话 · 电脑自动打字</sub><br><br>
-  <img src="assets/icon.svg" width="96" height="96" alt="BeeType logo">
+  <sub>手机说话 · 电脑自动打字</sub>
 </p>
 
 <p align="center">
@@ -34,14 +33,6 @@
 - **自动发送** — 粘贴后自动回车（聊天场景零手动）
 - **零账号·零云端** — 局域网 TCP 直连，数据只在手机和 PC 之间，不经任何服务器
 - **跨平台** — PC 端 Linux（X11）/ Windows / macOS；手机端 Android（iOS 开发中）
-
-## 📸 截图
-
-<!-- TODO: 等有截图了放这里 -->
-<!-- <p align="center">
-  <img src="docs/screenshots/main-window.png" width="320" alt="主窗口">
-  <img src="docs/screenshots/connected.png" width="320" alt="已连接">
-</p> -->
 
 ## 🚀 快速开始
 
