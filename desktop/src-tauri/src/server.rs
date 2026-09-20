@@ -828,9 +828,13 @@ fn handle_connection(stream: TcpStream, state: ServerState) {
         let idle: i32 = 10;
         let interval: i32 = 5;
         let count: i32 = 3;
+        // Linux 用 TCP_KEEPIDLE，macOS/BSD 用 TCP_KEEPALIVE
+        #[cfg(target_os = "linux")]
+        let idle_opt = libc::TCP_KEEPIDLE;
+        #[cfg(target_os = "macos")]
+        let idle_opt = libc::TCP_KEEPALIVE;
         unsafe {
-            // TCP_KEEPIDLE = 4, TCP_KEEPINTVL = 5, TCP_KEEPCNT = 6
-            libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, &idle as *const _ as *const libc::c_void, std::mem::size_of::<i32>() as u32);
+            libc::setsockopt(fd, libc::IPPROTO_TCP, idle_opt, &idle as *const _ as *const libc::c_void, std::mem::size_of::<i32>() as u32);
             libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, &interval as *const _ as *const libc::c_void, std::mem::size_of::<i32>() as u32);
             libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_KEEPCNT, &count as *const _ as *const libc::c_void, std::mem::size_of::<i32>() as u32);
         }
