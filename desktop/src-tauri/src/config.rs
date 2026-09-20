@@ -398,7 +398,7 @@ mod tests {
         let mut config = Config::default();
         assert!(!config.has_primary());
 
-        let token = config.bind_primary("client-1", "小米14", "192.168.1.10");
+        let token = config.bind_primary("client-1", "小米14", "192.168.1.10", None);
         assert_eq!(token.len(), 64);
         assert!(config.has_primary());
         // 落盘的不是明文 token
@@ -431,12 +431,17 @@ mod tests {
         let mut config = Config::default();
         config.device_id = new_uuid_v4();
         config.device_name = "test-pc".to_string();
-        let token = config.bind_primary("cid", "phone", "10.0.0.1");
+        let token = config.bind_primary("cid", "phone", "10.0.0.1", Some("android-id-1"));
 
         let json = serde_json::to_string_pretty(&config).unwrap();
         let mut restored: Config = serde_json::from_str(&json).unwrap();
         assert!(restored.has_primary());
         assert_eq!(restored.device_id, config.device_id);
+        // 硬件指纹要跟着主力记录一起持久化（APP 重装后靠它认回主力身份）
+        assert_eq!(
+            restored.primary.as_ref().unwrap().hardware_id.as_deref(),
+            Some("android-id-1")
+        );
         assert!(restored.matches_discovery("cid", &sha256_hex(&token)));
         assert!(restored.verify_token("cid", &token, "x", "1.1.1.1"));
 

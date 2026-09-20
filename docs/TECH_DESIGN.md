@@ -59,11 +59,12 @@ desktop/
         ├── config.rs       # 身份、凭证、配置读写
         ├── protocol.rs     # 消息类型与编解码
         ├── server.rs       # TCP 服务、认证、席位状态机
+        ├── clipboard.rs    # 剪贴板写入 + 读回校验
         ├── paste.rs        # 按键模拟（自动粘贴/自动发送）
         └── discovery.rs    # UDP 凭证门控发现
 ```
 
-> v0.1 设计中的 `clipboard.rs`、`tray.rs`、`qr.rs` 三个模块不存在：剪贴板写入在 `server.rs`、托盘与 QR 生成在 `lib.rs`（QR 直接用 `qrcode` crate 渲染成 SVG 内联进 WebView）。
+> v0.1 设计中的 `tray.rs`、`qr.rs` 不存在：托盘与 QR 生成都在 `lib.rs`（QR 直接用 `qrcode` crate 渲染成 SVG 内联进 WebView）。`clipboard.rs` 现在是存在的，但它做的是"写入 + 读回校验"，**不是** v0.1 设想的"非文本保护"。
 
 ### 2.2 config.rs — 身份、凭证与配置
 
@@ -212,12 +213,30 @@ accept
 
 1. 非席位持有者 / 未认证 / 等待接管中的连接 → 回 `ack{ok:false, code:"not_connected"}`。
 2. 文本 `trim()` 为空 → 回 `ack{ok:false, code:"empty_text"}`，不做任何剪贴板操作。
-3. 写入剪贴板（`tauri-plugin-clipboard-manager` → arboard）。失败 → 弹系统通知，回 `ack{ok:false, code:"clipboard_error"}`。
-4. 自动粘贴条件全部满足时才模拟粘贴：设置页开关生效 + 当前会话支持按键注入 + **BeeType 自己的窗口没有焦点**（避免把文字糊进配对窗口）。成功则 `pasted = true`。
-5. 自动发送：粘贴成功后若 `auto_send` 生效则再模拟一次 Enter。
+3. 写入剪贴板并**读回校验**（`clipboard.rs`）：读到别的内容（被其他进程抢先持有）就重写一次；写入报错或重写后仍不一致 → 弹系统通知，回 `ack{ok:false, code:"clipboard_error"}`。读不回来则按原样继续（fail-open，不因"校验不了"把能用的粘贴挡掉）。
+4. 自动粘贴条件全部满足时才模拟粘贴：设置页开关生效 + 当前会话支持按键注入 + **BeeType 自己的窗口没有焦点**（避免把文字糊进配对窗口）。注入前记下焦点窗口，成功则 `pasted = true`，并交回 enigo 实例。
+5. 自动发送：`auto_send` 生效且**焦点窗口未变**时，复用同一个 enigo 实例、等 `enter_delay(字符数)` 后模拟 Enter；焦点变了就跳过（文字已粘贴，由用户自己按回车），只记日志、不在手机端打扰用户。
 6. 回 `ack{ok:true, pasted, srv_recv_ms}`（`srv_recv_ms` 是服务端收到消息的时间戳，供手机端算延迟）。
 
-### 2.5 paste.rs — 按键模拟
+### 2.5 clipboard.rs — 写入与读回校验
+
+```rust
+pub fn write_verified(app: &AppHandle, text: &str) -> bool
+```
+
+写剪贴板是整条链上唯一"可能判断错"的环节：有的机器装着剪贴板管理器（Klipper / GPaste / CopyQ），可能在写入后立刻接管所有权，也可能写入被静默丢弃。这里不假定成功、也不按机器特调，而是当场验证：
+
+| 读回结果 | 处理 |
+|---|---|
+| 与我们写入的一致 | 通过 |
+| 是别的内容（被别人持有） | 重写一次再验；两次都不一致 → 判定写入失败 |
+| 读不回来（无法判定） | 只记日志，按原样继续（fail-open） |
+
+在 X11 上，我们持有所有权时读回是**本地内存读**（arboard 直接返回自己的数据），不产生额外的 X 往返、不会阻塞；只有所有权被抢走时才会真去读一次（arboard 内部上限 4s）。
+
+边界：它只保证"我们写入的那个剪贴板后端里是正确的文字"，**不能**保证目标应用看到的内容——Wayland 会话下 arboard 可能退回 XWayland 后端，而目标应用读原生 Wayland 剪贴板，那种不一致看不出来（那类环境本就不支持自动粘贴，回退手动 Ctrl+V）。
+
+### 2.6 paste.rs — 按键模拟
 
 | 场景 | 快捷键 |
 |---|---|
@@ -227,10 +246,12 @@ accept
 | 自动发送 | Enter（`Key::Unicode('\r')`） |
 
 - 终端识别（仅 Linux）：用 `x11rb` 读 X 的 `GetInputFocus`，再沿窗口树向上最多 20 层找 `WM_CLASS`（`res_name`/`res_class`）。命中判定 = 类名包含 `terminal`，或落在内置清单里（`xterm`、`kitty`、`alacritty`、`ghostty`、`wezterm`、`konsole`、`foot`、`cool-retro-term` 等异类终端）。任何检测失败都**安全回退 Ctrl+V**。
-- 写剪贴板后等 50ms 再发快捷键（等 X11 剪贴板归属权切换被目标应用感知）；发 Enter 前再等 50ms（让粘贴内容先渲染）。
+- **同一条连接按序注入**：`simulate_paste()` 返回自己的 enigo 实例，自动发送复用它。同连接内的请求由 X server 按序处理，粘贴与回车不靠墙钟时间排序。
+- **注入回车前复核焦点**：`focused_window_id()` 在注入前与发回车前各取一次（Linux/X11，取带 `WM_CLASS` 的客户端窗口而非内部子窗口），变了就跳过回车。非 Linux 或检测不到时返回 `None`，按"无从判断"处理（fail-open：宁可漏一次检查，也不少发一条消息）。
+- **两段等待都是安全余量，不是性能参数**：写剪贴板后等 50ms（正确性由同步所有权保证，见 10.1，这 50ms 只是给目标应用的剪贴板缓存留余量）；回车前等 `250ms + 每 200 字符 1ms`（上限 +500ms）——人对这个量级无感知，而漏发的代价是消息没出去。**不按机器、不按应用做特调**（见第 10 节）。
 - Wayland 判定：`XDG_SESSION_TYPE=wayland`，或（设置了 `WAYLAND_DISPLAY` 且没有 `DISPLAY`）→ 自动粘贴/自动发送判定为不支持，回退纯剪贴板。有 `DISPLAY` 时走 XWayland，XTest 仍可用。
 
-### 2.6 discovery.rs — 凭证门控的 UDP 发现
+### 2.7 discovery.rs — 凭证门控的 UDP 发现
 
 请求（手机广播，3 轮）：
 
@@ -252,7 +273,7 @@ PC 端处理规则：
 
 `busy` 只给布尔值，不泄露占用者身份。用 `SHA-256(token)` 而非 token 本身作 proof：抓到广播不足以通过 TCP 认证。发现线程与 TCP 服务同端口，绑定失败只记日志，不影响 TCP 主服务。
 
-### 2.7 lib.rs — 装配、托盘与 commands
+### 2.8 lib.rs — 装配、托盘与 commands
 
 启动流程：初始化日志 → 加载配置 → `regenerate_code()`（**每次启动都换新码**）→ 按配置同步系统自启状态 → 建 `ServerState` → 建托盘 → spawn TCP 服务线程与 UDP 发现线程。
 
@@ -290,7 +311,7 @@ Tauri commands（10 个）：
 | `unbind_primary` | 解绑主力（在线会话降级为临时，不断开） |
 | `set_window_height` | 前端启动时量一次真实高度后固定窗口高度 |
 
-### 2.8 前端（desktop/src/index.html）
+### 2.9 前端（desktop/src/index.html）
 
 - 主页与设置页**绝对定位叠放**，切换只改 `opacity`/`visibility`（交叉淡化），元素几何全程不变——规避 WebKitGTK 层重建导致的标题闪烁。
 - 窗口高度在启动时用离屏克隆渲染「等待态」量出真实高度（两种勾选文案取高者）后固定，之后不再随状态跳变：主页内容裁切、设置页内部滚动。
@@ -536,14 +557,15 @@ log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
 
 ## 8. 测试与验证
 
-**Rust 单测（18 个，`cargo test`）**
+**Rust 单测（20 个，`cargo test`）**
 
 | 文件 | 覆盖 |
 |---|---|
-| `config.rs` | 配对码校验与过期、UUIDv4 形态、主力绑定/校验/解绑全生命周期、落盘不含明文 token、旧配置迁移 |
+| `config.rs` | 配对码校验与过期、UUIDv4 形态、主力绑定/校验/解绑全生命周期、硬件指纹随主力记录持久化、落盘不含明文 token、旧配置迁移 |
 | `protocol.rs` | 各消息 encode/decode 往返、旧客户端字段缺省兼容、畸形 JSON 不 panic |
 | `server.rs` | 席位仲裁三分支（空席接入/同主力替换/被临时方占用）、踢人原因映射、QR 内容格式 |
 | `discovery.rs` | 请求解析的合法/畸形样本、应答 JSON 字段 |
+| `paste.rs` | 回车余量的边界（基准值、按长度递增、上限、整体 <1s） |
 
 **Flutter 测试**：`app/test/widget_test.dart` 覆盖 `TcpMessage` 编解码（JSON 行、字段往返、畸形行返回 null）。
 
@@ -562,8 +584,47 @@ log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
 | 无 token、无免配重连 | token 持久化 + 免码重连；APP 重装靠硬件指纹恢复主力身份 |
 | 无设备发现 | 凭证门控 UDP 发现（换 IP 无感），对非主力设备静默 |
 | 无席位概念 | 单席位 + 仲裁 + 接管 + 踢人（`session_ended`）+ 解绑降级（`session_downgraded`） |
-| `clipboard.rs` 非文本保护、`ack.clipboard_non_text` | 未实现；ack 字段为 `code`/`pasted`/`srv_recv_ms` |
+| v0.1 的 `clipboard.rs`（非文本保护）、`ack.clipboard_non_text` | 非文本保护未实现（ack 字段为 `code`/`pasted`/`srv_recv_ms`）；现有的 `clipboard.rs` 做的是"写入 + 读回校验"，见 2.5、第 10 节 |
 | `tray.rs`（显示配对码/开机自启/关于菜单） | 托盘精简为 5 项，管理操作全部移入主窗口设置页 |
 | `qr.html` 独立窗口 | 单页 `index.html`，QR 以 SVG 内联渲染 |
 | `build-pc.yml` + `build-mobile.yml` | 合并为单个 `release.yml`，tag 触发 |
 | 监听局域网网卡 IP | 监听 `0.0.0.0`（见 5.4） |
+
+---
+
+## 10. 粘贴时序与残余竞态
+
+"写剪贴板 → 注入 Ctrl+V → 注入回车"这条链上有一类**跨机器表现不同**的时序问题。这里记录现状、已经规避掉的部分，以及仍然存在的边界——目的是让后来者不必靠猜来调这两个延时。
+
+### 10.1 所有权传播竞态（已被架构规避）
+
+X11 的剪贴板是"所有者 + 按需服务"模型：粘贴时由接收方向 X server 请求，server 把请求转发给当前所有者，所有者现取现给。所以"写了剪贴板"和"接收方读到新内容"是两件事。社区里常见的坑是 `xclip` 之后立刻 `xdotool key ctrl+v` 会粘出旧内容——因为 `xclip` 默认 fork 到后台持有所有权，命令返回时所有权尚未生效，通用解法是中间 `sleep 0.5`。
+
+我们的实现不落在这一类：
+
+- `set_text` 在返回前已完成 `set_selection_owner` + `flush`（arboard 3.6.1 `x11.rs` 的 `write()`），所有权声明不依赖后续调度；
+- `arboard::Clipboard` 实例被 Tauri 插件缓存在插件状态里、随进程存活，其服务线程用 `wait_for_event()` 阻塞等事件（**没有轮询间隔**），收到 SelectionRequest 立即应答；
+- 我们是"粘贴"而不是逐字注入，所以也不存在 `xdotool type` 的丢字问题。
+
+`PRE_PASTE_DELAY = 50ms` 因此只是给"目标应用剪贴板缓存 + 归属权切换"的额外余量，不承担正确性。
+
+### 10.2 消费端异步插入竞态（真实存在，用"给足余量 + 焦点复核"处理）
+
+接收方可能把"读剪贴板 → 插入文本"做成异步：Chromium/Electron 系由浏览器进程读剪贴板、再经 IPC 交给渲染进程插入。此时"粘贴后立刻回车"存在回车先于文本落地的窗口 → 表现为**空发送或半截发送**。而我们的自动发送场景（微信桌面版、网页版聊天、网页输入框、VS Code）几乎全是 Chromium/Electron。
+
+这条**无法精确判定**：`arboard` 不暴露"数据被读走"事件（它的 `SetExtLinux::wait()` 等的是"剪贴板被别人覆盖"的 SelectionClear，不是被读走），Windows/macOS 也没有"剪贴板被读"的通知。因此策略是：
+
+- 回车前的等待取"人感知不到的最宽松值"：基准 **250ms** + 每 200 字符 **1ms**（上限 +500ms）。它是安全余量而不是性能参数——快了没有任何收益，慢了就丢消息；
+- 注入回车前**复核焦点窗口未变**（`focused_window_id()` 前后各取一次），变了就不发回车。这条检查是"敢给足余量"的前提：余量越长，回车落到用户刚切过去的窗口里的概率越高；
+- 粘贴与回车复用**同一条 enigo 连接**，顺序由 X server 在同一连接内保证，不依赖墙钟时间。
+
+**回车被跳过时不上报手机端**：文字就躺在目标窗口的输入框里，用户回到电脑即可看见；手机端没有任何可执行的补救动作（按不了回车），弹提示只会变成噪音。这条判断是在"是否让用户感知每次发送"的讨论里定下的——只有在用户能当场做点什么时才提示。
+
+### 10.3 已知边界
+
+- **校验能覆盖的范围**：`clipboard.rs` 只验证"我们写入的后端里是正确的文字"。Wayland 下若 arboard 退回 XWayland，目标应用读原生 Wayland 剪贴板时的不一致看不出来——那类环境本就不支持自动粘贴，回退手动 Ctrl+V。
+- **长文本**：接近 256KB 时走 X11 的 INCR 分块传输，插入更慢；回车余量按长度放宽，但仍是有界的（最坏 750ms）。
+- **目标应用自身行为**：有的应用会缓存剪贴板内容、或对粘贴做二次处理，这部分不可观测，也无法适配。
+- **用户手上的修饰键**：用户此刻若正按着 Shift，我们注入的 Ctrl+V 会变成 Ctrl+Shift+V。这是"用户手速 vs 注入"的竞态，不是剪贴板竞态。
+- **不做按应用/按机器特调**：不维护"检测到 Chromium 系就多等一会儿"这类名单（名单不会完整且会随版本腐坏），也不做首启动自标定或按机型写常数——那只是把特调自动化了。
+- **远端桌面/虚拟机**：X2Go / VNC / RDP 的剪贴板是代理转发，延迟不可预测；此时唯一可靠的是"回退手动 Ctrl+V + 长文本分段发送"，不做额外机制。

@@ -10,7 +10,6 @@ use std::thread;
 use std::time::Instant;
 use tauri::menu::MenuItem;
 use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_notification::NotificationExt;
 
 /// 鉴权失败冷却配置
@@ -693,15 +692,9 @@ impl ServerState {
         }
 
         let recv_ms = now_ms();
-        let write_ok = match self.app_handle.clipboard().write_text(&text) {
-            Ok(_) => true,
-            Err(e) => {
-                warn!("Clipboard write failed: {}", e);
-                false
-            }
-        };
-
-        if !write_ok {
+        // 写入 + 读回校验：把"另一个进程夺走剪贴板""写入被静默丢弃"这类
+        // 机器差异变成可观测的结果，而不是假定成功（见 clipboard.rs）
+        if !crate::clipboard::write_verified(&self.app_handle, &text) {
             let _ = self
                 .app_handle
                 .notification()
@@ -719,8 +712,8 @@ impl ServerState {
         }
 
         // 自动粘贴到光标处：
-        // 1. 托盘开关已开启；
-        // 2. 当前平台支持全局按键模拟（X11/Windows；Wayland 回退纯剪贴板）；
+        // 1. 设置页开关已开启；
+        // 2. 当前平台支持全局按键模拟（X11/Windows/macOS；Wayland 回退纯剪贴板）；
         // 3. BeeType 自己的窗口没有焦点，避免文字糊进配对/状态窗口。
         let mut pasted = false;
         let enabled = self.auto_paste.load(Ordering::Relaxed);
@@ -730,15 +723,25 @@ impl ServerState {
             .map(|w| w.is_focused().unwrap_or(false))
             .unwrap_or(false);
         if enabled && crate::paste::auto_paste_supported() && !own_window_focused {
+            // 注入前记下焦点窗口：回车前复核它没变，否则回车会落到用户刚切过去的
+            // 窗口里（这条检查是"给足回车余量"的前提，见 docs/TECH_DESIGN.md 第 10 节）
+            let focus_before = crate::paste::focused_window_id();
             match crate::paste::simulate_paste() {
-                Ok(()) => {
+                Ok(mut enigo) => {
                     pasted = true;
-                    // 自动发送：粘贴成功后模拟 Enter
+                    // 自动发送：粘贴成功后模拟 Enter，复用同一条 enigo 连接
                     let auto_send = self.auto_send.load(Ordering::Relaxed);
                     if auto_send && crate::paste::auto_send_supported() {
-                        match crate::paste::simulate_enter() {
-                            Ok(()) => info!("Auto-send: Enter sent"),
-                            Err(e) => warn!("Auto-send failed: {}", e),
+                        let focus_after = crate::paste::focused_window_id();
+                        if matches!((focus_before, focus_after), (Some(a), Some(b)) if a != b) {
+                            // 用户在这几十/几百毫秒里切了窗口：不发回车（文字已粘贴，
+                            // 需要的话由用户自己按回车），只记日志不打扰
+                            info!("Auto-send skipped: focus window changed during paste");
+                        } else {
+                            match crate::paste::simulate_enter(&mut enigo, text.chars().count()) {
+                                Ok(()) => info!("Auto-send: Enter sent"),
+                                Err(e) => warn!("Auto-send failed: {}", e),
+                            }
                         }
                     }
                 }

@@ -240,11 +240,14 @@ mod tests {
                 token,
                 client_id,
                 device_name,
+                hardware_id,
             } => {
                 assert_eq!(code.as_deref(), Some("123456"));
                 assert!(token.is_none());
                 assert_eq!(client_id, "");
                 assert_eq!(device_name, "OldPhone");
+                // 旧客户端不发硬件指纹
+                assert!(hardware_id.is_none());
             }
             _ => panic!("wrong variant"),
         }
