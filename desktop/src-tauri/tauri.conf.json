@@ -18,8 +18,7 @@
         "minHeight": 120,
         "resizable": true,
         "center": true,
-        "visible": true,
-        "backgroundColor": "#1a1a2e"
+        "visible": true
       }
     ],
     "trayIcon": {
