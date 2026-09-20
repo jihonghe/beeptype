@@ -147,6 +147,33 @@ impl ConnCtx {
     }
 }
 
+/// 临时会话的续连记录（**仅内存**，只保留最近一条）。
+///
+/// 临时手机被 Android 杀进程后，凭配对时下发的 `resume_token` 在窗口期内免扫码续接；
+/// PC 端只存哈希，且随进程退出而消失——不落盘、不积累访客凭证。
+pub struct TransientResume {
+    pub client_id: String,
+    /// SHA-256(resume_token) 的 hex
+    pub token_hash: String,
+    pub name: String,
+    /// 滑动窗口的到期时刻：任何活动（心跳/发文字/续连成功）都会往后推
+    pub expires_at: Instant,
+}
+
+impl TransientResume {
+    /// 是否已过期（窗口期按最后一次活动起算）
+    pub fn is_expired(&self, now: Instant) -> bool {
+        now >= self.expires_at
+    }
+
+    /// 凭证校验：client_id + token 哈希都命中，且未过期
+    pub fn verify(&self, client_id: &str, token: &str, now: Instant) -> bool {
+        !self.is_expired(now)
+            && self.client_id == client_id
+            && self.token_hash == crate::config::sha256_hex(token)
+    }
+}
+
 /// 主力 token 认证通过后的席位仲裁结果（纯逻辑，便于单测）
 #[derive(Debug, PartialEq)]
 enum PrimaryArbitration {
@@ -191,6 +218,8 @@ pub struct ServerState {
     pub auto_send: Arc<AtomicBool>,
     /// 手机连上后是否自动隐藏主窗口到托盘（用户设置项）
     pub auto_hide: Arc<AtomicBool>,
+    /// 临时会话的续连记录（仅内存，只留最近一条；窗口期 0 = 关闭续连）
+    pub transient_resume: Arc<Mutex<Option<TransientResume>>>,
 }
 
 impl ServerState {
@@ -220,6 +249,7 @@ impl ServerState {
             auto_paste: Arc::new(AtomicBool::new(auto_paste)),
             auto_send: Arc::new(AtomicBool::new(auto_send)),
             auto_hide: Arc::new(AtomicBool::new(auto_hide)),
+            transient_resume: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -291,6 +321,76 @@ impl ServerState {
         }
     }
 
+    // ---- 临时会话的续连记录 ----
+
+    /// 当前续连窗口时长（读设置；可用环境变量覆盖，仅测试用）
+    fn resume_ttl(&self) -> std::time::Duration {
+        self.config.lock().unwrap().resume_ttl()
+    }
+
+    /// 为一次临时会话签发续连凭证：返回明文（只下发这一次），内存里只存哈希。
+    /// 窗口期配置为 0（关闭续连）时不签发，返回 None。
+    pub fn issue_transient_resume(&self, client_id: &str, name: &str) -> Option<(String, u64)> {
+        let ttl = self.resume_ttl();
+        if ttl.is_zero() {
+            return None;
+        }
+        let token = crate::config::generate_token();
+        let record = TransientResume {
+            client_id: client_id.to_string(),
+            token_hash: crate::config::sha256_hex(&token),
+            name: name.to_string(),
+            expires_at: Instant::now() + ttl,
+        };
+        // 只保留最近一条：一台电脑只有一个席位，不积累访客凭证
+        *self.transient_resume.lock().unwrap() = Some(record);
+        info!("Transient resume issued for {name} (ttl {}s)", ttl.as_secs());
+        Some((token, ttl.as_secs()))
+    }
+
+    /// 校验续连凭证；命中则把窗口期往后推（滑动窗口）并返回该会话的名字
+    pub fn verify_transient_resume(&self, client_id: &str, token: &str) -> Option<String> {
+        let ttl = self.resume_ttl();
+        let mut guard = self.transient_resume.lock().unwrap();
+        let record = guard.as_mut()?;
+        if !record.verify(client_id, token, Instant::now()) {
+            return None;
+        }
+        let name = record.name.clone();
+        if !ttl.is_zero() {
+            record.expires_at = Instant::now() + ttl;
+        }
+        Some(name)
+    }
+
+    /// 续连会话仍有活动（心跳/发文字）：把窗口期往后推
+    fn touch_transient_resume(&self, client_id: &str) {
+        let ttl = self.resume_ttl();
+        if ttl.is_zero() {
+            return;
+        }
+        if let Ok(mut guard) = self.transient_resume.lock() {
+            if let Some(record) = guard.as_mut() {
+                if record.client_id == client_id && !record.is_expired(Instant::now()) {
+                    record.expires_at = Instant::now() + ttl;
+                }
+            }
+        }
+    }
+
+    /// 作废续连记录（托盘断开、手机端 bye 时调用）
+    fn clear_transient_resume(&self, client_id: &str) {
+        if let Ok(mut guard) = self.transient_resume.lock() {
+            if guard
+                .as_ref()
+                .is_some_and(|r| r.client_id == client_id)
+            {
+                *guard = None;
+                info!("Transient resume cleared for {client_id}");
+            }
+        }
+    }
+
     /// 获取当前配对码
     pub fn get_code(&self) -> String {
         self.pairing_code.lock().unwrap().clone()
@@ -347,11 +447,19 @@ impl ServerState {
 
     /// 托盘"断开当前手机"：通知持有者结束，席位释放由其连接退出时完成
     pub fn disconnect_current(&self) {
-        let session = self.session.lock().unwrap();
-        if let Some(a) = session.as_ref() {
-            kick_session(a, KICK_DISCONNECT);
-            info!("Disconnect requested for {} ({})", a.name, a.client_id);
-        }
+        let (client_id, name) = {
+            let session = self.session.lock().unwrap();
+            match session.as_ref() {
+                Some(a) => {
+                    kick_session(a, KICK_DISCONNECT);
+                    (a.client_id.clone(), a.name.clone())
+                }
+                None => return,
+            }
+        };
+        // 主人主动结束 = 这次临时访问到此为止：续连凭证一并作废，不能自己回来
+        self.clear_transient_resume(&client_id);
+        info!("Disconnect requested for {name} ({client_id})");
     }
 
     /// 设置页/托盘"解除绑定"：凭证立即作废；若主力正在线，连接降级为
@@ -387,10 +495,20 @@ impl ServerState {
             Message::Hello {
                 code,
                 token,
+                resume,
                 client_id,
                 device_name,
                 hardware_id,
-            } => self.handle_hello(code, token, client_id, device_name, hardware_id, peer_ip, ctx),
+            } => self.handle_hello(
+                code,
+                token,
+                resume,
+                client_id,
+                device_name,
+                hardware_id,
+                peer_ip,
+                ctx,
+            ),
 
             Message::Text { id, text, ts: _ } => {
                 // 必须是席位持有者；等待接管/未认证连接一律拒绝
@@ -406,11 +524,18 @@ impl ServerState {
                     });
                 }
                 ctx.last_active = Instant::now();
+                // 临时会话仍在活跃：续连窗口往后推
+                if !ctx.is_primary {
+                    self.touch_transient_resume(&ctx.client_id);
+                }
                 self.handle_text(id, text)
             }
 
             Message::Ping => {
                 ctx.last_active = Instant::now();
+                if !ctx.is_primary {
+                    self.touch_transient_resume(&ctx.client_id);
+                }
                 Some(Message::Pong)
             }
 
@@ -418,6 +543,10 @@ impl ServerState {
 
             Message::Bye => {
                 ctx.closing = true;
+                // 手机自己说再见 = 这次临时访问结束：续连凭证作废
+                if ctx.authed {
+                    self.clear_transient_resume(&ctx.client_id);
+                }
                 info!("Bye from {} ({})", ctx.name, peer_ip);
                 Some(Message::ByeAck)
             }
@@ -443,6 +572,7 @@ impl ServerState {
         &self,
         code: Option<String>,
         token: Option<String>,
+        resume: Option<String>,
         client_id: String,
         device_name: String,
         hardware_id: Option<String>,
@@ -466,6 +596,52 @@ impl ServerState {
         } else {
             device_name
         };
+
+        // ---- 续连分支：临时会话断线后凭窗口期内的凭证免扫码续接 ----
+        if let Some(resume_token) = resume {
+            // 过期/不匹配都不计失败次数：这是正常路径（窗口过期就该重新扫码），
+            // 不是攻击面——凭证是 64 位 hex 随机串，猜不出来。
+            let Some(name) = self.verify_transient_resume(&client_id, &resume_token) else {
+                info!("Transient resume rejected (expired or unknown) from {peer_ip}");
+                return Some(Message::hello_ack_err(
+                    "unauthorized",
+                    "临时会话已过期，请重新扫码",
+                ));
+            };
+
+            let mut session = self.session.lock().unwrap();
+            if session.is_some() {
+                // 席位被占（例如主力正在用）：按既有规则拒绝，连接不保持
+                return Some(Message::hello_ack_err("occupied", "电脑使用中"));
+            }
+            let kick = Arc::new(AtomicU8::new(0));
+            let downgrade = Arc::new(AtomicBool::new(false));
+            *session = Some(ActiveSession {
+                client_id: client_id.clone(),
+                name: name.clone(),
+                is_primary: false,
+                kick: kick.clone(),
+                downgrade: downgrade.clone(),
+                wake: Mutex::new(clone_wake(&ctx.wake)),
+            });
+            drop(session);
+
+            ctx.admit(client_id, name.clone(), false, kick, downgrade);
+            self.publish_state();
+            auto_hide_after_pairing(&self.app_handle);
+            let ttl_secs = self.resume_ttl().as_secs();
+            info!("Transient session resumed: {} from {}", name, peer_ip);
+            let (device_id, pc_name) = self.device_identity();
+            return Some(Message::hello_ack_ok(
+                "transient",
+                &device_id,
+                &pc_name,
+                None,
+                None, // 不换凭证：窗口期由 resume_expires_in 通知手机更新
+                caps,
+            )
+            .with_resume_expires_in(ttl_secs));
+        }
 
         // ---- token 分支：持久主力免配重连 ----
         if let Some(token) = token {
@@ -502,7 +678,14 @@ impl ServerState {
                     self.publish_state();
                     auto_hide_after_pairing(&self.app_handle);
                     info!("Primary connected via token from {}", peer_ip);
-                    Some(Message::hello_ack_ok("primary", &device_id, &pc_name, None, caps))
+                    Some(Message::hello_ack_ok(
+                        "primary",
+                        &device_id,
+                        &pc_name,
+                        None,
+                        None,
+                        caps,
+                    ))
                 }
                 PrimaryArbitration::ReplaceSelf => {
                     // 同一主力的旧连接还挂着（僵尸重连）：要求旧连接退出，新连接接席
@@ -524,7 +707,14 @@ impl ServerState {
                     self.publish_state();
                     auto_hide_after_pairing(&self.app_handle);
                     info!("Primary replaced stale connection from {}", peer_ip);
-                    Some(Message::hello_ack_ok("primary", &device_id, &pc_name, None, caps))
+                    Some(Message::hello_ack_ok(
+                        "primary",
+                        &device_id,
+                        &pc_name,
+                        None,
+                        None,
+                        caps,
+                    ))
                 }
                 PrimaryArbitration::WaitTakeover => {
                     // 席位被临时方占用：连接保持，等待手动接管
@@ -599,6 +789,14 @@ impl ServerState {
             };
             self.set_code(new_code);
 
+            // 临时会话：签发续连凭证（窗口期 0 = 关闭续连时不签发）。
+            // 主力不需要——它本来就有长期 token。
+            let resume_issue = if is_primary {
+                None
+            } else {
+                self.issue_transient_resume(&client_id, &device_name)
+            };
+
             let (device_id, pc_name) = self.device_identity();
             let kick = Arc::new(AtomicU8::new(0));
             let downgrade = Arc::new(AtomicBool::new(false));
@@ -629,6 +827,7 @@ impl ServerState {
                 &device_id,
                 &pc_name,
                 token_out,
+                resume_issue,
                 caps,
             ))
         } else {
@@ -1007,6 +1206,42 @@ mod tests {
             PrimaryArbitration::WaitTakeover
         );
         assert_eq!(kick.load(Ordering::SeqCst), 0); // 纯仲裁函数不产生副作用
+    }
+
+    /// 临时续连记录：哈希匹配 + client_id 匹配 + 未过期，三者缺一不可
+    #[test]
+    fn test_transient_resume_verify() {
+        let token = "a".repeat(64);
+        let now = Instant::now();
+        let record = TransientResume {
+            client_id: "client-1".to_string(),
+            token_hash: crate::config::sha256_hex(&token),
+            name: "临时手机".to_string(),
+            expires_at: now + std::time::Duration::from_secs(300),
+        };
+
+        assert!(record.verify("client-1", &token, now));
+        assert!(!record.verify("client-2", &token, now), "client_id 不符应拒绝");
+        assert!(!record.verify("client-1", "deadbeef", now), "token 不符应拒绝");
+        // 免得出错：明文 token 本身不能当哈希用
+        assert!(!record.verify("client-1", &record.token_hash, now));
+    }
+
+    /// 窗口期边界：到期时刻起即失效
+    #[test]
+    fn test_transient_resume_expiry() {
+        let token = "b".repeat(64);
+        let now = Instant::now();
+        let record = TransientResume {
+            client_id: "c".to_string(),
+            token_hash: crate::config::sha256_hex(&token),
+            name: "手机".to_string(),
+            expires_at: now + std::time::Duration::from_secs(5),
+        };
+        assert!(!record.is_expired(now));
+        assert!(!record.is_expired(now + std::time::Duration::from_secs(4)));
+        assert!(record.is_expired(now + std::time::Duration::from_secs(5)));
+        assert!(!record.verify("c", &token, now + std::time::Duration::from_secs(6)));
     }
 
     #[test]

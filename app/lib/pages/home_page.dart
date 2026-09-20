@@ -125,8 +125,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _attemptConnect();
   }
 
+  // 有可自动连接的目标：已绑定电脑，或"窗口期内"的临时会话（断线续连）
   bool _canAutoConnect() =>
-      widget.sender.hasDevices && !widget.sender.manualDisconnected;
+      widget.sender.hasAnyTarget && !widget.sender.manualDisconnected;
 
   void _onStatus(ConnectionStatus status) {
     if (!mounted) return;
@@ -217,6 +218,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       outcome = await widget.sender.autoConnect();
     } catch (_) {}
     if (!mounted) return;
+
+    // 临时会话的续连窗口过期（或被 PC 作废）时给出明确出口，而不是静默回到引导页
+    final expiredName = widget.sender.consumeTransientExpiredNotice();
+    if (expiredName != null) {
+      _showSnack('临时会话已过期，请重新扫码');
+    }
 
     // token 被电脑拒绝（典型：电脑端解绑了本机）：凭证已失效，删除后停手
     if (outcome != null && outcome.isUnauthorized) {
@@ -375,8 +382,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Widget _buildStatusPill(ColorScheme scheme) {
     final session = widget.sender.session;
     // 设备名在连接/断开各状态下保持原位，断开不换标题，只用灰点表达
-    final knownName =
-        session?.deviceName ?? widget.sender.storage.primaryDevice?.name;
+    final knownName = session?.deviceName ??
+        widget.sender.storage.primaryDevice?.name ??
+        widget.sender.storage.transientSession?.name;
 
     Widget leading;
     late String title;
@@ -678,7 +686,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final scheme = Theme.of(context).colorScheme;
     final paired = _status == ConnectionStatus.paired;
     final occupied = _status == ConnectionStatus.occupied;
-    final hasDevices = widget.sender.hasDevices;
+    final hasTarget = widget.sender.hasAnyTarget;
     final busy = _status == ConnectionStatus.connecting ||
         _status == ConnectionStatus.pairing ||
         _status == ConnectionStatus.connected;
@@ -707,7 +715,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     ? _buildOccupiedView(scheme)
                     : paired
                         ? _buildEditorCard(scheme, enabled: true)
-                        : (!hasDevices && !busy)
+                        : (!hasTarget && !busy)
                             ? _buildOnboardingView(scheme)
                             : _buildEditorCard(scheme, enabled: false),
               ),

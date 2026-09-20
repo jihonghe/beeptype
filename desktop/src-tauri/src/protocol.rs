@@ -23,6 +23,10 @@ pub enum Message {
         code: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         token: Option<String>,
+        /// 临时会话续连凭证（与 code/token 三选一）。临时手机被系统杀掉进程后，
+        /// 凭它在窗口期内免扫码续接；PC 端只在内存里存它的 SHA-256。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume: Option<String>,
         #[serde(default)]
         client_id: String,
         #[serde(default)]
@@ -55,6 +59,12 @@ pub enum Message {
         device_type: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         token: Option<String>,
+        /// 临时会话的续连凭证，仅"这次码配对新接入的临时会话"下发一次（明文只此一次）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume_token: Option<String>,
+        /// 续连窗口时长（秒）。临时会话的每次握手响应都会带上，手机据此刷新本地到期时间
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume_expires_in: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         capabilities: Option<Capabilities>,
     },
@@ -135,6 +145,7 @@ impl Message {
         Message::Hello {
             code: Some(code.to_string()),
             token: None,
+            resume: None,
             client_id: client_id.to_string(),
             device_name: device_name.to_string(),
             hardware_id: None,
@@ -146,6 +157,20 @@ impl Message {
         Message::Hello {
             code: None,
             token: Some(token.to_string()),
+            resume: None,
+            client_id: client_id.to_string(),
+            device_name: device_name.to_string(),
+            hardware_id: None,
+        }
+    }
+
+    /// 构造临时会话的续连握手（测试与客户端对称实现参考）
+    #[allow(dead_code)]
+    pub fn hello_with_resume(resume: &str, client_id: &str, device_name: &str) -> Self {
+        Message::Hello {
+            code: None,
+            token: None,
+            resume: Some(resume.to_string()),
             client_id: client_id.to_string(),
             device_name: device_name.to_string(),
             hardware_id: None,
@@ -153,13 +178,19 @@ impl Message {
     }
 
     /// 构造成功的握手响应
+    /// `resume`: (续连凭证明文, 窗口秒数)。仅临时会话用；主力传 None。
     pub fn hello_ack_ok(
         session: &str,
         device_id: &str,
         device_name: &str,
         token: Option<String>,
+        resume: Option<(String, u64)>,
         caps: Capabilities,
     ) -> Self {
+        let (resume_token, resume_expires_in) = match resume {
+            Some((t, secs)) => (Some(t), Some(secs)),
+            None => (None, None),
+        };
         Message::HelloAck {
             ok: true,
             status: "ok".to_string(),
@@ -169,8 +200,21 @@ impl Message {
             device_name: Some(device_name.to_string()),
             device_type: Some("pc".to_string()),
             token,
+            resume_token,
+            resume_expires_in,
             capabilities: Some(caps),
         }
+    }
+
+    /// 给握手响应补上续连窗口时长（续连成功时用：凭证不重发，只更新本地到期时间）
+    pub fn with_resume_expires_in(mut self, secs: u64) -> Self {
+        if let Message::HelloAck {
+            resume_expires_in, ..
+        } = &mut self
+        {
+            *resume_expires_in = Some(secs);
+        }
+        self
     }
 
     /// 构造失败的握手响应
@@ -184,6 +228,8 @@ impl Message {
             device_name: None,
             device_type: None,
             token: None,
+            resume_token: None,
+            resume_expires_in: None,
             capabilities: None,
         }
     }
@@ -238,12 +284,14 @@ mod tests {
             Message::Hello {
                 code,
                 token,
+                resume,
                 client_id,
                 device_name,
                 hardware_id,
             } => {
                 assert_eq!(code.as_deref(), Some("123456"));
                 assert!(token.is_none());
+                assert!(resume.is_none());
                 assert_eq!(client_id, "");
                 assert_eq!(device_name, "OldPhone");
                 // 旧客户端不发硬件指纹
@@ -275,6 +323,7 @@ mod tests {
             "dev-1",
             "pc",
             Some("tok".to_string()),
+            None,
             Capabilities { auto_paste: true },
         );
         let json = ok.encode().unwrap();
@@ -324,6 +373,41 @@ mod tests {
         let encoded = msg.encode().unwrap();
         let decoded = Message::decode_line(&encoded).unwrap();
         assert_eq!(msg, decoded);
+    }
+
+    /// 临时会话续连握手：请求与响应的往返编解码（含续连字段）
+    #[test]
+    fn test_transient_resume_handshake_roundtrip() {
+        let hello = Message::hello_with_resume("f".repeat(64).as_str(), "cid-1", "临时手机");
+        let line = hello.encode().unwrap();
+        assert!(line.contains("\"resume\""));
+        match Message::decode_line(&line).unwrap() {
+            Message::Hello { resume, code, token, .. } => {
+                assert_eq!(resume.as_deref(), Some("f".repeat(64).as_str()));
+                assert!(code.is_none() && token.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // 续连成功：下发窗口时长（不重发凭证）
+        let ack = Message::hello_ack_ok(
+            "transient",
+            "dev-1",
+            "pc",
+            None,
+            None,
+            Capabilities { auto_paste: true },
+        )
+        .with_resume_expires_in(300);
+        let json = ack.encode().unwrap();
+        assert!(json.contains("\"resume_expires_in\":300"));
+        assert!(!json.contains("resume_token"));
+        match Message::decode_line(&json).unwrap() {
+            Message::HelloAck { resume_expires_in, .. } => {
+                assert_eq!(resume_expires_in, Some(300));
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]

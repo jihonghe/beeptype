@@ -34,7 +34,7 @@ v0.1 设计稿与最终实现的差异汇总在[第 9 节](#9-与-v01-设计稿�
 |---|---|---|
 | 本机身份 | `client_id`（首启生成的 UUIDv4）+ `hardware_id`（Android ANDROID_ID / iOS Keychain UUID） | `device_id`（首启生成的 UUIDv4）+ `device_name`（hostname） |
 | 对端凭证 | 已绑定电脑列表（含明文 token） | 唯一主力手机记录（含 `token_hash`） |
-| 临时关系 | 不落盘，仅内存 | 不落盘，仅内存 |
+| 临时关系 | 不落**长期**凭证；仅落一条短期续连记录（窗口期内有效，过期即清） | 仅内存（续连记录的哈希）；进程退出即消失 |
 
 **端口**：TCP 与 UDP 使用同一个端口号（`config.port`，默认 8765）。TCP 承载全部业务消息，UDP 只承载凭证门控的设备发现。
 
@@ -86,6 +86,7 @@ pub struct Config {
     #[serde(default)]
     pub auto_send: bool,              // 默认 false，依赖 auto_paste
     pub auto_hide: bool,              // 默认 true：手机连上后自动隐藏主窗口到托盘
+    pub resume_ttl_min: u32,          // 默认 5：临时连接断线后免扫码续连的窗口（分钟），0=关闭
     pub code_hash: Option<String>,    // SHA-256(配对码)
     pub code_expires_at: Option<u64>, // 毫秒时间戳
     pub device_id: String,            // 本机 UUIDv4
@@ -186,9 +187,26 @@ accept
 
 未认证连接不会因空闲被主动关闭（没有 hello 超时），实际约束来自 TCP keepalive 与对端行为。
 
-#### 认证：两条分支
+#### 认证：三条分支
 
 `handle_hello` 先查冷却（冷却中直接回 `cooldown`），再按凭证分流：
+
+**resume 分支（临时会话断线续连）**
+
+临时手机被 Android 杀进程后，凭配对时拿到的 `resume_token` 免扫码续接：
+
+```
+签发（码配对判定为临时时）：PC 生成 32 字节随机串 → 只在内存存 SHA-256 + client_id
+                           + 到期时刻（只保留最近一条）→ 明文随 hello_ack 下发一次
+续连（hello{resume, client_id}）：哈希与 client_id 都命中且未过期 → 接入临时席位，
+                           并把窗口期往后推（滑动窗口）
+失效：TTL 到期 / PC 进程退出 / 主人点托盘"断开当前手机" / 手机端发 bye
+     （席位被占时按既有规则拒绝：临时续连不享受主力待遇）
+```
+
+窗口期由设置项 `resume_ttl_min`（默认 5 分钟，可关闭）决定，每次心跳与发文字都会刷新——
+"人还在用就一直有效，停手超过窗口才失效"。窗口时长通过 `hello_ack.resume_expires_in`
+告知手机（PC 是权威方）。测试可用环境变量 `BEETYPE_RESUME_TTL_SECS` 覆盖（不进 UI）。
 
 **token 分支（主力免配重连）**
 
@@ -202,7 +220,7 @@ accept
 3. 席位空闲时判定身份：
    - `returning`：来者的 `client_id` 命中主力记录，**或** `hardware_id` 命中主力记录（APP 重装后 `client_id` 会变，硬件指纹不会）→ 直接恢复主力席位，**不下发 token**（手机本来就有）。
    - `bind`：勾选了「记住这台手机」且主力位空缺且有 `client_id` → 绑定为新主力并一次性下发 token。
-   - 其余 → 临时会话（`session = "transient"`），不落盘任何东西。
+   - 其余 → 临时会话（`session = "transient"`）：PC 端不落盘任何东西，但会签发一个**续连凭证**（见下）。
 4. 无论哪种结果，配对码都立即 `regenerate_code()`（**一次性**，杜绝重放），并写回内存中的二维码内容。
 
 两分支成功后都会：写席位、刷新托盘、通知前端（`pairing-show`）、日志记录。
@@ -308,6 +326,7 @@ Tauri commands（10 个）：
 | `set_auto_paste` | 存用户意愿；运行态存「意愿 && 平台支持」；关闭时联动关闭 auto_send |
 | `set_auto_send` | 存用户意愿；运行态存「意愿 && auto_paste 生效 && 平台支持」 |
 | `set_auto_hide` | 「连接后自动隐藏窗口」开关（纯 PC 端行为，无平台能力判断） |
+| `set_resume_ttl` | 临时连接续连窗口（分钟，0=关闭）；改完立即生效（窗口期在每次活动时读取） |
 | `set_autostart` | 操作系统自启项 + 持久化 |
 | `set_remember_next` | 「记住这台手机」勾选（仅对下一次码配对生效） |
 | `disconnect_session` | 托盘/窗口断开当前手机 |
@@ -319,7 +338,7 @@ Tauri commands（10 个）：
 - 主页与设置页**绝对定位叠放**，切换只改 `opacity`/`visibility`（交叉淡化），元素几何全程不变——规避 WebKitGTK 层重建导致的标题闪烁。
 - 窗口高度在启动时用离屏克隆渲染「等待态」量出真实高度（两种勾选文案取高者）后固定，之后不再随状态跳变：主页内容裁切、设置页内部滚动。
 - 渲染做了结构键缓存（`lastStatusKey`/`lastPairKey`），避免 1s 轮询全量重绘导致 hover/勾选态丢失；只有「无连接 → 有连接」这类跨状态切换才播入场动画。
-- 设置页每次进入都拉一次 `get_settings`；通用区四个开关：自动粘贴 / 粘贴后自动发送 / **连接后自动隐藏窗口** / 开机自启。「记住这台手机」勾选框仅在主力位空缺时出现，默认不勾（扫码默认即临时连接）。
+- 设置页每次进入都拉一次 `get_settings`；通用区四项开关（自动粘贴 / 粘贴后自动发送 / 连接后自动隐藏窗口 / 开机自启）+ 一个下拉（**临时连接断线后自动续连**：关闭 / 5 分钟（默认）/ 30 分钟 / 2 小时）。「记住这台手机」勾选框仅在主力位空缺时出现，默认不勾（扫码默认即临时连接）。
 
 ---
 
@@ -498,7 +517,7 @@ app/lib/
 展示：窗口轮询时若码已过期或剩余 <2 分钟则自动换新（未连接时才换）
 配对：hello{code} → 校验通过 → 立即换新码（一次性）
         勾选「记住」且主力位空缺 → 生成 token，明文随 hello_ack 下发一次
-        主力位已有主人 → 临时会话，两端都不落盘
+        主力位已有主人 → 临时会话：PC 不落盘，但签发短期续连凭证（窗口期内可免扫码续连）
 重连：hello{token} → SHA-256 比对命中 → 免码接入
 解绑：config.primary 清空 → 在线主力会话降级为临时（session_downgraded，不断开）→ 旧 token 立即失效
 ```
@@ -564,7 +583,7 @@ log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
 
 ## 8. 测试与验证
 
-**Rust 单测（22 个，`cargo test`）**
+**Rust 单测（27 个，`cargo test`）**
 
 | 文件 | 覆盖 |
 |---|---|
@@ -574,6 +593,7 @@ log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
 | `discovery.rs` | 请求解析的合法/畸形样本、应答 JSON 字段 |
 | `paste.rs` | 回车余量的边界（基准值、按长度递增、上限、整体 <1s） |
 | `winicon.rs` | 图标数据格式（`[宽, 高, ARGB...]` 长度自洽、含不透明像素） |
+| 续连相关 | 续连凭证校验（哈希/client_id/过期三者缺一不可）、窗口边界、协议往返（含 `resume` / `resume_expires_in`）、`resume_ttl_min` 默认值与旧配置缺省 |
 
 **Flutter 测试**：`app/test/widget_test.dart` 覆盖 `TcpMessage` 编解码（JSON 行、字段往返、畸形行返回 null）。
 

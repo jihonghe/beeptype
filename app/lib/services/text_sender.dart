@@ -22,6 +22,24 @@ class TextSender {
   TcpService get tcp => _tcp;
   StorageService get storage => _storage;
 
+  /// 临时会话刚刚失效（本地超时，或 PC 侧拒绝续连）时记下它的名字，
+  /// 供 UI 提示一次"请重新扫码"；取走后清空。
+  String? _transientExpiredName;
+  String? consumeTransientExpiredNotice() {
+    final name = _transientExpiredName;
+    _transientExpiredName = null;
+    return name;
+  }
+
+  /// 是否有可自动连接的目标：已绑定主力电脑，或未过期的临时会话记录
+  bool get hasAnyTarget => _storage.hasDevices || hasTransientSession;
+
+  /// 是否有未过期的临时会话记录（临时连接的续连窗口内）
+  bool get hasTransientSession {
+    final t = _storage.transientSession;
+    return t != null && !t.isExpired;
+  }
+
   /// 硬件指纹。Android: ANDROID_ID；iOS: Keychain 持久化 UUID。
   /// 两端都在同一个 MethodChannel('beetype/device') 上响应 getHardwareId。
   /// 跨 APP 重装稳定，用于 PC 端识别"重装后仍是同一台手机"。
@@ -61,9 +79,12 @@ class TextSender {
   /// 用发现结果（proof 门控，应答必为该电脑）对新 IP 补连一次，
   /// 典型 DHCP 换 IP 场景约 3s 内完成。
   Future<HelloOutcome> autoConnect() async {
-    final dev = _storage.primaryDevice;
-    if (dev == null) return HelloOutcome.networkFail();
     manualDisconnected = false;
+    final dev = _storage.primaryDevice;
+    if (dev == null) {
+      // 没有主力凭证：看看有没有"窗口期内"的临时会话可以续连
+      return _resumeTransientIfAny();
+    }
 
     // 发现并行开跑（约 1.1s 出结果），不阻塞直连
     final discFuture = _discovery
@@ -133,6 +154,50 @@ class TextSender {
     return outcome;
   }
 
+  /// 临时会话续连：临时手机被系统杀进程后，凭窗口期内的凭证免扫码回到同一台电脑。
+  ///
+  /// 失败分三种，处理不同：
+  /// - 网络层连不上 → 返回失败，留着记录等下次重试（可能是电脑睡了/换网了）
+  /// - 凭证被拒（窗口过期 / PC 重启 / 主人在电脑上断开了它）→ 删记录 + 提示重新扫码
+  /// - 席位被占 → 交给上层显示"电脑使用中"（临时方没有接管入口）
+  Future<HelloOutcome> _resumeTransientIfAny() async {
+    final t = _storage.transientSession;
+    if (t == null) return HelloOutcome.networkFail();
+
+    if (t.isExpired) {
+      await _storage.clearTransientSession();
+      _transientExpiredName = t.name;
+      return HelloOutcome.networkFail();
+    }
+
+    final hid = await hardwareId;
+    try {
+      await _tcp.connect(t.ip, t.port, timeout: _directConnectTimeout);
+    } catch (_) {
+      return HelloOutcome.networkFail();
+    }
+
+    final outcome = await _tcp.hello(
+      resume: t.token,
+      clientId: _storage.clientId,
+      deviceName: _storage.getDeviceName(),
+      hardwareId: hid,
+      timeout: _helloTimeout,
+    );
+
+    if (outcome.ok) {
+      session = outcome;
+      // PC 侧给的窗口时长是权威值（设置可能被改过）：据此刷新本地到期时间
+      await _storage.touchTransientSession(
+        expiresInSec: outcome.resumeExpiresIn,
+      );
+    } else if (outcome.isUnauthorized) {
+      await _storage.clearTransientSession();
+      _transientExpiredName = t.name;
+    }
+    return outcome;
+  }
+
   /// 扫码配对入口。
   ///
   /// - PC 勾选了"记住此手机"→ ack 带 token，落盘为主力电脑；
@@ -172,6 +237,18 @@ class TextSender {
           token: outcome.token!,
           capabilities: outcome.capabilities,
           lastConnectedMs: DateTime.now().millisecondsSinceEpoch,
+        ));
+      } else if (outcome.resumeToken != null &&
+          outcome.resumeToken!.isNotEmpty) {
+        // 临时会话：不落长期凭证，只存一条短期的续连记录（窗口期内免扫码回来）
+        await _storage.saveTransientSession(TransientSession(
+          deviceId: outcome.deviceId ?? '',
+          name: outcome.deviceName ?? ip,
+          ip: ip,
+          port: port,
+          token: outcome.resumeToken!,
+          expiresAtMs: DateTime.now().millisecondsSinceEpoch +
+              (outcome.resumeExpiresIn ?? 300) * 1000,
         ));
       }
     }

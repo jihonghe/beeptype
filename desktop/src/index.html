@@ -225,6 +225,21 @@
         .switch input:disabled ~ * { opacity: .45; }
         .switch:has(input:disabled) { cursor: default; }
 
+        /* ---- 下拉选择（设置行右侧） ---- */
+        .select {
+            flex: none; appearance: none; -webkit-appearance: none;
+            background: #2f3450; color: var(--text);
+            border: 1px solid var(--line); border-radius: 8px;
+            padding: 6px 26px 6px 10px; font-size: 12px; font-family: inherit;
+            cursor: pointer;
+            background-image: linear-gradient(45deg, transparent 50%, var(--text-2) 50%),
+                              linear-gradient(135deg, var(--text-2) 50%, transparent 50%);
+            background-position: right 12px top 14px, right 7px top 14px;
+            background-size: 5px 5px, 5px 5px;
+            background-repeat: no-repeat;
+        }
+        .select:hover { background-color: #363c5c; }
+
         /* ---- 主力机卡片 ---- */
         .device-card { padding: 13px 14px; }
         .device-name { font-size: 13px; font-weight: 600;
@@ -316,6 +331,18 @@
                     <input type="checkbox" id="set-autohide">
                     <span class="track"></span>
                 </label>
+            </div>
+            <div class="setting-row">
+                <div class="setting-text">
+                    <div class="setting-title">临时连接断线后自动续连</div>
+                    <div class="setting-sub" id="rt-note">临时手机被系统杀掉后，这段时间内重开 App 可自动连回</div>
+                </div>
+                <select class="select" id="set-resume-ttl">
+                    <option value="0">关闭</option>
+                    <option value="5">5 分钟</option>
+                    <option value="30">30 分钟</option>
+                    <option value="120">2 小时</option>
+                </select>
             </div>
             <div class="setting-row">
                 <div class="setting-text">
@@ -566,6 +593,8 @@
             const as = document.getElementById('set-autostart');
             const ans = document.getElementById('set-autosend');
             const ah = document.getElementById('set-autohide');
+            const rt = document.getElementById('set-resume-ttl');
+            const rtNote = document.getElementById('rt-note');
             const apNote = document.getElementById('ap-note');
             const asNote = document.getElementById('as-note');
             const ahNote = document.getElementById('ah-note');
@@ -576,6 +605,11 @@
             ahNote.textContent = ah.checked
                 ? '手机连上电脑后，窗口自动收起到系统托盘'
                 : '窗口会一直留在桌面，方便查看状态和管理设备';
+            const rtText = () => rt.value === '0'
+                ? '临时连接断开后需重新扫码'
+                : '临时手机被系统杀掉后，这段时间内重开 App 可自动连回（超时需重新扫码）';
+            rt.value = String(s.resumeTtlMin ?? 5);
+            rtNote.textContent = rtText();
             ap.disabled = !s.autoPasteSupported;
             // 自动发送依赖自动粘贴：autoPaste 关 → autoSend 也 disabled
             ans.disabled = !s.autoPaste || !s.autoSendSupported;
@@ -619,6 +653,12 @@
             as.onchange = async () => {
                 try { await invoke('set_autostart', { value: as.checked }); }
                 catch (e) { alert('设置失败：' + e); as.checked = !as.checked; }
+            };
+            rt.onchange = async () => {
+                try {
+                    await invoke('set_resume_ttl', { minutes: Number(rt.value) });
+                    rtNote.textContent = rtText();
+                } catch (e) { alert('设置失败：' + e); }
             };
             ah.onchange = async () => {
                 try {

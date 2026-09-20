@@ -2,7 +2,7 @@ name: beetype
 description: 手机说话，电脑粘贴
 publish_to: 'none'
 # 发布时由 CI 按 git tag 改写；此处保持与最近一次发布一致，便于人工核对
-version: 0.2.4
+version: 0.2.5
 
 environment:
   sdk: '>=3.0.0 <4.0.0'

@@ -53,6 +53,8 @@ struct SettingsInfo {
     auto_send_supported: bool,
     /// 手机连上后是否自动隐藏主窗口到托盘
     auto_hide: bool,
+    /// 临时连接断线后的续连窗口（分钟；0 = 关闭）
+    resume_ttl_min: u32,
     /// 开机自启是否开启（读系统实际状态）
     autostart: bool,
     /// 是否已绑定主力手机
@@ -175,6 +177,7 @@ fn get_settings(
     let auto_paste = server.auto_paste.load(Ordering::Relaxed);
     let auto_send = server.auto_send.load(Ordering::Relaxed);
     let auto_hide = server.auto_hide.load(Ordering::Relaxed);
+    let resume_ttl_min = server.config.lock().unwrap().resume_ttl_min;
     let (has_primary, primary_name) = {
         let config = server.config.lock().unwrap();
         (
@@ -190,6 +193,7 @@ fn get_settings(
         auto_paste_supported: paste::auto_paste_supported(),
         auto_send_supported: paste::auto_send_supported(),
         auto_hide,
+        resume_ttl_min,
         autostart,
         has_primary,
         primary_name,
@@ -265,6 +269,20 @@ fn set_auto_hide(
     config.auto_hide = value;
     let _ = config.save();
     info!("Auto-hide toggled: {value}");
+}
+
+/// 设置临时连接的续连窗口（分钟；0 = 关闭续连）。
+/// 改完立即生效：窗口期在每次活动/续连时读取，已签发的凭证最长活到下一个刷新点。
+#[tauri::command]
+fn set_resume_ttl(
+    minutes: u32,
+    state: tauri::State<'_, Arc<Mutex<ServerState>>>,
+) {
+    let server = state.lock().unwrap();
+    let mut config = server.config.lock().unwrap();
+    config.resume_ttl_min = minutes;
+    let _ = config.save();
+    info!("Transient resume TTL set to {minutes} min");
 }
 
 /// 切换开机自启：操作系统自启项 + 持久化用户意愿
@@ -444,6 +462,7 @@ pub fn run() {
             set_auto_paste,
             set_auto_send,
             set_auto_hide,
+            set_resume_ttl,
             set_autostart,
             set_window_height
         ])

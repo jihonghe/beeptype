@@ -21,6 +21,13 @@ pub struct Config {
     /// 手机连上后自动隐藏主窗口到托盘（关闭则窗口一直留在桌面，便于看状态/管理设备）
     #[serde(default = "default_true")]
     pub auto_hide: bool,
+    /// 临时连接断线后的续连窗口（分钟）：临时手机被系统杀进程后，这段时间内重开 App
+    /// 可免扫码自动连回。0 = 关闭续连（断开即需重新扫码）。默认 5 分钟。
+    ///
+    /// 为什么默认这么短：临时连接不是核心场景（核心是"私人手机连自己的电脑、一直连着"），
+    /// 临时主要用于"别人临时用我的电脑"或"公共电脑"，没有必要给长窗口。
+    #[serde(default = "default_resume_ttl_min")]
+    pub resume_ttl_min: u32,
     pub code_hash: Option<String>,
     pub code_expires_at: Option<u64>,
 
@@ -37,6 +44,11 @@ pub struct Config {
 
 fn default_true() -> bool {
     true
+}
+
+/// 临时连接续连窗口的默认值（分钟）
+fn default_resume_ttl_min() -> u32 {
+    5
 }
 
 /// 主力手机记录。token 明文只在绑定当下下发一次，此处仅存 SHA-256。
@@ -95,6 +107,7 @@ impl Default for Config {
             auto_paste: true,
             auto_send: false,
             auto_hide: true,
+            resume_ttl_min: 5,
             code_hash: None,
             code_expires_at: None,
             device_id: String::new(),
@@ -166,7 +179,7 @@ fn new_uuid_v4() -> String {
 }
 
 /// 生成 32 字节随机 token 的 hex（64 字符）
-fn generate_token() -> String {
+pub(crate) fn generate_token() -> String {
     let mut buf = [0u8; 32];
     fill_random(&mut buf);
     let mut hex = String::with_capacity(64);
@@ -198,7 +211,7 @@ fn hostname() -> String {
 }
 
 /// SHA-256 hex 编码
-fn sha256_hex(input: &str) -> String {
+pub(crate) fn sha256_hex(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     let result = hasher.finalize();
@@ -286,6 +299,19 @@ impl Config {
         self.code_expires_at
             .map(|expires| now_ms() > expires)
             .unwrap_or(true)
+    }
+
+    /// 临时连接的续连窗口时长。
+    ///
+    /// 环境变量 `BEETYPE_RESUME_TTL_SECS` 优先——**仅供测试**（验证"过期后必须重新
+    /// 扫码"这条路径不用真等 5 分钟），不进设置页、不写进用户文档。
+    pub fn resume_ttl(&self) -> std::time::Duration {
+        if let Ok(raw) = std::env::var("BEETYPE_RESUME_TTL_SECS") {
+            if let Ok(secs) = raw.trim().parse::<u64>() {
+                return std::time::Duration::from_secs(secs);
+            }
+        }
+        std::time::Duration::from_secs(self.resume_ttl_min as u64 * 60)
     }
 
     /// 主力位是否已绑定
@@ -473,5 +499,32 @@ mod auto_hide_tests {
         let cfg: Config = serde_json::from_str(legacy).unwrap();
         assert!(cfg.auto_hide);
         assert!(Config::default().auto_hide);
+    }
+}
+
+#[cfg(test)]
+mod resume_ttl_tests {
+    use super::*;
+
+    #[test]
+    fn test_resume_ttl_default_and_zero() {
+        // 默认 5 分钟
+        let cfg = Config::default();
+        assert_eq!(cfg.resume_ttl_min, 5);
+        assert_eq!(cfg.resume_ttl(), std::time::Duration::from_secs(300));
+        // 0 = 关闭续连
+        let off = Config { resume_ttl_min: 0, ..Config::default() };
+        assert_eq!(off.resume_ttl(), std::time::Duration::from_secs(0));
+        // 2 小时档
+        let long = Config { resume_ttl_min: 120, ..Config::default() };
+        assert_eq!(long.resume_ttl(), std::time::Duration::from_secs(7200));
+    }
+
+    /// 旧配置没有 resume_ttl_min 字段时，按默认 5 分钟处理
+    #[test]
+    fn test_resume_ttl_legacy_default() {
+        let legacy = r#"{"port": 8765, "autostart": false}"#;
+        let cfg: Config = serde_json::from_str(legacy).unwrap();
+        assert_eq!(cfg.resume_ttl_min, 5);
     }
 }

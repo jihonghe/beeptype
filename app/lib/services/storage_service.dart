@@ -51,6 +51,59 @@ class OutputDevice {
       };
 }
 
+/// 一条**临时会话**的续连记录（与"已绑定电脑"分开存，不混进常用列表）。
+///
+/// 临时连接本身不落长期凭证：只有在 PC 侧开启了"断线后自动续连"时，才会在配对
+/// 成功时拿到续连凭证，并在窗口期内凭它免扫码回到同一台电脑；窗口过期或 PC 侧
+/// 作废（重启/主人断开）后即失效，需要重新扫码。
+class TransientSession {
+  final String deviceId;
+  final String name;
+  final String ip;
+  final int port;
+  final String token;
+  final int expiresAtMs;
+
+  TransientSession({
+    required this.deviceId,
+    required this.name,
+    required this.ip,
+    required this.port,
+    required this.token,
+    required this.expiresAtMs,
+  });
+
+  bool get isExpired =>
+      DateTime.now().millisecondsSinceEpoch >= expiresAtMs;
+
+  TransientSession copyWith({int? expiresAtMs}) => TransientSession(
+        deviceId: deviceId,
+        name: name,
+        ip: ip,
+        port: port,
+        token: token,
+        expiresAtMs: expiresAtMs ?? this.expiresAtMs,
+      );
+
+  factory TransientSession.fromJson(Map<String, dynamic> j) => TransientSession(
+        deviceId: j['device_id'] as String? ?? '',
+        name: j['name'] as String? ?? '电脑',
+        ip: j['ip'] as String? ?? '',
+        port: (j['port'] as num?)?.toInt() ?? 8765,
+        token: j['token'] as String? ?? '',
+        expiresAtMs: (j['expires_at_ms'] as num?)?.toInt() ?? 0,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'device_id': deviceId,
+        'name': name,
+        'ip': ip,
+        'port': port,
+        'token': token,
+        'expires_at_ms': expiresAtMs,
+      };
+}
+
 /// 存储服务：手机身份 + 已绑定电脑列表。
 ///
 /// 单主力机模型体现在 PC 端（一台 PC 只记一部主力手机）；手机端可记住多台
@@ -59,6 +112,7 @@ class StorageService {
   static const _keyClientId = 'client_id';
   static const _keyDevices = 'output_devices';
   static const _keyDeviceName = 'device_name';
+  static const _keyTransient = 'transient_session';
 
   // 旧版本（配对码模型）键名：升级后一次性清除，旧配对在新协议已失效。
   static const _legacyKeys = [
@@ -193,6 +247,37 @@ class StorageService {
       jsonEncode(list.map((d) => d.toJson()).toList()),
     );
   }
+
+  // ---- 临时会话的续连记录（与常用电脑列表分开，互不影响） ----
+
+  /// 当前临时会话记录；没有则 null（过期与否由调用方判断，便于给出准确提示）
+  TransientSession? get transientSession {
+    final raw = _prefs.getString(_keyTransient);
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      return TransientSession.fromJson(
+          jsonDecode(raw) as Map<String, dynamic>);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> saveTransientSession(TransientSession s) =>
+      _prefs.setString(_keyTransient, jsonEncode(s.toJson()));
+
+  /// 续连成功后刷新到期时间（滑动窗口，由 PC 侧给的窗口时长决定）
+  Future<void> touchTransientSession({int? expiresInSec}) async {
+    final cur = transientSession;
+    if (cur == null) return;
+    final next = expiresInSec == null
+        ? cur
+        : cur.copyWith(
+            expiresAtMs: DateTime.now().millisecondsSinceEpoch +
+                expiresInSec * 1000);
+    await saveTransientSession(next);
+  }
+
+  Future<void> clearTransientSession() => _prefs.remove(_keyTransient);
 
   /// RFC 4122 v4 UUID，密码学随机源
   static String _newUuidV4() {

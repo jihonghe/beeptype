@@ -55,6 +55,12 @@ class HelloOutcome {
   final Map<String, dynamic> capabilities;
   final String? error;
 
+  /// 临时会话的续连凭证（仅"新接入的临时会话"下发一次）
+  final String? resumeToken;
+
+  /// 续连窗口时长（秒）；临时会话每次握手响应都带，手机据此刷新本地到期时间
+  final int? resumeExpiresIn;
+
   bool get isPrimary => session == 'primary';
   bool get isOccupied => status == 'occupied';
   bool get isUnauthorized => status == 'unauthorized' || status == 'cooldown';
@@ -69,6 +75,8 @@ class HelloOutcome {
     this.deviceType,
     Map<String, dynamic>? capabilities,
     this.error,
+    this.resumeToken,
+    this.resumeExpiresIn,
   }) : capabilities = capabilities ?? const {};
 
   factory HelloOutcome.fromAck(Map<String, dynamic> d) => HelloOutcome(
@@ -82,6 +90,8 @@ class HelloOutcome {
         capabilities:
             (d['capabilities'] as Map?)?.cast<String, dynamic>() ?? const {},
         error: d['error'] as String?,
+        resumeToken: d['resume_token'] as String?,
+        resumeExpiresIn: (d['resume_expires_in'] as num?)?.toInt(),
       );
 
   /// 本地构造一个网络层失败结果（超时/连不上）
@@ -160,12 +170,14 @@ class TcpService {
   ///
   /// - 绑定/临时接入：传 [code]
   /// - 已绑定主力自动连接：传 [token]
+  /// - 临时会话断线续连：传 [resume]（窗口期内的续连凭证）
   ///
   /// 返回结构化结果：成功（持席）/ occupied（等待接管）/ 各类拒绝。
   /// 非 occupied 的失败会在内部关闭 TCP。
   Future<HelloOutcome> hello({
     String? code,
     String? token,
+    String? resume,
     String? hardwareId,
     required String clientId,
     required String deviceName,
@@ -179,6 +191,7 @@ class TcpService {
     _send(TcpMessage('hello', {
       if (code != null) 'code': code,
       if (token != null) 'token': token,
+      if (resume != null) 'resume': resume,
       'client_id': clientId,
       'device_name': deviceName,
       if (hardwareId != null && hardwareId.isNotEmpty) 'hardware_id': hardwareId,
