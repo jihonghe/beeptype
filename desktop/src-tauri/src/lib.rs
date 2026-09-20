@@ -121,14 +121,15 @@ fn build_pairing_info(server: &AppServerState) -> PairingInfo {
 }
 
 /// 显示并聚焦主窗口（托盘菜单/托盘左键共用）。
+/// view 指定这次唤起要落到的页面（"home" 主页 / "settings" 设置页）：每次唤起
+/// 都是"重新进入"，不沿用上一次停留的页面与滚动位置（前端收到 view-request 后重置）。
 /// 窗口是否在连接后自动收回由设置项「连接后自动隐藏窗口」决定（见 server.rs）。
-fn show_main_window(app: &tauri::AppHandle) {
+fn show_main_window(app: &tauri::AppHandle, view: &str) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
-        // 通知前端立即刷新一次，不必等下一个 1s 轮询周期
-        let _ = window.emit("pairing-show", ());
+        let _ = window.emit("view-request", view);
     }
 }
 
@@ -446,14 +447,8 @@ pub fn run() {
                 )
                 .on_menu_event(move |app, event| match event.id().as_ref() {
                     "quit" => app.exit(0),
-                    "show_qr" => show_main_window(app),
-                    "settings" => {
-                        // 打开窗口并直接切到设置页
-                        show_main_window(app);
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.emit("open-settings", ());
-                        }
-                    }
+                    "show_qr" => show_main_window(app, "home"),
+                    "settings" => show_main_window(app, "settings"),
                     "disconnect" => {
                         let state = app.state::<Arc<Mutex<AppServerState>>>();
                         let server = state.lock().unwrap();
@@ -480,7 +475,7 @@ pub fn run() {
                         ..
                     } = event
                     {
-                        show_main_window(tray.app_handle());
+                        show_main_window(tray.app_handle(), "home");
                     }
                 })
                 .build(app)?;

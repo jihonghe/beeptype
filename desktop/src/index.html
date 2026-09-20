@@ -265,10 +265,25 @@
             padding: 12px 14px; font-size: 13px;
         }
         .about-row .ver { color: var(--text-3); font-size: 12px; }
+
+        /* ---- 页内浮动提示（设置失败一类）----
+           不用 alert()/confirm()：系统弹窗会带出页面的 URL/标题等实现细节，
+           而且要用户点掉才继续。页内提示只说人话，几秒后自己消失。 */
+        .notice {
+            position: absolute; left: 18px; right: 18px; bottom: 16px;
+            z-index: 20;
+            padding: 10px 12px; border-radius: 10px;
+            background: #3a2430; border: 1px solid #6b3a4a; color: #ffd7d7;
+            font-size: 12.5px; line-height: 1.5;
+            opacity: 0; transform: translateY(6px); pointer-events: none;
+            transition: opacity .18s ease, transform .18s ease;
+        }
+        .notice.show { opacity: 1; transform: none; }
     </style>
 </head>
 <body>
     <div id="view-stage">
+    <div class="notice" id="notice"></div>
     <!-- ============ 主页：只承载"连接/配对"工作流 ============ -->
     <div id="view-home" class="view container active">
         <header class="topbar">
@@ -450,18 +465,40 @@
             }[c]));
         }
 
+        /// invoke 的 reject 值可能是 Error，也可能是后端原样返回的字符串。
+        /// 统一成人能读的一句话：剥掉 "Error:"/"TypeError:" 这类实现细节。
+        function errText(e) {
+            const s = (e && e.message) ? e.message : String(e);
+            return s.replace(/^\w*Error:\s*/, '');
+        }
+
+        /// 页内浮动提示（替代 alert）：几秒后自动消失，不打断操作
+        let noticeTimer = null;
+        function showNotice(text) {
+            const el = document.getElementById('notice');
+            if (!el) return;
+            el.textContent = text; // textContent：任何内容都不当 HTML 解析
+            el.classList.add('show');
+            if (noticeTimer) clearTimeout(noticeTimer);
+            noticeTimer = setTimeout(() => el.classList.remove('show'), 4000);
+        }
+
         /* ---------------- 视图切换：交叉淡化 + 窗口伸缩同步 ---------------- */
         let viewBusy = false;
         let pendingView = null;
 
         function showView(name) {
-            // 过渡中再点：记住最后一次目标，本次结束后补切（连点不丢、不跳）
-            if (viewBusy) { pendingView = name; return; }
             const go = name === 'settings';
             const home = document.getElementById('view-home');
             const settings = document.getElementById('view-settings');
             const oldView = go ? home : settings;
             const newView = go ? settings : home;
+            // 每次进入都是"重新进入"：滚动位置不沿用上一次（托盘唤起、
+            // 页内来回切一律适用）。必须在下面的提前返回之前重置，
+            // 否则"已在设置页再点设置"会把上次的滚动位置留在那儿。
+            newView.scrollTop = 0;
+            // 过渡中再点：记住最后一次目标，本次结束后补切（连点不丢、不跳）
+            if (viewBusy) { pendingView = name; return; }
             if (newView.classList.contains('active') &&
                 !newView.classList.contains('view-entering')) return;
 
@@ -660,21 +697,21 @@
                         asNote.textContent = '粘贴完成后自动回车发送到聊天框';
                         asNote.classList.remove('bad');
                     }
-                } catch (e) { alert('设置失败：' + e); ap.checked = !ap.checked; }
+                } catch (e) { showNotice('设置失败：' + errText(e)); ap.checked = !ap.checked; }
             };
             ans.onchange = async () => {
                 try { await invoke('set_auto_send', { value: ans.checked }); }
-                catch (e) { alert('设置失败：' + e); ans.checked = !ans.checked; }
+                catch (e) { showNotice('设置失败：' + errText(e)); ans.checked = !ans.checked; }
             };
             as.onchange = async () => {
                 try { await invoke('set_autostart', { value: as.checked }); }
-                catch (e) { alert('设置失败：' + e); as.checked = !as.checked; }
+                catch (e) { showNotice('设置失败：' + errText(e)); as.checked = !as.checked; }
             };
             rt.onchange = async () => {
                 try {
                     await invoke('set_resume_ttl', { minutes: Number(rt.value) });
                     rtNote.textContent = rtText();
-                } catch (e) { alert('设置失败：' + e); }
+                } catch (e) { showNotice('设置失败：' + errText(e)); }
             };
             ah.onchange = async () => {
                 try {
@@ -682,17 +719,33 @@
                     ahNote.textContent = ah.checked
                         ? '手机连上电脑后，窗口自动收起到系统托盘'
                         : '窗口会一直留在桌面，方便查看状态和管理设备';
-                } catch (e) { alert('设置失败：' + e); ah.checked = !ah.checked; }
+                } catch (e) { showNotice('设置失败：' + errText(e)); ah.checked = !ah.checked; }
             };
 
             document.getElementById('app-version').textContent = 'v' + escapeHtml(s.version || '');
 
-            const dc = document.getElementById('device-card');
             // 在线会话信息来自 get_pairing_info（1s 轮询同一份数据），
             // 用来判断"主力位空缺且当前是临时连接"→ 可以一键转正
             let pair = null;
             try { pair = await invoke('get_pairing_info'); } catch (e) { /* 忽略 */ }
+            renderDeviceCard(s, pair);
+        }
+
+        /* ---------------- 「常用手机」卡（设置页） ---------------- */
+        // 同样按结构键增量更新：1s 轮询也会调它，因此手机断开/转正后卡片会
+        // 立刻纠正——不然它会一直停在"临时连接 + 设为主力手机"，用户点下去
+        // 才发现这台手机早就不在线了。
+        let lastDeviceKey = '';
+        function renderDeviceCard(s, pair) {
+            const dc = document.getElementById('device-card');
+            if (!dc) return;
             const canPromote = !!(pair && pair.connected && !pair.sessionIsPrimary);
+            const key = s.hasPrimary
+                ? 'primary:' + (s.primaryName || '')
+                : (canPromote ? 'promote:' + (pair.connectedName || '') : 'empty');
+            if (lastDeviceKey === key) return;
+            lastDeviceKey = key;
+
             if (s.hasPrimary) {
                 dc.innerHTML =
                     '<div class="device-name">' + escapeHtml(s.primaryName || '已绑定的手机') + '</div>' +
@@ -706,6 +759,7 @@
                         await Promise.all([renderSettings(), refresh()]);
                     } catch (err) {
                         console.error(err);
+                        showNotice('解绑失败：' + errText(err));
                         e.target.disabled = false;
                         e.target.textContent = '解除绑定';
                     }
@@ -724,9 +778,11 @@
                         await Promise.all([renderSettings(), refresh()]);
                     } catch (err) {
                         console.error(err);
-                        alert('设置失败：' + err);
+                        showNotice('设置失败：' + errText(err));
+                        // 失败常见于"这台手机其实已经不在线"——重拉一次把卡片纠正回来
                         e.target.disabled = false;
                         e.target.textContent = '设为主力手机';
+                        refresh();
                     }
                 };
             } else {
@@ -736,13 +792,18 @@
             }
         }
 
-        /* ---------------- 轮询（仅主页数据） ---------------- */
+        /* ---------------- 轮询（主页数据 + 设置页「常用手机」卡） ---------------- */
         async function refresh() {
             try {
-                const info = await invoke('get_pairing_info');
+                const [info, s] = await Promise.all([
+                    invoke('get_pairing_info'),
+                    invoke('get_settings').catch(() => null),
+                ]);
                 if (!info) return;
                 renderStatus(info);
                 renderPairing(info);
+                // 设置页开着时同样即时纠正（结构键去重，不会每秒重绘）
+                if (s) renderDeviceCard(s, info);
             } catch (e) {
                 console.error('refresh failed:', e);
             }
@@ -760,15 +821,17 @@
             }));
         }
 
-        // 托盘唤起窗口时立即刷新（配对码已全自动换新，无手动刷新入口）
+        // 托盘唤起窗口：view-request 带着这次要落的页面。
+        // 每次唤起都是"重新进入"——落到请求的那一页，且从顶部开始，
+        // 不沿用上次停留在哪一页、滚到哪里（showView 内重置滚动位置）。
         if (listen) {
-            listen('pairing-show', () => {
+            listen('view-request', (e) => {
+                showView(e?.payload === 'settings' ? 'settings' : 'home');
                 refresh();
                 forceRepaint();
             });
-            // 托盘菜单「设置」→ 直接切到设置页
-            listen('open-settings', () => {
-                showView('settings');
+            // 后端状态变化（配对成功、自动隐藏前）→ 立即刷新，不等下个轮询周期
+            listen('pairing-show', () => {
                 refresh();
                 forceRepaint();
             });
