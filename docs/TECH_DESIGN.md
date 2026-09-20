@@ -1,972 +1,569 @@
 # BeeType 技术设计文档
 
-> **版本**：v0.1
-> **日期**：2026-09-18
+> **版本**：v0.2（与当前实现对齐）
+> **日期**：2026-09-20
 > **关联文档**：[PRD.md](./PRD.md)
 
+本文描述**代码里实际存在的东西**：模块划分、数据结构、协议字段、状态机与常量取值，全部可在源码中对照。
+v0.1 设计稿与最终实现的差异汇总在[第 9 节](#9-与-v01-设计稿的差异对照)。
+
 ---
 
-## 1. PC 端详细设计（Tauri + Rust）
-
-### 1.1 模块职责划分
+## 1. 总体架构
 
 ```
-┌──────────────────────────────────────────────┐
-│                 Tauri App                      │
-│                                               │
-│  ┌──────────┐  ┌──────────┐  ┌────────────┐  │
-│  │ config   │  │ qr       │  │ tray       │  │
-│  │ 配置管理  │  │ QR 码生成│  │ 托盘+菜单  │  │
-│  └──────────┘  └──────────┘  └────────────┘  │
-│                                               │
-│  ┌──────────┐  ┌──────────┐  ┌────────────┐  │
-│  │ protocol │  │ server   │  │ clipboard  │  │
-│  │ 协议编解码│  │ TCP 服务 │  │ 剪贴板写入  │  │
-│  └──────────┘  └──────────┘  └────────────┘  │
-│                                               │
-│  ┌──────────────────────────────────────────┐ │
-│  │           Tauri 插件层                    │ │
-│  │  clipboard-manager / autostart           │ │
-│  │  notification / single-instance          │ │
-│  └──────────────────────────────────────────┘ │
-└──────────────────────────────────────────────┘
+┌──────────────────────────────┐                    ┌──────────────────────────────┐
+│      手机端 BeeType App      │                    │     PC 端 BeeType Desktop    │
+│         (Flutter)            │                    │        (Tauri + Rust)        │
+│                              │                    │                              │
+│  pages/  home_page           │   TCP  JSON 行协议  │  server.rs  TCP 服务 + 席位   │
+│          scan_page           │ ←────────────────→ │  protocol.rs 消息编解码       │
+│  services/ tcp_service       │   hello / text      │  paste.rs   按键模拟(enigo)   │
+│            text_sender       │   ack / ping/pong   │  discovery.rs UDP 发现        │
+│            storage_service   │   takeover / bye    │  config.rs  身份与配置        │
+│            discovery_service │   session_ended     │  lib.rs     托盘/窗口/commands│
+│                              │                    │  src/index.html 主窗口前端     │
+│  平台通道 beetype/device     │   UDP 发现请求/应答  │                              │
+│  (ANDROID_ID / Keychain)     │ ←────────────────→ │  同上端口（默认 8765）         │
+└──────────────────────────────┘                    └──────────────────────────────┘
 ```
 
-### 1.2 模块详细设计
+两端各自持有一份长期身份与凭证：
 
-#### 1.2.1 config.rs — 配置管理
+| | 手机端 | PC 端 |
+|---|---|---|
+| 本机身份 | `client_id`（首启生成的 UUIDv4）+ `hardware_id`（Android ANDROID_ID / iOS Keychain UUID） | `device_id`（首启生成的 UUIDv4）+ `device_name`（hostname） |
+| 对端凭证 | 已绑定电脑列表（含明文 token） | 唯一主力手机记录（含 `token_hash`） |
+| 临时关系 | 不落盘，仅内存 | 不落盘，仅内存 |
+
+**端口**：TCP 与 UDP 使用同一个端口号（`config.port`，默认 8765）。TCP 承载全部业务消息，UDP 只承载凭证门控的设备发现。
+
+---
+
+## 2. PC 端（Tauri 2 + Rust）
+
+### 2.1 工程结构（实际文件）
+
+```
+desktop/
+├── src/
+│   └── index.html          # 单文件前端：主页（配对/状态）+ 设置页
+└── src-tauri/
+    ├── Cargo.toml
+    ├── tauri.conf.json     # 窗口 380x520、托盘图标、无 CSP
+    ├── capabilities/default.json
+    ├── icons/
+    └── src/
+        ├── main.rs         # 入口（Windows release 下隐藏控制台）
+        ├── lib.rs          # Tauri 装配：托盘、commands、窗口联动
+        ├── config.rs       # 身份、凭证、配置读写
+        ├── protocol.rs     # 消息类型与编解码
+        ├── server.rs       # TCP 服务、认证、席位状态机
+        ├── paste.rs        # 按键模拟（自动粘贴/自动发送）
+        └── discovery.rs    # UDP 凭证门控发现
+```
+
+> v0.1 设计中的 `clipboard.rs`、`tray.rs`、`qr.rs` 三个模块不存在：剪贴板写入在 `server.rs`、托盘与 QR 生成在 `lib.rs`（QR 直接用 `qrcode` crate 渲染成 SVG 内联进 WebView）。
+
+### 2.2 config.rs — 身份、凭证与配置
+
+配置目录（`BEETYPE_HOME` 环境变量可覆盖，单测用）：
+
+| 平台 | 路径 |
+|---|---|
+| Linux | `~/.config/beetype/config.json` |
+| macOS | `~/Library/Application Support/beetype/config.json` |
+| Windows | `%HOME%/AppData/Roaming/beetype/config.json` |
 
 ```rust
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-
-#[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
-    pub port: u16,                    // 监听端口，默认 8765
-    pub paired_device: Option<PairedDevice>,
-    pub autostart: bool,              // 是否开机自启
-    pub code_hash: Option<String>,    // 当前配对码的 SHA-256 hash
-    pub code_expires_at: Option<u64>, // 配对码过期时间戳（毫秒）
+    pub port: u16,                    // 默认 8765（TCP 与 UDP 同号）
+    pub autostart: bool,              // 默认 false
+    #[serde(default = "default_true")]
+    pub auto_paste: bool,             // 默认 true（实际生效还需平台支持）
+    #[serde(default)]
+    pub auto_send: bool,              // 默认 false，依赖 auto_paste
+    pub code_hash: Option<String>,    // SHA-256(配对码)
+    pub code_expires_at: Option<u64>, // 毫秒时间戳
+    pub device_id: String,            // 本机 UUIDv4
+    pub device_name: String,          // 默认 hostname
+    pub primary: Option<PrimaryDevice>, // 唯一主力手机（None = 主力位空缺）
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-pub struct PairedDevice {
+pub struct PrimaryDevice {
+    pub client_id: String,
     pub name: String,
-    pub code_hash: String,
+    pub token_hash: String,           // SHA-256(token)，明文只在绑定时下发一次
     pub last_ip: String,
     pub paired_at: u64,
-}
-
-impl Config {
-    /// 加载或创建配置文件
-    /// 路径：~/.config/beetype/config.json（Linux）
-    ///       ~/Library/Application Support/beetype/config.json（macOS）
-    ///       %APPDATA%/beetype/config.json（Windows）
-    pub fn load_or_create() -> Result<Self, ConfigError>;
-
-    /// 原子写入配置文件（先写临时文件再 rename）
-    /// 文件权限 0600，目录权限 0700
-    pub fn save(&self) -> Result<(), ConfigError>;
-
-    /// 生成新配对码（6 位随机数字）
-    /// 同时更新 code_hash 和 code_expires_at（5 分钟后过期）
-    pub fn regenerate_code(&mut self) -> String;
-
-    /// 校验配对码
-    pub fn verify_code(&self, code: &str) -> bool;
-
-    /// 标记配对成功
-    pub fn mark_paired(&mut self, device_name: String, ip: String, code: &str);
-
-    /// 清除配对
-    pub fn clear_pairing(&mut self);
+    pub last_seen: u64,
+    pub hardware_id: Option<String>,  // 手机硬件指纹（可选，APP 重装后识别用）
 }
 ```
 
-**配置文件示例**：
-```json
-{
-  "port": 8765,
-  "paired_device": {
-    "name": "陈先生的手机",
-    "code_hash": "a1b2c3...",
-    "last_ip": "192.168.31.50",
-    "paired_at": 1730000000000
-  },
-  "autostart": false,
-  "code_hash": "d4e5f6...",
-  "code_expires_at": 1730000300000
-}
-```
+关键方法：
 
-#### 1.2.2 protocol.rs — 通信协议
+| 方法 | 作用 |
+|---|---|
+| `load_or_create()` | 读配置；首次运行（或旧版升级）补建 `device_id`/`device_name` 并落盘 |
+| `save()` | 先写 `config.json.tmp` 再 `rename`；文件 0600、目录 0700 |
+| `regenerate_code()` | 生成新配对码（32 字节 `/dev/urandom` → 64 位 hex），写入 `code_hash` 与 5 分钟后的 `code_expires_at`，返回明文供二维码使用 |
+| `verify_code(code)` | 先查过期时间，再比对 `SHA-256(code)` |
+| `bind_primary(client_id, name, ip, hardware_id)` | 生成 32 字节 token，存 `token_hash`，返回明文 token（仅此一次下发） |
+| `verify_token(client_id, token, name, ip)` | `client_id` 与 `token_hash` 双匹配；命中时刷新 `name`/`last_ip`/`last_seen` 并落盘 |
+| `matches_discovery(client_id, proof)` | 纯比对不写盘（UDP 发现高频路径专用，避免反复落盘） |
+| `unbind_primary()` | 清空主力记录，旧凭证立即失效 |
+
+随机与哈希都是手写实现（`/dev/urandom` + `sha2`），没有引入 uuid/rand 依赖；旧版配置里的未知字段（如 `paired_device`）由 serde 默认忽略，向后兼容。
+
+### 2.3 protocol.rs — 消息编解码
+
+- 传输：每条消息一行 JSON + `\n`，UTF-8，单行上限 `MAX_LINE_BYTES = 256 * 1024`。
+- 使用 serde 内部标记 `#[serde(tag = "type")]`；新字段全部 `#[serde(default)]`，旧客户端缺字段也能解析（有单测覆盖）。
+
+消息类型（完整字段见[第 3 节](#3-通信协议)）：
+
+| 变体 | 方向 |
+|---|---|
+| `hello` / `hello_ack` | 手机 → PC / PC → 手机 |
+| `text` / `ack` | 手机 → PC / PC → 手机 |
+| `ping` / `pong` | 手机 → PC / PC → 手机 |
+| `takeover` / `takeover_ack` | 手机 → PC / PC → 手机 |
+| `bye` / `bye_ack` | 手机 → PC / PC → 手机 |
+| `session_ended` | PC → 手机（被踢前通知） |
+| `session_downgraded` | PC → 手机（解绑降级，会话保持） |
+
+### 2.4 server.rs — TCP 服务、认证与席位
+
+#### 常量
+
+| 常量 | 值 | 含义 |
+|---|---|---|
+| `MAX_AUTH_FAILS` | 5 | 同 IP 累计鉴权失败次数 |
+| `COOLDOWN_SECS` | 60 | 触发失败上限后的冷却时长 |
+| `READ_TIMEOUT_SECS` | 5 | 所有连接的 socket 读超时（也是心跳的检测粒度） |
+| `HEARTBEAT_TIMEOUT_SECS` | 15 | 已认证连接连续无消息多久后收尸（3 个心跳周期） |
+| TCP keepalive | idle 10s / interval 5s / count 3 | 仅 Unix，兜底死连接（Windows 无此项，靠心跳） |
+
+#### 席位（ActiveSession）
 
 ```rust
-use serde::{Deserialize, Serialize};
-
-pub const MAX_LINE_BYTES: usize = 256 * 1024; // 256KB
-
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(tag = "type")]
-pub enum Message {
-    hello { code: String, device: String },
-    hello_ack { ok: bool, device: String },
-    text { id: String, text: String, ts: u64 },
-    ack { id: String, ok: bool, clipboard_non_text: bool, error: Option<String> },
-    ping,
-    pong,
-}
-
-/// 将消息编码为一行 JSON + \n
-pub fn encode_line(msg: &Message) -> Result<String, ProtocolError>;
-
-/// 从一行字符串解码消息
-pub fn decode_line(line: &str) -> Result<Message, ProtocolError>;
-
-/// 当前毫秒时间戳
-pub fn now_ms() -> u64;
-```
-
-**设计要点**：
-- 使用 `serde` 的 `tag = "type"` 内部标记，JSON 中 `type` 字段决定变体
-- `encode_line` 保证输出不含 `\n`（serde_json 默认转义）
-- `decode_line` 遇到非法 JSON 或未知 type 返回 `ProtocolError`，不 panic
-
-#### 1.2.3 server.rs — TCP 服务
-
-```rust
-use std::net::TcpListener;
-use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
-
-const HELLO_TIMEOUT_S: u64 = 10;   // 连接后 10 秒内必须 hello
-const IO_TIMEOUT_S: u64 = 90;      // 单次读写超时
-const MAX_FAIL_PER_IP: u32 = 5;    // 同 IP 最大失败次数
-const COOLDOWN_S: u64 = 60;         // 冷却时间
-const KEEPALIVE_IDLE: u64 = 10;     // TCP keepalive 空闲秒
-const KEEPALIVE_INTERVAL: u64 = 5;  // 探测间隔
-const KEEPALIVE_COUNT: u32 = 3;     // 探测次数
-
-struct FailTracker {
-    fails: HashMap<String, (u32, Instant)>, // IP → (次数, 首次失败时间)
-}
-
-pub struct BridgeServer {
-    config: Arc<Mutex<Config>>,
-    fail_tracker: Mutex<FailTracker>,
-    connected_device: Mutex<Option<String>>, // 当前已连接的设备名
-}
-
-impl BridgeServer {
-    /// 在局域网 IP 上监听
-    /// 获取本机局域网 IP（遍历网卡，找非 loopback 的 IPv4）
-    pub fn lan_ip() -> Option<String>;
-
-    /// 启动服务
-    pub fn serve(&self, port: u16) -> Result<(), ServerError>;
-
-    /// 处理单个连接
-    fn handle_connection(&self, stream: TcpStream);
-
-    /// 校验配对码 + 防暴力
-    fn check_hello(&self, code: &str, ip: &str) -> HelloResult;
-
-    /// 处理 text 消息
-    fn handle_text(&self, id: &str, text: &str) -> AckMessage;
-
-    /// 处理 ping
-    fn handle_ping(&self) -> Message;
-}
-
-enum HelloResult {
-    Ok,
-    WrongCode,
-    Cooldown(u64),   // 还需冷却多少秒
-    Expired,         // 配对码已过期
-    AlreadyPaired,   // 已有设备连接
+pub struct ActiveSession {
+    pub client_id: String,
+    pub name: String,
+    pub is_primary: bool,
+    pub kick: Arc<AtomicU8>,          // 0=正常，非 0=被要求结束（原因见 KICK_*）
+    pub downgrade: Arc<AtomicBool>,   // 解绑降级标志
+    pub wake: Mutex<Option<TcpStream>>, // socket 克隆，踢人时 shutdown(Read) 唤醒阻塞中的 read_line
 }
 ```
 
-**连接处理流程**：
-```
-accept 连接
-  → 设置 TCP keepalive
-  → 设置读写超时 10s（等待 hello）
-  → 读第一行 → decode
-  → if Message::hello:
-      → check_hello(code, ip)
-      → Ok: 存 connected_device, 回 hello_ack, 读写超时改为 90s
-      → WrongCode: 记录失败, 回 hello_ack{ok:false}, 断连
-      → Cooldown: 回 hello_ack{ok:false, error:"cooldown"}, 断连
-      → Expired: 回 hello_ack{ok:false, error:"expired"}, 断连
-  → else: 断连（第一消息必须是 hello）
+一台 PC 同时只有一个席位（单光标，单会话）。持有者身份用 **`client_id` + `Arc::ptr_eq(kick)` 双比对**判定，因此新连接顶替席位后，旧连接的退出清理不会误清新席位。
 
-  循环读消息:
-    → text: handle_text → 回 ack
-    → ping: 回 pong
-    → 其他/畸形: 忽略，继续读（不杀连接）
-    → EOF/超时: 断连，清 connected_device
-```
+`KICK_TAKEOVER = 1`（主力接管）、`KICK_DISCONNECT = 2`（托盘/窗口断开）、`KICK_REPLACED = 4`（同主力僵尸连接被替换），映射为 `session_ended.reason` 的 `owner_takeover` / `owner_disconnect` / `replaced`。
 
-**日志规范**（脱敏）：
-```rust
-log::info!("recv id={} type={} len={}", id, msg_type, text.len());
-// 永远不 log text 内容
+踢人不靠等对端心跳：`kick_session()` 置标志后立即 `shutdown(Shutdown::Read)`，让阻塞在 `read_line` 的连接线程马上醒来自行发 `session_ended` 并退出，延迟从最长 5s 降到毫秒级。
+
+#### 连接生命周期
+
+```
+accept
+  → 设置 TCP keepalive（Unix）
+  → read_timeout = 5s
+  → 循环：read_line
+       ├─ 收到行 → handle_message → 需要回复则写回（写失败即退出）
+       │            ├─ 首条必须是 hello（有效凭证），否则后续 text 一律拒绝
+       │            └─ ctx.closing（收到 bye）→ 退出
+       ├─ Ok(0) EOF → 若 kick 已置位则补发 session_ended；否则视为对端关闭
+       ├─ 行 > 256KB → 直接断开（不做截断）
+       ├─ 超时 → 已认证：15s 无消息则收尸；未认证：继续空转等待（由 keepalive/对端负责）
+       └─ 其他错误 → 断开
+  → 退出清理：仅当自己仍是席位持有者（client_id + kick 指针比对）才释放席位并刷新托盘状态
 ```
 
-#### 1.2.4 clipboard.rs — 剪贴板
+未认证连接不会因空闲被主动关闭（没有 hello 超时），实际约束来自 TCP keepalive 与对端行为。
 
-```rust
-use tauri_plugin_clipboard_manager::ClipboardExt;
+#### 认证：两条分支
 
-pub struct ClipboardWriter {
-    app: tauri::AppHandle,
-}
+`handle_hello` 先查冷却（冷却中直接回 `cooldown`），再按凭证分流：
 
-impl ClipboardWriter {
-    /// 写入文本到系统剪贴板
-    /// 返回 AckResult
-    pub fn write_text(&self, text: &str) -> AckResult {
-        // 1. 尝试检测当前剪贴板是否有非文本内容
-        //    Tauri clipboard-manager 不直接支持 target 检测
-        //    Linux: 调用 xclip -selection clipboard -o -t TARGETS
-        //    macOS: 不需要（pbcopy 直接覆盖）
-        //    Windows: 不需要（WriteClipboard 直接覆盖）
-        //
-        // 2. 如果检测到非文本 target 且不是纯文本：
-        //    → 不覆盖，返回 AckResult { ok:true, clipboard_non_text:true }
-        //
-        // 3. 写入文本：
-        //    → app.clipboard().write_text(text)
-        //    → 返回 AckResult { ok:true, clipboard_non_text:false }
-        //
-        // 4. 写入异常：
-        //    → 返回 AckResult { ok:false, error:"clipboard_write_failed" }
-    }
-}
+**token 分支（主力免配重连）**
 
-pub struct AckResult {
-    pub ok: bool,
-    pub clipboard_non_text: bool,
-    pub error: Option<String>,
-}
-```
+1. `verify_token(client_id, token, ...)` 失败 → 记一次失败，回 `unauthorized`。
+2. 成功则清空该 IP 的失败计数，按下述仲裁结果处理：席位空闲 → 直接接入（`session = primary`）；席位被**同一 `client_id`** 占着（僵尸重连）→ 踢旧接新；席位被他人（临时方）占用 → 回 `status = "occupied"`，**连接保持**并标记 `waiting_takeover`，等手机发 `takeover`。
 
-**平台差异处理**：
-```
-Linux:
-  - 检测非文本: xclip -selection clipboard -o -t TARGETS
-  - 写入: Tauri clipboard-manager（内部调用 xclip/xsel）
-  - 无 xclip 时: 降级为仅 xsel，或提示用户安装 xclip
+**code 分支（扫码接入）**
 
-macOS:
-  - 检测非文本: 不需要（pbcopy 直接覆盖任何格式）
-  - 写入: Tauri clipboard-manager（内部调用 pbcopy）
+1. `verify_code(code)` 失败 → 记失败，回 `bad_code`。
+2. 席位已被占用 → 回 `occupied`，不认证、不绑定、**不换码**。
+3. 席位空闲时判定身份：
+   - `returning`：来者的 `client_id` 命中主力记录，**或** `hardware_id` 命中主力记录（APP 重装后 `client_id` 会变，硬件指纹不会）→ 直接恢复主力席位，**不下发 token**（手机本来就有）。
+   - `bind`：勾选了「记住这台手机」且主力位空缺且有 `client_id` → 绑定为新主力并一次性下发 token。
+   - 其余 → 临时会话（`session = "transient"`），不落盘任何东西。
+4. 无论哪种结果，配对码都立即 `regenerate_code()`（**一次性**，杜绝重放），并写回内存中的二维码内容。
 
-Windows:
-  - 检测非文本: 不需要（直接覆盖）
-  - 写入: Tauri clipboard-manager（内部调用 Win32 API）
-```
+两分支成功后都会：写席位、刷新托盘、通知前端（`pairing-show`）、日志记录。
 
-#### 1.2.5 tray.rs — 系统托盘
+#### `takeover`（主力接管被占用的电脑）
 
-```rust
-use tauri::{
-    tray::{TrayIconBuilder, MouseButton, TrayIconEvent},
-    menu::{Menu, MenuItem, PredefinedMenuItem, CheckMenuItem},
-    Manager,
-};
+仅当连接状态为「已认证 + 是主力 + 正在等待接管」时才受理：踢掉当前持有者（`owner_takeover`）、把席位交给发起方、回 `takeover_ack{ok:true}`；否则回 `ok:false`。**临时方发起的 takeover 必然被拒**——协议层不存在手机端篡位的路径。
 
-pub enum TrayState {
-    WaitingForPair,     // 灰色
-    PairedWaiting,      // 黄色
-    Connected,          // 绿色
-    TextReceived,       // 蓝色闪
-    ClipboardBlocked,   // 橙色闪
-}
+#### 收到 `text` 的处理链
 
-pub fn build_tray(app: &tauri::AppHandle) -> Result<(), tauri::Error> {
-    let menu = Menu::with_items(app, &[
-        &MenuItem::new(app, "显示配对码", true)?,
-        &PredefinedMenuItem::separator(app)?,
-        &MenuItem::new(app, "状态：等待配对", false)?,  // disabled
-        &MenuItem::new(app, "设备：—", false)?,          // disabled
-        &PredefinedMenuItem::separator(app)?,
-        &CheckMenuItem::new(app, "开机自启", true, false)?,
-        &PredefinedMenuItem::separator(app)?,
-        &MenuItem::new(app, "关于", true)?,
-        &MenuItem::new(app, "退出", true)?,
-    ])?;
+1. 非席位持有者 / 未认证 / 等待接管中的连接 → 回 `ack{ok:false, code:"not_connected"}`。
+2. 文本 `trim()` 为空 → 回 `ack{ok:false, code:"empty_text"}`，不做任何剪贴板操作。
+3. 写入剪贴板（`tauri-plugin-clipboard-manager` → arboard）。失败 → 弹系统通知，回 `ack{ok:false, code:"clipboard_error"}`。
+4. 自动粘贴条件全部满足时才模拟粘贴：设置页开关生效 + 当前会话支持按键注入 + **BeeType 自己的窗口没有焦点**（避免把文字糊进配对窗口）。成功则 `pasted = true`。
+5. 自动发送：粘贴成功后若 `auto_send` 生效则再模拟一次 Enter。
+6. 回 `ack{ok:true, pasted, srv_recv_ms}`（`srv_recv_ms` 是服务端收到消息的时间戳，供手机端算延迟）。
 
-    TrayIconBuilder::new()
-        .icon(app.default_window_icon().unwrap().clone())
-        .menu(&menu)
-        .tooltip("BeeType - 等待配对")
-        .on_menu_event(|app, event| {
-            match event.id().as_ref() {
-                "显示配对码" => { show_qr_window(app); }
-                "开机自启" => { toggle_autostart(app); }
-                "退出" => { app.exit(0); }
-                _ => {}
-            }
-        })
-        .build(app)?;
-    Ok(())
-}
+### 2.5 paste.rs — 按键模拟
 
-pub fn update_tray_state(app: &tauri::AppHandle, state: TrayState) {
-    // 更新图标 + tooltip
-    // 更新菜单项文本（状态/设备名）
-}
-```
+| 场景 | 快捷键 |
+|---|---|
+| macOS | `Cmd+V`（终端同样是 Cmd+V） |
+| Linux 终端窗口 | `Ctrl+Shift+V` |
+| Linux 其他 / Windows | `Ctrl+V` |
+| 自动发送 | Enter（`Key::Unicode('\r')`） |
 
-#### 1.2.6 qr.rs — QR 码生成
+- 终端识别（仅 Linux）：用 `x11rb` 读 X 的 `GetInputFocus`，再沿窗口树向上最多 20 层找 `WM_CLASS`（`res_name`/`res_class`）。命中判定 = 类名包含 `terminal`，或落在内置清单里（`xterm`、`kitty`、`alacritty`、`ghostty`、`wezterm`、`konsole`、`foot`、`cool-retro-term` 等异类终端）。任何检测失败都**安全回退 Ctrl+V**。
+- 写剪贴板后等 50ms 再发快捷键（等 X11 剪贴板归属权切换被目标应用感知）；发 Enter 前再等 50ms（让粘贴内容先渲染）。
+- Wayland 判定：`XDG_SESSION_TYPE=wayland`，或（设置了 `WAYLAND_DISPLAY` 且没有 `DISPLAY`）→ 自动粘贴/自动发送判定为不支持，回退纯剪贴板。有 `DISPLAY` 时走 XWayland，XTest 仍可用。
 
-```rust
-use qrcode::QrCode;
-use image::Luma;
+### 2.6 discovery.rs — 凭证门控的 UDP 发现
 
-/// 生成 QR 码图片（PNG bytes）
-pub fn generate_qr(data: &str) -> Vec<u8> {
-    let code = QrCode::new(data).unwrap();
-    let image = code.render::<Luma<u8>>().build();
-    // 转 PNG bytes
-    let mut png_bytes = Vec::new();
-    image::codecs::png::PngEncoder::new(&mut png_bytes)
-        .encode(&image, image.width(), image.height(), image::ExtendedColorType::L8)
-        .unwrap();
-    png_bytes
-}
-
-/// 生成配对 JSON 字符串
-pub fn build_pair_payload(ip: &str, port: u16, code: &str) -> String {
-    serde_json::json!({
-        "ip": ip,
-        "port": port,
-        "code": code
-    }).to_string()
-}
-```
-
-### 1.3 Tauri 配置
-
-#### tauri.conf.json
+请求（手机广播，3 轮）：
 
 ```json
-{
-  "$schema": "https://schema.tauri.app/config/2",
-  "productName": "BeeType",
-  "version": "0.1.0",
-  "identifier": "com.beetype.app",
-  "build": {
-    "frontendDist": "src"
-  },
-  "app": {
-    "withGlobalTauri": true,
-    "windows": [],
-    "trayIcon": {
-      "iconPath": "icons/icon.png",
-      "iconAsTemplate": true
-    },
-    "security": {
-      "csp": null
-    }
-  },
-  "plugins": {
-    "clipboard-manager": {},
-    "autostart": { "macosExtraArgs": ["-hide"] }
-  }
-}
+{"type":"vl_disc_req","protocol":1,"client_id":"<手机 uuid>","proof":"<SHA-256(token) hex>"}
 ```
 
-**关键配置说明**：
-- `windows: []`：启动时不显示主窗口，仅托盘
-- `frontendDist: "src"`：前端文件在 src 目录（QR 码窗口的 HTML）
-- `trayIcon`：声明托盘图标
+PC 端处理规则：
 
-#### Cargo.toml
+1. 不是 `vl_disc_req`、协议版本不是 1、`client_id`/`proof` 为空 → 静默丢弃。
+2. `primary` 为空（还没绑主力）→ 静默丢弃。
+3. `(client_id, proof)` 与主力记录不匹配 → 静默丢弃（**电脑对陌生设备隐身，不产生任何应答**）。
+4. 完全匹配 → 仅对请求来源**单播**：
 
-```toml
-[package]
-name = "beetype"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
-tauri-plugin-clipboard-manager = "2"
-tauri-plugin-autostart = "2"
-tauri-plugin-notification = "2"
-tauri-plugin-single-instance = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-qrcode = "0.14"
-image = "0.25"
-sha2 = "0.10"
-log = "0.4"
-env_logger = "0.11"
-
-[build-dependencies]
-tauri-build = "2"
+```json
+{"type":"vl_disc_resp","protocol":1,"device_id":"<pc uuid>","device_name":"hejiong-PC",
+ "device_type":"pc","port":8765,"busy":false,"capabilities":{"auto_paste":true}}
 ```
 
-### 1.4 前端设计（QR 码窗口）
+`busy` 只给布尔值，不泄露占用者身份。用 `SHA-256(token)` 而非 token 本身作 proof：抓到广播不足以通过 TCP 认证。发现线程与 TCP 服务同端口，绑定失败只记日志，不影响 TCP 主服务。
 
-QR 码窗口是一个极简 HTML 页面，由 Tauri WebView 渲染：
+### 2.7 lib.rs — 装配、托盘与 commands
 
-```html
-<!-- src/qr.html -->
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <style>
-    body { margin: 0; display: flex; justify-content: center; align-items: center;
-           min-height: 100vh; background: #1a1a2e; color: #eee;
-           font-family: system-ui, sans-serif; }
-    .container { text-align: center; }
-    #qr { width: 240px; height: 240px; image-rendering: pixelated; }
-    .info { margin-top: 16px; font-size: 14px; color: #888; }
-    .code { font-size: 28px; font-weight: bold; letter-spacing: 8px; color: #0f0; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <img id="qr" alt="QR Code" />
-    <div class="code" id="code"></div>
-    <div class="info">用手机 BeeType 扫描此二维码</div>
-  </div>
-  <script>
-    // 通过 Tauri invoke 获取 QR 码数据和图片
-    window.__TAURI__.invoke('get_qr_data').then(({png_base64, code, ip, port}) => {
-      document.getElementById('qr').src = 'data:image/png;base64,' + png_base64;
-      document.getElementById('code').textContent = code;
-    });
-  </script>
-</body>
-</html>
+启动流程：初始化日志 → 加载配置 → `regenerate_code()`（**每次启动都换新码**）→ 按配置同步系统自启状态 → 建 `ServerState` → 建托盘 → spawn TCP 服务线程与 UDP 发现线程。
+
+托盘菜单（GTK 下状态行必须保持 enabled，否则整项连 emoji 一起被渲染成灰色，点击由兜底分支吞掉）：
+
 ```
+⚪ 等待配对 | 🟢 <手机名> | 🟢 <手机名> · 临时
+打开主窗口
+断开当前手机            ← 无会话时禁用
+──────
+退出
+```
+
+托盘图标左键单击也会唤起主窗口；窗口关闭按钮只是隐藏（`prevent_close` + `hide`），真正退出走托盘「退出」。
+
+主窗口（380×520，可缩放，最小 340×120，启动即可见）：
+
+- 前端每 1s 轮询 `get_pairing_info`；轮询顺带调用 `ensure_code_fresh()`——只要没连接、且配对码已过期或剩余不足 2 分钟就自动换新，保证窗口上展示的二维码永远可用（PC 长期运行时不会变成死码）。
+- 配对成功后先通知前端渲染绿色「已连接」页，0.9s 后自动隐藏到托盘；除非窗口是用户从托盘手动打开的（`manual_window` 标记，点叉关闭时清除）。
+- QR 内容格式 `beetype://<ip>:<port>?code=<code>`，由 `qrcode` 渲染成 SVG 内联返回，无需前端构建链。
+- TCP 绑定 `0.0.0.0:<port>`；`lan_ip()` 仅是取默认路由网卡的 IPv4（`UdpSocket::connect` 只做路由选择，**不发包**）用于生成二维码里的地址。
+
+Tauri commands（10 个）：
+
+| command | 作用 |
+|---|---|
+| `get_status` | 粗粒度状态文本（等待配对/已连接） |
+| `get_pairing_info` | 二维码内容 + SVG + 主力位 + 连接摘要（顺带续期配对码） |
+| `get_settings` | 自动粘贴/自动发送的实际生效值、平台支持情况、开机自启、主力机名、版本号 |
+| `set_auto_paste` | 存用户意愿；运行态存「意愿 && 平台支持」；关闭时联动关闭 auto_send |
+| `set_auto_send` | 存用户意愿；运行态存「意愿 && auto_paste 生效 && 平台支持」 |
+| `set_autostart` | 操作系统自启项 + 持久化 |
+| `set_remember_next` | 「记住这台手机」勾选（仅对下一次码配对生效） |
+| `disconnect_session` | 托盘/窗口断开当前手机 |
+| `unbind_primary` | 解绑主力（在线会话降级为临时，不断开） |
+| `set_window_height` | 前端启动时量一次真实高度后固定窗口高度 |
+
+### 2.8 前端（desktop/src/index.html）
+
+- 主页与设置页**绝对定位叠放**，切换只改 `opacity`/`visibility`（交叉淡化），元素几何全程不变——规避 WebKitGTK 层重建导致的标题闪烁。
+- 窗口高度在启动时用离屏克隆渲染「等待态」量出真实高度（两种勾选文案取高者）后固定，之后不再随状态跳变：主页内容裁切、设置页内部滚动。
+- 渲染做了结构键缓存（`lastStatusKey`/`lastPairKey`），避免 1s 轮询全量重绘导致 hover/勾选态丢失；只有「无连接 → 有连接」这类跨状态切换才播入场动画。
+- 设置页每次进入都拉一次 `get_settings`；「记住这台手机」勾选框仅在主力位空缺时出现，默认不勾（扫码默认即临时连接）。
 
 ---
 
-## 2. 手机端详细设计（Flutter）
+## 3. 通信协议
 
-### 2.1 依赖清单
+### 3.1 传输与编码
 
-```yaml
-# pubspec.yaml
-dependencies:
-  flutter:
-    sdk: flutter
-  mobile_scanner: ^6.0.0        # QR 码扫描
-  shared_preferences: ^2.3.0    # 配对凭证持久化
-  connectivity_plus: ^6.0.0     # 网络状态监听
-  uuid: ^4.0.0                  # 消息 ID 生成
+TCP 长连接，UTF-8，每条消息一行 JSON 以 `\n` 结尾，单行上限 256KB。PC 端对超长行**直接断开连接**（不截断）。
 
-dev_dependencies:
-  flutter_test:
-    sdk: flutter
-```
-
-> `dart:io` 的 `Socket` 是标准库，不需要额外依赖。
-
-### 2.2 核心类设计
-
-#### 2.2.1 TcpService — TCP 连接管理
-
-```dart
-import 'dart:io';
-import 'dart:async';
-import 'dart:convert';
-
-enum ConnectionState {
-  disconnected,
-  connecting,
-  connected,
-  reconnecting,
-  failed,
-}
-
-class TcpService {
-  Socket? _socket;
-  Timer? _heartbeatTimer;
-  Timer? _pongTimer;
-  int _retryCount = 0;
-  String? _ip;
-  int? _port;
-  String? _code;
-
-  final _stateController = StreamController<ConnectionState>.broadcast();
-  final _messageController = StreamController<Map<String, dynamic>>.broadcast();
-
-  Stream<ConnectionState> get stateStream => _stateController.stream;
-  Stream<Map<String, dynamic>> get messageStream => _messageController.stream;
-
-  /// 连接到 PC
-  Future<bool> connect(String ip, int port, String code, {String? deviceName}) async {
-    _ip = ip; _port = port; _code = code;
-    _stateController.add(ConnectionState.connecting);
-    try {
-      _socket = await Socket.connect(ip, port, timeout: Duration(seconds: 3));
-      _sendHello(deviceName);
-      _startListening();
-      _startHeartbeat();
-      _retryCount = 0;
-      return true;
-    } catch (e) {
-      _stateController.add(ConnectionState.failed);
-      return false;
-    }
-  }
-
-  /// 发送文本消息
-  Future<bool> sendText(String text) async {
-    if (_socket == null) return false;
-    final id = Uuid().v4();
-    final msg = jsonEncode({
-      'type': 'text',
-      'id': id,
-      'text': text,
-      'ts': DateTime.now().millisecondsSinceEpoch,
-    });
-    _socket!.writeln(msg);
-    // 等待 ack（5 秒超时）
-    // 通过 messageStream 监听 ack
-  }
-
-  void _startHeartbeat() {
-    _heartbeatTimer = Timer.periodic(Duration(seconds: 15), (_) {
-      _socket?.writeln('{"type":"ping"}');
-      _pongTimer = Timer(Duration(seconds: 10), () {
-        // pong 超时，判定断线
-        _onDisconnected();
-      });
-    });
-  }
-
-  void _onPong() {
-    _pongTimer?.cancel();
-  }
-
-  void _onDisconnected() {
-    _heartbeatTimer?.cancel();
-    _pongTimer?.cancel();
-    _socket?.destroy();
-    _socket = null;
-    if (_retryCount < 5) {
-      _stateController.add(ConnectionState.reconnecting);
-      _retryCount++;
-      final delay = Duration(seconds: 2 << (_retryCount - 1)); // 2,4,8,16,32
-      Future.delayed(delay, () {
-        if (_ip != null) connect(_ip!, _port!, _code!);
-      });
-    } else {
-      _stateController.add(ConnectionState.failed);
-    }
-  }
-
-  void disconnect() {
-    _heartbeatTimer?.cancel();
-    _pongTimer?.cancel();
-    _socket?.destroy();
-    _socket = null;
-    _stateController.add(ConnectionState.disconnected);
-  }
-}
-```
-
-#### 2.2.2 StorageService — 持久化
-
-```dart
-import 'package:shared_preferences/shared_preferences.dart';
-
-class PairedPC {
-  final String name;
-  final String ip;
-  final int port;
-  final String code;
-
-  PairedPC({required this.name, required this.ip, required this.port, required this.code});
-
-  Map<String, dynamic> toJson() => {'name': name, 'ip': ip, 'port': port, 'code': code};
-  factory PairedPC.fromJson(Map<String, dynamic> json) => PairedPC(
-    name: json['name'], ip: json['ip'], port: json['port'], code: json['code']);
-}
-
-class StorageService {
-  static const _key = 'paired_pc';
-
-  static Future<PairedPC?> load() async {
-    final prefs = await SharedPreferences.getInstance();
-    final str = prefs.getString(_key);
-    if (str == null) return null;
-    return PairedPC.fromJson(jsonDecode(str));
-  }
-
-  static Future<void> save(PairedPC pc) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_key, jsonEncode(pc.toJson()));
-  }
-
-  static Future<void> clear() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_key);
-  }
-}
-```
-
-#### 2.2.3 TextSender — 防抖发送
-
-```dart
-class TextSender {
-  final TcpService _tcp;
-  Timer? _debounceTimer;
-  String _lastText = '';
-
-  TextSender(this._tcp);
-
-  /// onChanged 回调
-  void onTextChanged(String text) {
-    _lastText = text;
-    _debounceTimer?.cancel();
-    _debounceTimer = Timer(Duration(milliseconds: 300), () {
-      _send(text);
-    });
-  }
-
-  void _send(String text) async {
-    final success = await _tcp.sendText(text);
-    if (success) {
-      // 收到 ack，调用回调清空 TextField
-      onSendSuccess?.call();
-    } else {
-      onSendFail?.call(text);
-    }
-  }
-
-  VoidCallback? onSendSuccess;
-  Function(String)? onSendFail;
-}
-```
-
-### 2.3 主界面设计
-
-```dart
-class HomePage extends StatefulWidget { ... }
-
-class _HomePageState extends State<HomePage> {
-  final _tcp = TcpService();
-  final _controller = TextEditingController();
-  final _focusNode = FocusNode();
-  late TextSender _sender;
-  ConnectionState _state = ConnectionState.disconnected;
-  bool _sending = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _sender = TextSender(_tcp);
-    _tcp.stateStream.listen((s) => setState(() => _state = s));
-    _tcp.messageStream.listen((msg) {
-      if (msg['type'] == 'ack') _handleAck(msg);
-      if (msg['type'] == 'pong') _tcp._onPong();
-    });
-    _autoConnect();
-  }
-
-  Future<void> _autoConnect() async {
-    final pc = await StorageService.load();
-    if (pc != null) {
-      _tcp.connect(pc.ip, pc.port, pc.code, deviceName: _deviceName());
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: Column(children: [
-        _buildStatusBar(),
-        _buildTextField(),
-        if (_state != ConnectionState.connected)
-          _buildActionArea(),
-      ]),
-    );
-  }
-
-  Widget _buildTextField() {
-    final connected = _state == ConnectionState.connected;
-    return Padding(
-      padding: EdgeInsets.all(16),
-      child: TextField(
-        controller: _controller,
-        focusNode: _focusNode,
-        enabled: connected && !_sending,
-        maxLines: null,
-        textInputAction: TextInputAction.newline,
-        autofocus: connected,
-        onChanged: _sender.onTextChanged,
-        decoration: InputDecoration(
-          hintText: connected ? '按住输入法麦克风说话...' : '未连接',
-          border: OutlineInputBorder(),
-        ),
-      ),
-    );
-  }
-}
-```
-
----
-
-## 3. 通信协议完整定义
-
-### 3.1 消息格式规范
-
-**传输层**：TCP 长连接
-**编码**：UTF-8
-**分隔符**：`\n`（每条消息占一行）
-**单行上限**：256KB
-
-### 3.2 消息类型
+### 3.2 消息字段
 
 #### hello（手机 → PC）
 
 ```json
-{"type":"hello","code":"482916","device":"陈先生的手机"}
+{"type":"hello","code":"<64 hex>","client_id":"<uuid>","device_name":"Xiaomi 14","hardware_id":"<android_id>"}
+{"type":"hello","token":"<64 hex>","client_id":"<uuid>","device_name":"Xiaomi 14","hardware_id":"<android_id>"}
 ```
 
-| 字段 | 类型 | 必填 | 说明 |
-|---|---|---|---|
-| type | string | ✅ | 固定 "hello" |
-| code | string | ✅ | 6 位数字配对码 |
-| device | string | ✅ | 手机设备名（用于状态展示） |
+`code` 与 `token` 二选一；`client_id`/`device_name`/`hardware_id` 均可缺省（旧客户端兼容）。
 
 #### hello_ack（PC → 手机）
 
-```json
-{"type":"hello_ack","ok":true,"device":"陈先生的 Deepin"}
-```
-
-```json
-{"type":"hello_ack","ok":false,"device":"","error":"wrong_code"}
-```
-
-| 字段 | 类型 | 必填 | 说明 |
-|---|---|---|---|
-| type | string | ✅ | 固定 "hello_ack" |
-| ok | bool | ✅ | 配对是否成功 |
-| device | string | ✅ | PC 设备名 |
-| error | string | ❌ | 失败原因：`wrong_code` / `cooldown` / `expired` / `already_paired` |
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `ok` | bool | 是否成功 |
+| `status` | string | `ok` / `occupied` / `bad_code` / `unauthorized` / `cooldown` |
+| `error` | string? | 人话错误描述（如「尝试过于频繁，请 60 秒后再试」） |
+| `session` | string? | `primary` / `transient`（仅成功时出现） |
+| `device_id` / `device_name` / `device_type` | string? | PC 身份，`device_type` 固定 `pc` |
+| `token` | string? | **仅新绑定主力那一次**出现，明文只下发一次 |
+| `capabilities` | object? | `{"auto_paste": bool}` |
 
 #### text（手机 → PC）
 
 ```json
-{"type":"text","id":"550e8400-e29b-41d4-a716-446655440000","text":"你好world🌍","ts":1730000000000}
+{"type":"text","id":"<消息 id>","text":"你好world🌍","ts":1730000000000}
 ```
-
-| 字段 | 类型 | 必填 | 说明 |
-|---|---|---|---|
-| type | string | ✅ | 固定 "text" |
-| id | string | ✅ | UUID v4 |
-| text | string | ✅ | UTF-8 文本内容 |
-| ts | number | ✅ | 发送时间戳（毫秒） |
 
 #### ack（PC → 手机）
 
 ```json
-{"type":"ack","id":"550e8400-e29b-41d4-a716-446655440000","ok":true,"clipboard_non_text":false}
+{"type":"ack","id":"<对应 text 的 id>","ok":true,"pasted":true,"srv_recv_ms":1730000000123}
 ```
 
-| 字段 | 类型 | 必填 | 说明 |
-|---|---|---|---|
-| type | string | ✅ | 固定 "ack" |
-| id | string | ✅ | 对应 text 消息的 id |
-| ok | bool | ✅ | 写入是否成功 |
-| clipboard_non_text | bool | ❌ | 剪贴板有非文本内容时 true |
-| error | string | ❌ | 失败原因 |
+| `code` 取值 | 含义 |
+|---|---|
+| `not_connected` | 连接未持席（未认证/等待接管/被顶替） |
+| `empty_text` | 文本为空，未动剪贴板 |
+| `clipboard_error` | 剪贴板写入失败（同时弹系统通知） |
 
-#### ping / pong
+#### 其他
 
-```json
-{"type":"ping"}
-{"type":"pong"}
-```
-
-### 3.3 错误码表
-
-| 错误码 | 含义 | 手机端处理 |
+| 消息 | 方向 | 说明 |
 |---|---|---|
-| `wrong_code` | 配对码错误 | 提示重新扫码 |
-| `cooldown` | IP 被冷却 | 提示"请 60 秒后重试" |
-| `expired` | 配对码过期 | 提示"请重新展示配对码" |
-| `already_paired` | 已有设备连接 | 提示"PC 已连接其他设备" |
-| `clipboard_write_failed` | 写入剪贴板失败 | 提示"PC 写入失败，请重试" |
+| `{"type":"ping"}` / `{"type":"pong"}` | 手机 ↔ PC | 心跳，任何连接都可发 |
+| `{"type":"takeover"}` / `{"type":"takeover_ack","ok":bool}` | 手机 → PC → 手机 | 主力接管被占用的席位 |
+| `{"type":"bye"}` / `{"type":"bye_ack"}` | 手机 → PC → 手机 | 优雅断开，PC 随即释放席位 |
+| `{"type":"session_ended","reason":"..."}` | PC → 手机 | 被踢前通知；`owner_takeover` / `owner_disconnect` / `replaced` |
+| `{"type":"session_downgraded"}` | PC → 手机 | 主力被解绑，当前会话降级为临时（连接保持） |
+
+### 3.3 容错与兼容
+
+- 非法 JSON / 未知 type：只记日志、**不断连接**（`warn` 后可继续收消息）。
+- 首条消息不是有效 `hello`：后续 `text` 一律回 `not_connected`。
+- `hello_ack` 的所有新字段都有 serde 默认值，旧 PC 发的 `{"ok":true,"error":null}` 也能解析；旧手机缺 `client_id`/`hardware_id` 同样能解析。
 
 ---
 
-## 4. 安全设计
+## 4. 手机端（Flutter）
 
-### 4.1 配对码生命周期
-
-```
-PC 端启动
-  → 读取 config.json
-  → if code_hash 不存在 or 已过期:
-      → generate_code(): 6 位随机数字
-      → code_hash = sha256(code)
-      → code_expires_at = now + 5min
-      → save config
-
-用户点击"显示配对码"
-  → if code 过期: 重新生成
-  → QR 码内容: {"ip":"...","port":...,"code":"明文code"}
-
-收到 hello
-  → if code_expires_at < now: 回 error="expired"
-  → if hash(收到的code) != code_hash: 记录失败, 回 error="wrong_code"
-  → if fail_count[ip] >= 5: 回 error="cooldown"
-  → else: 配对成功，mark_paired，重新生成 code
-
-配对成功后
-  → 重新 generate_code()（下一次配对需新码）
-  → 但当前连接继续有效（已建立的长连接不需要再校验 code）
-```
-
-### 4.2 网络安全
+### 4.1 工程结构
 
 ```
-监听范围:
-  → 仅绑定局域网网卡 IP（非 0.0.0.0）
-  → lan_ip() 遍历网卡找非 loopback 的 IPv4
-
-PC 端无网络外发:
-  → TCP Server 只 accept，不主动 connect
-  → QR 码生成本地完成，不调用外部 API
-  → 剪贴板写入本地完成
-  → 无遥测、无崩溃上报、无自动更新检查
+app/lib/
+├── main.dart                      # 入口：初始化存储后再 runApp（冷启动 autoConnect 依赖它）
+├── pages/
+│   ├── home_page.dart             # 主界面：状态胶囊 + 输入卡 + 占用页 + 引导页
+│   └── scan_page.dart             # 扫码页（mobile_scanner）
+└── services/
+    ├── tcp_service.dart           # TCP、分帧、请求/应答 Completer、心跳
+    ├── text_sender.dart           # 编排：自动连接、配对、降级、发送
+    ├── storage_service.dart       # client_id、已绑定电脑列表、设备名
+    └── discovery_service.dart     # UDP 广播发现
 ```
 
-### 4.3 日志脱敏规范
+平台通道 `beetype/device`：Android 在 `MainActivity.kt` 实现 `getDeviceName`（按品牌优先级取系统设备名）与 `getHardwareId`（ANDROID_ID）；iOS 在 `AppDelegate.swift` 实现（`UIDevice.current.name` 与 Keychain 持久化 UUID）。
+
+### 4.2 依赖
+
+| package | 用途 |
+|---|---|
+| mobile_scanner | 二维码扫描 |
+| shared_preferences | 身份与已绑定电脑持久化 |
+| network_info_plus | 取 WiFi IP 以推算定向广播地址 |
+| crypto | 计算 `SHA-256(token)` 作为发现 proof |
+| `dart:io` Socket / RawDatagramSocket | TCP 与 UDP（标准库） |
+
+`connectivity_plus` 仍在依赖里，但连接状态判定已不依赖它（靠 socket 事件与心跳）。
+
+### 4.3 tcp_service.dart
+
+- 分帧：把收到的字节拼进 `StringBuffer`，按 `\n` 切行，余下部分留作下一批。
+- 请求/应答配对：`hello`、`takeover`、`bye`、`text` 各自用 Completer 等待对应的 `hello_ack` / `takeover_ack` / `bye_ack` / `ack`（按 `id` 索引）。
+- 超时：`hello` 默认 10s、`takeover` 8s、`text` ack 5s、`bye` 等 `bye_ack` 兜底 1.5s；任何超时都会按失败结果返回并清理资源，不抛给 UI。
+- 心跳：每 5s 发一次 `ping`（PC 端 15s 收尸，切后台被 Doze 延迟也留有 3 倍余量）。**没有 pong 超时**——断线由 socket 的 `onDone`/`onError`（配合 TCP keepalive）感知，`pong` 只用来证明链路活跃。
+- 状态机：`disconnected → connecting → (pairing) → paired`，另有 `occupied`（已认证但席位被占，连接保持）与 `failed`。
+- `session_ended` 与 `session_downgraded` 分别以 reason 字符串（含 `downgraded`）推给 UI 层。
+
+### 4.4 text_sender.dart — 编排层
+
+`autoConnect()`（打开 APP 的默认路径）：
+
+1. 取最近使用的一台已绑定电脑（`last_connected_ms` 最大者）。
+2. **并行**：直接连缓存 IP（TCP 连接超时 2.5s，`hello` 5s）＋ UDP 发现（约 1.1s 出结果）。
+3. 直连结论明确（成功 / occupied / 凭证被拒）就结束，不再换 IP 试。
+4. 直连网络层失败才用发现结果补连一次（DHCP 换 IP 的主路径），连上后刷新缓存里的 IP。
+5. 凭证被拒（`unauthorized`）→ 由上层删除本地凭证并停止重连。
+
+其他入口：`pairWithCode()`（扫码配对，只有拿到 token 才落盘）、`pairFromQr()`（解析 `beetype://` URI）、`takeover()`、`userDisconnect()`（手动断开并标记本进程不再自动重连）、`downgradeToTemp()`（PC 解绑后删本地凭证、会话转临时，不断开）、`forgetDevice()`。
+
+`manualDisconnected` 是**内存态**标记：用户亲手点断开、或 PC 主动断开（`owner_disconnect`）后本进程内不再自动重连，冷启动即失效。
+
+### 4.5 storage_service.dart
+
+| 键 | 内容 |
+|---|---|
+| `client_id` | 本机 UUIDv4（`Random.secure()`） |
+| `output_devices` | JSON 数组：`{device_id, name, device_type, ip, port, token, capabilities, last_connected_ms}` |
+| `device_name` | 手机展示名（每次启动与切回前台从平台通道同步真实系统名） |
+
+旧版键（`pc_ip`/`pc_port`/`pairing_code`/`is_paired`）在初始化时一次性清除（旧配对码无法兑换新 token，必须重新绑定）。**临时会话不写任何键**。数据结构支持多台电脑，v1 只自动连最近使用的一台。
+
+### 4.6 discovery_service.dart
+
+3 轮广播（间隔 300ms）＋ 最后一轮后 500ms 收尾，总预算约 1.1s；广播地址同时用有限广播 `255.255.255.255` 与按 WiFi IP 推算的子网广播（部分 ROM 会丢弃前者，只对常见 /24 私网段推算）。按 `device_id` 去重收集应答，`ip` 以**包来源地址**为准（NAT/多网卡下最可靠）。
+
+### 4.7 页面与状态
+
+`home_page.dart` 的 UI 骨架不随连接状态跳变，只有顶部状态胶囊变色与标签、主体区换视图：
+
+| 状态 | 状态胶囊 | 主体 |
+|---|---|---|
+| `paired` | 绿点 + 电脑名（临时会话加「临时连接」灰标）+「断开」 | 可输入的输入卡 |
+| `occupied` | 橙点 + 电脑名 +「另一台手机正在使用」 | 「电脑使用中」页 +「接管电脑」按钮 |
+| `connecting`/`pairing` | 转圈 +「正在连接…」 | 输入卡（禁用） |
+| `disconnected` 且无绑定 | 灰点 +「未连接电脑」 | 扫码引导页 |
+| `disconnected` 且有绑定 | 灰点 + 电脑名 +「连不上，重试中…」或「重新连接」 | 输入卡（禁用） |
+
+自动重连：退避 1s → 2s → 4s → 8s，之后固定 10s 一直重试（不做「N 次后放弃」）；切回前台立即补试一次；手动断开后完全停止。
+
+扫码页：同一张二维码只发起一次配对请求（去重），否则取景框不挪开时会连发请求，5 次 `bad_code` 就把自己关进 60 秒冷却。
+
+### 4.8 语音发送时序（关键设计）
+
+```
+按住输入法麦克风 → composing 持续有效（换气停顿也不断）
+松开 → 输入法提交文本、composing 变 OFF（下降沿）
+     → 立即（0ms 延时）发送输入框当前全文
+普通键盘输入（无 composing） → 300ms 防抖后发送快照
+```
+
+判据是 composing 的**下降沿**而不是静音停顿，因此不需要秒级观察窗，代价是对「句末停顿先提交一句、随后追加新段」类输入法（搜狗等）不适用——适配矩阵见 PRD NFR-19。发送成功后清空输入框；失败保留全文并提示，右侧有兜底发送按钮。
+
+### 4.9 输入框聚焦与软键盘
+
+连接成功后自动聚焦并强制唤起软键盘。冷启动存在竞态（Activity 尚未完成 IME 注册时 `TextInput.show` 会被系统取消），因此用 `viewInsets.bottom` 验证键盘是否真的弹出，未弹出则以 350ms 间隔重试，最多 3 次。切走方向（resumed → inactive）主动收起键盘，消除转场快照导致的键盘闪动。
+
+---
+
+## 5. 安全设计
+
+### 5.1 凭证生命周期
+
+```
+启动：每次启动都 regenerate_code() → 新配对码（旧码立即失效）
+展示：窗口轮询时若码已过期或剩余 <2 分钟则自动换新（未连接时才换）
+配对：hello{code} → 校验通过 → 立即换新码（一次性）
+        勾选「记住」且主力位空缺 → 生成 token，明文随 hello_ack 下发一次
+        主力位已有主人 → 临时会话，两端都不落盘
+重连：hello{token} → SHA-256 比对命中 → 免码接入
+解绑：config.primary 清空 → 在线主力会话降级为临时（session_downgraded，不断开）→ 旧 token 立即失效
+```
+
+### 5.2 权限边界
+
+- 绑定主力的唯一入口是 **PC 端窗口的勾选框**，协议里没有任何手机端可以修改信任关系的指令。
+- 临时手机拿不到 token，也发不出有效 proof，设备发现对它不存在。
+- 主力遇到席位被占只能等或接管，**绝不自动踢人**；临时方发 `takeover` 一律被拒。
+- 能物理操作 PC 的人即可信（托盘/窗口操作）。
+
+### 5.3 日志脱敏
+
+只记元信息，永不记文本内容：
 
 ```rust
-// ✅ 正确：只记元信息
 log::info!("recv id={} type={} len={}", id, msg_type, text.len());
 log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
-
-// ❌ 禁止：记录文本内容
-log::info!("text content: {}", text);  // 绝对不允许
 ```
+
+### 5.4 实现与设计设想的差异（有意保留）
+
+| 项 | v0.1 设想 | 当前实现 | 原因 |
+|---|---|---|---|
+| 配对码形态 | 6 位数字，可手输 | 64 位 hex 随机串，只随二维码下发 | 6 位码在局域网内可暴力枚举；取消手输入口后没有可读性需求 |
+| 剪贴板非文本保护 | 检测到图片/文件则不覆盖 | 一律覆盖；仅空文本会被拒绝 | `arboard`/Tauri 插件不暴露「非文本 target」检测；家用场景价值有限 |
+| 监听地址 | 仅绑局域网网卡 | `0.0.0.0`（TCP 与 UDP） | 多网卡/虚拟网卡环境（Docker、VPN）下判定「哪个是局域网网卡」易出错；改由高熵凭证 + 冷却承担 |
+| 解绑行为 | 踢掉在线主力 | 降级为临时连接，不断开 | 用户解绑通常是想换机，打断正在进行的输入没有收益 |
+| 模块划分 | 独立 clipboard/tray/qr 模块 | 并入 server.rs / lib.rs | 每个模块只有几十行，拆开后调用链更绕 |
+| 心跳超时 | 手机 15s ping + 10s pong 超时 | 手机 5s ping；PC 15s 收尸；手机靠 socket 事件感知 | 少一个定时器，且避免 Doze 延迟导致误判断线 |
 
 ---
 
-## 5. CI/CD 构建方案
+## 6. 平台差异
 
-### 5.1 仓库结构
+| 平台 | 剪贴板 | 粘贴快捷键 | 自动粘贴 | 备注 |
+|---|---|---|---|---|
+| Linux X11 | arboard（X11 直连） | 终端 `Ctrl+Shift+V`，其余 `Ctrl+V` | ✅ | 按键走 enigo（XTest），无需额外授权 |
+| Linux Wayland | 同上 | — | ❌ | 安全模型禁止后台注入；且无差别写剪贴板也受限，回退手动 Ctrl+V |
+| Windows 10+ | 原生 API | `Ctrl+V` | ✅ | SendInput；UIPI 下无法输入到更高权限窗口 |
+| macOS 12+ | 原生 API | `Cmd+V` | ✅ | CGEvent；需要在系统设置里授予辅助功能权限 |
+| Android / iOS | — | — | — | 手机端只做采集与发送 |
 
-```
-beetype/
-├── desktop/          # Tauri PC 端
-│   ├── src-tauri/
-│   ├── src/
-│   ├── package.json
-│   └── Cargo.toml
-├── app/      # Flutter 手机端
-│   ├── lib/
-│   ├── android/
-│   ├── ios/
-│   └── pubspec.yaml
-├── .github/
-│   └── workflows/
-│       ├── build-pc.yml       # PC 端三平台构建
-│       └── build-mobile.yml   # 手机端 APK 构建
-└── README.md
-```
-
-### 5.2 PC 端 CI（build-pc.yml）
-
-```yaml
-name: Build PC
-
-on:
-  push:
-    tags: ['v*']
-
-jobs:
-  build-linux:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust/toolchain@v1
-        with: { toolchain: stable }
-      - run: cargo install tauri-cli --version "^2.0"
-      - run: cd desktop && cargo tauri build
-      - uses: actions/upload-artifact@v4
-        with: { name: beetype-linux, path: desktop/src-tauri/target/release/bundle/** }
-
-  build-macos:
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust/toolchain@v1
-      - run: cargo install tauri-cli --version "^2.0"
-      - run: cd desktop && cargo tauri build --target aarch64-apple-darwin
-      - uses: actions/upload-artifact@v4
-        with: { name: beetype-macos, path: desktop/src-tauri/target/*/release/bundle/** }
-
-  build-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust/toolchain@v1
-      - run: cargo install tauri-cli --version "^2.0"
-      - run: cd desktop && cargo tauri build
-      - uses: actions/upload-artifact@v4
-        with: { name: beetype-windows, path: desktop/src-tauri/target/release/bundle/** }
-```
-
-### 5.3 手机端 CI（build-mobile.yml）
-
-```yaml
-name: Build Mobile
-
-on:
-  push:
-    tags: ['v*']
-
-jobs:
-  build-android:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
-        with: { flutter-version: '3.44.0' }
-      - run: cd app && flutter pub get
-      - run: cd app && flutter build apk --release
-      - uses: actions/upload-artifact@v4
-        with: { name: beetype-android, path: app/build/app/outputs/flutter-apk/*.apk }
-```
-
-### 5.4 Release 流程
-
-```
-1. 本地测试通过
-2. git tag v0.1.0
-3. git push origin v0.1.0
-4. GitHub Actions 自动触发三平台构建
-5. 构建产物上传到 GitHub Release
-6. 用户下载对应平台安装包
-```
+依赖都不需要用户安装外部命令（剪贴板走 arboard、按键走 enigo + X11 XTest），发行包不再依赖 `xdotool`/`xclip`。
 
 ---
 
-## 6. 开发排期建议
+## 7. 构建与发布
 
-| 阶段 | 任务 | 依赖 |
-|---|---|---|
-| Phase 1 | PC 端核心：config + protocol + server + clipboard | 无 |
-| Phase 2 | PC 端 UI：tray + QR 码窗口 | Phase 1 |
-| Phase 3 | 手机端核心：TcpService + StorageService | Phase 1（协议对齐） |
-| Phase 4 | 手机端 UI：HomePage + PairingPage + TextField | Phase 3 |
-| Phase 5 | 联调：配对 + 文字发送 + 断线重连 | Phase 2 + 4 |
-| Phase 6 | 验收测试：AC-1 ~ AC-30 | Phase 5 |
-| Phase 7 | CI/CD + 打包 | Phase 6 |
+- **CI**：`.github/workflows/release.yml`，仅在推 `v*` tag 或手动触发时运行。
+  - `version` 从 tag 提取（`v0.2.0` → `0.2.0`），写入 `app/pubspec.yaml` 与 `desktop/src-tauri/tauri.conf.json`（**版本以 tag 为唯一来源**，仓库里的字面量不参与发布）。
+  - Android：`flutter build apk --release --target-platform android-arm64`，签名 keystore 由 Secrets 还原并生成 `key.properties`。
+  - 桌面：矩阵 `ubuntu-22.04`（GLIBC 兼容性）/ `macos-latest` / `windows-latest`，`tauri build` 后分别产出 `.deb` + `.AppImage`、`.dmg`、`.msi`。
+  - Release job 汇总所有产物，`workflow_dispatch` 触发时先建 draft。
+- **本地构建**：桌面端 `cd desktop && cargo tauri build`（开发期 `cargo build` 后直接跑 `target/debug/beetype`，前端是单文件 HTML，无需前端构建链）；手机端 `cd app && flutter build apk --release --target-platform android-arm64`。
+- 仓库根的行尾与二进制属性由 `.gitattributes` 统一（`* text=auto eol=lf`）；`.trae/`、`target/`、签名文件在 `.gitignore` 中排除。
+
+---
+
+## 8. 测试与验证
+
+**Rust 单测（18 个，`cargo test`）**
+
+| 文件 | 覆盖 |
+|---|---|
+| `config.rs` | 配对码校验与过期、UUIDv4 形态、主力绑定/校验/解绑全生命周期、落盘不含明文 token、旧配置迁移 |
+| `protocol.rs` | 各消息 encode/decode 往返、旧客户端字段缺省兼容、畸形 JSON 不 panic |
+| `server.rs` | 席位仲裁三分支（空席接入/同主力替换/被临时方占用）、踢人原因映射、QR 内容格式 |
+| `discovery.rs` | 请求解析的合法/畸形样本、应答 JSON 字段 |
+
+**Flutter 测试**：`app/test/widget_test.dart` 覆盖 `TcpMessage` 编解码（JSON 行、字段往返、畸形行返回 null）。
+
+**尚未自动化**（当前最薄弱的两块）：`home_page` 的 composing 下降沿发送判定、`text_sender` 的「直连 + 发现并行 / 凭证被拒 / 降级」编排路径。
+
+**真机联调**：双端部署、装机、抓日志的固定流程见工作区内的 `.trae/skills/beetype-deploy`（本地私有，未纳入版本库）；其中的环境事实（无线 adb 地址、Flutter 路径、日志文件位置）只对本机有效。
+
+---
+
+## 9. 与 v0.1 设计稿的差异对照
+
+| v0.1 设计稿 | 现状 |
+|---|---|
+| 6 位数字配对码 + 手动输码 | 64 位 hex 一次性随机串，仅二维码下发；无手输页面 |
+| `paired_device` 单条配对记录 | 主力手机记录 `primary`（token_hash + client_id + hardware_id）+ 手机端多设备列表 |
+| 无 token、无免配重连 | token 持久化 + 免码重连；APP 重装靠硬件指纹恢复主力身份 |
+| 无设备发现 | 凭证门控 UDP 发现（换 IP 无感），对非主力设备静默 |
+| 无席位概念 | 单席位 + 仲裁 + 接管 + 踢人（`session_ended`）+ 解绑降级（`session_downgraded`） |
+| `clipboard.rs` 非文本保护、`ack.clipboard_non_text` | 未实现；ack 字段为 `code`/`pasted`/`srv_recv_ms` |
+| `tray.rs`（显示配对码/开机自启/关于菜单） | 托盘精简为 5 项，管理操作全部移入主窗口设置页 |
+| `qr.html` 独立窗口 | 单页 `index.html`，QR 以 SVG 内联渲染 |
+| `build-pc.yml` + `build-mobile.yml` | 合并为单个 `release.yml`，tag 触发 |
+| 监听局域网网卡 IP | 监听 `0.0.0.0`（见 5.4） |

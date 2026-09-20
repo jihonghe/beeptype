@@ -62,8 +62,9 @@ beetype/
 同时跑 PC 端和手机端（两台设备连接到同一局域网）：
 
 ```bash
-# 终端 A：桌面端开发模式（热重载）
-cd desktop && npm install && npm run tauri dev
+# 终端 A：桌面端开发模式
+# （前端是 desktop/src/index.html 单文件，没有 npm 工程；改 HTML 后重开窗口即生效）
+cd desktop && cargo tauri dev          # 或 cargo build && ./src-tauri/target/debug/beetype
 
 # 终端 B：手机端开发模式（热重载）
 cd app && flutter pub get && flutter run
@@ -73,8 +74,8 @@ cd app && flutter pub get && flutter run
 
 ```bash
 # 桌面端（首次约 10-20 分钟，增量约 2-3 分钟）
-cd desktop && npm run tauri build
-# 产物：desktop/src-tauri/target/release/beetype (Linux) / .dmg (macOS) / .msi (Windows)
+cd desktop && cargo tauri build        # 需先装 Tauri CLI：cargo install tauri-cli 或 npm i -g @tauri-apps/cli
+# 产物：desktop/src-tauri/target/release/bundle/ 下的 .deb + .AppImage / .dmg / .msi
 
 # Android ARM64 release APK
 cd app && flutter build apk --release --target-platform android-arm64
@@ -83,10 +84,11 @@ cd app && flutter build apk --release --target-platform android-arm64
 
 ### 6. 跑起来验证
 
-1. 启动 PC 端 `tauri dev` → 托盘图标出现
+1. 启动 PC 端 `cargo tauri dev`（或 `cargo build` 后直接跑 `target/debug/beetype`）→ 托盘图标出现
 2. 手机 `flutter run` → 扫码 → 连 PC
-3. 发一条短消息，确认 auto_paste / auto_send 正常
-4. 主力绑定 → 卸载重装手机 APP → 再扫码 → 确认 hardware_id 恢复主力
+3. 发一条短消息，确认自动粘贴 / 自动发送正常
+4. 主力绑定 → 卸载重装手机 APP → 再扫码 → 确认 hardware_id 恢复主力身份
+5. 桌面端单测：`cd desktop/src-tauri && cargo test`
 
 ## 提交流程
 

@@ -29,6 +29,8 @@
 
 - **扫码配对** — PC 显示二维码，手机扫一下就连上（临时配对或绑定主力手机）
 - **主力绑定** — 绑定后的手机下次打开自动连接；APP 重装后靠硬件指纹（Android ANDROID_ID / iOS Keychain UUID）恢复绑定，无需重新扫码
+- **免配重连** — 持主力凭证的手机打开即连，PC 重启、两端换 IP 都不用重新扫码（电脑换 IP 由凭证门控的 UDP 发现自动纠偏）
+- **单席位模型** — 一台电脑同一时刻只服务一部手机；主力打开 APP 遇到电脑被临时手机占用时显示「电脑使用中」，手动点「接管电脑」才踢人
 - **自动粘贴** — Ctrl+V / Cmd+V 直接把文字送进当前焦点输入框（Linux 终端自动用 Ctrl+Shift+V）
 - **自动发送** — 粘贴后自动回车（聊天场景零手动）
 - **零账号·零云端** — 局域网 TCP 直连，数据只在手机和 PC 之间，不经任何服务器
@@ -62,13 +64,18 @@
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # 安装 Tauri 依赖（参考 https://tauri.app/start/prerequisites/）
-# Linux: webkit2gtk-4.1-dev libayatana-appindicator3-dev xdotool 等
+# Linux: libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev 等
+#        （与 CI 一致，见 .github/workflows/release.yml）
 # macOS / Windows: Tauri 文档有一键脚本
 
+# 安装 Tauri CLI（二选一）
+cargo install tauri-cli --version "^2.0"
+# 或：npm install -g @tauri-apps/cli@^2.0.0
+
 cd desktop
-npm install  # 或者 pnpm / yarn
-npm run tauri build
-# 产物在 desktop/src-tauri/target/release/
+cargo tauri build
+# 产物在 desktop/src-tauri/target/release/bundle/（.deb / .AppImage / .dmg / .msi）
+# 开发期可直接 `cargo build` 后运行 target/debug/beetype
 ```
 
 ### 手机端
@@ -91,26 +98,28 @@ flutter install --release  # 装 release 包到真机
 ## 🏗️ 架构概览
 
 ```
-┌─────────────────┐              TCP + JSON             ┌─────────────────┐
-│                 │  ──── 扫码配对码 ──── 6 位码校验 ──── │                 │
-│  BeeType App    │  ──── Token 持久化 ────────────────  │  BeeType Desktop │
-│  (Flutter)      │  ──── Text payload → Text ack ────  │  (Tauri + Rust)  │
-│                 │                                      │                 │
-│  mobile_scanner │                                      │  enigo (Ctrl+V)  │
-│  shared_prefs   │                                      │  clipboard       │
-└─────────────────┘                                      └─────────────────┘
-         │                                                        │
-  hardware_id                                               hardware_id
-  (Android ANDROID_ID                                      (persisted to ~/.config/beetype/
-   / iOS Keychain UUID)                                     config.json)
+┌────────────────────┐        TCP + JSON（行协议）        ┌────────────────────┐
+│  BeeType App       │  ── 扫码配对码（一次性随机串）──→   │  BeeType Desktop   │
+│  (Flutter)         │  ── Token 持久化（免配重连）───→    │  (Tauri + Rust)    │
+│                    │  ── text → ack ───────────────→    │                    │
+│  mobile_scanner    │  ←─ session_ended / downgraded ──   │  enigo（按键注入）  │
+│  shared_prefs      │                                     │  剪贴板 (arboard)  │
+│                    │  ── UDP 发现请求（带 proof）──→     │                    │
+│                    │  ←─ 发现应答（仅主力可见）─────      │                    │
+└────────────────────┘                                     └────────────────────┘
+        │                                                          │
+  hardware_id                                              device_id / device_name
+  (Android ANDROID_ID                                       (首次运行生成 UUIDv4，
+   / iOS Keychain UUID)                                      落盘 ~/.config/beetype/)
 ```
 
 | 层 | 协议 | 说明 |
 |---|---|---|
-| 发现 | UDP 广播 8765 | 手机扫到二维码后可选通过 UDP 发现 PC |
-| 配对 | TCP + 6 位随机码 | 码 5 分钟过期，SHA-256 比对 |
-| 数据 | TCP + JSON | Text / Ack / Hello / Goodbye |
-| 持久 | SharedPreferences (手机) + config.json (PC) | 主力绑定、token、硬件指纹 |
+| 发现 | UDP（与 TCP 同号，默认 8765） | 凭证门控：请求需带 client_id + SHA-256(token) 且与已绑定主力一致才单播应答，其余一律静默（对陌生设备隐身）；应答含新 IP 与 busy 位 |
+| 配对 | TCP + 一次性配对码 | 码为 64 位 hex 随机串（32 字节 /dev/urandom），5 分钟过期、只随二维码下发（无手输入口）、配对成功后立即换新，SHA-256 比对 |
+| 认证 | TCP + token | 绑定主力时一次性下发明文 token，两端只存 SHA-256；此后打开 APP 凭 token 免码直连 |
+| 数据 | TCP + JSON 行协议 | hello / hello_ack / text / ack / ping / pong / takeover / bye / session_ended / session_downgraded，单行上限 256KB |
+| 持久 | SharedPreferences (手机) + config.json (PC) | 手机存 client_id 与已绑定电脑列表（含 token）；PC 存本机身份、唯一主力手机记录、配对码 hash；临时会话两端都不落盘 |
 
 详细设计见 [docs/TECH_DESIGN.md](docs/TECH_DESIGN.md)，产品需求见 [docs/PRD.md](docs/PRD.md)。
 
@@ -139,8 +148,9 @@ flutter install --release  # 装 release 包到真机
 
 ## 🛡️ 安全
 
-- 所有配对码一次性、5 分钟过期，SHA-256 存储，不存明文
-- Token 同样只存 SHA-256 hash
+- 配对码为 32 字节随机串（64 位 hex），只随二维码出现、5 分钟过期、配对成功即换新，PC 端只存 SHA-256
+- 主力 token 同样只存 SHA-256；UDP 发现的 proof 用的就是 SHA-256(token)，抓到广播也无法用于 TCP 认证
+- 同一 IP 连续 5 次鉴权失败冷却 60 秒
 - 局域网直连，数据不经任何外部服务器
 - 详见 [SECURITY.md](SECURITY.md)
 
