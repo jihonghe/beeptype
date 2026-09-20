@@ -13,7 +13,7 @@ permissions:
 jobs:
   # 从 tag 提取版本号（如 v0.2.0 -> 0.2.0）
   version:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.get_version.outputs.version }}
     steps:
@@ -28,7 +28,7 @@ jobs:
 
   android:
     needs: version
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -116,15 +116,15 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-registry-
+          key: ${{ matrix.platform }}-cargo-registry-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+          restore-keys: ${{ matrix.platform }}-cargo-registry-
 
       - name: Cache cargo target
         uses: actions/cache@v4
         with:
           path: desktop/src-tauri/target
-          key: ${{ runner.os }}-cargo-target-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-target-
+          key: ${{ matrix.platform }}-cargo-target-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+          restore-keys: ${{ matrix.platform }}-cargo-target-
 
       - name: Build Tauri app
         working-directory: desktop
@@ -155,7 +155,7 @@ jobs:
 
   release:
     needs: [android, desktop]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
