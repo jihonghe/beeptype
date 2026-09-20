@@ -381,13 +381,6 @@
                 <span>BeeType</span>
                 <span class="ver" id="app-version"></span>
             </div>
-            <div class="setting-row">
-                <div class="setting-text">
-                    <div class="setting-title">重启应用</div>
-                    <div class="setting-sub" id="rs-note">装好新版本后点这里即可切换，不必手动退出再打开；会短暂断开手机连接</div>
-                </div>
-                <button id="btn-restart">重启</button>
-            </div>
         </div>
     </div>
     </div><!-- /view-stage -->
@@ -677,24 +670,6 @@
                 try { await invoke('set_autostart', { value: as.checked }); }
                 catch (e) { alert('设置失败：' + e); as.checked = !as.checked; }
             };
-            // 重启应用：装好新版本后一键切换（后端会延迟启动新进程再退出）
-            const btnRestart = document.getElementById('btn-restart');
-            const rsNote = document.getElementById('rs-note');
-            const RS_NOTE = '装好新版本后点这里即可切换，不必手动退出再打开；会短暂断开手机连接';
-            btnRestart.onclick = async () => {
-                btnRestart.disabled = true;
-                btnRestart.textContent = '重启中…';
-                rsNote.textContent = '正在重启，窗口会短暂消失后自动回来…';
-                try {
-                    await invoke('restart_app');
-                } catch (e) {
-                    alert('重启失败：' + e);
-                    btnRestart.disabled = false;
-                    btnRestart.textContent = '重启';
-                    rsNote.textContent = RS_NOTE;
-                }
-            };
-
             rt.onchange = async () => {
                 try {
                     await invoke('set_resume_ttl', { minutes: Number(rt.value) });
@@ -788,6 +763,12 @@
         // 托盘唤起窗口时立即刷新（配对码已全自动换新，无手动刷新入口）
         if (listen) {
             listen('pairing-show', () => {
+                refresh();
+                forceRepaint();
+            });
+            // 托盘菜单「设置」→ 直接切到设置页
+            listen('open-settings', () => {
+                showView('settings');
                 refresh();
                 forceRepaint();
             });

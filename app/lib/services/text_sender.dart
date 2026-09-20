@@ -358,16 +358,23 @@ class TextSender {
     return ok;
   }
 
-  /// 用户主动断开（绿灯）：bye 优雅告别 + 本进程不再自动重连
+  /// 用户主动断开（绿灯）：bye 优雅告别 + 本进程不再自动重连。
+  ///
+  /// 同时作废本地的临时续连记录：主动断开 = 这次会话到此为止。
+  /// 否则界面会因为"还有可连目标"而停在断开态、不回扫码引导页
+  /// （临时连接降级来的会话尤其明显：它已经没有常用电脑记录了）。
   Future<void> userDisconnect() async {
     // 先置标记：bye 会同步广播 disconnected，避免那一帧排程出自动重连
     manualDisconnected = true;
     await _tcp.bye();
+    await _storage.clearTransientSession();
   }
 
-  /// PC 端托盘主动断开（owner_disconnect）时同样视为"用户意图的断开"
+  /// PC 端托盘主动断开（owner_disconnect）时同样视为"用户意图的断开"，
+  /// 并清掉本地临时续连记录（PC 侧那条记录也已经作废）
   void markDisconnectedByPc() {
     manualDisconnected = true;
+    unawaited(_storage.clearTransientSession());
   }
 
   /// PC 端解绑本机：会话降级为临时连接（连接保持），删除本地落盘凭证。

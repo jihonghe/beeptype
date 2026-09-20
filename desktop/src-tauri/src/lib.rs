@@ -20,6 +20,7 @@ use tauri::{
     Emitter, Manager, WindowEvent,
 };
 use tauri_plugin_autostart::ManagerExt;
+use tauri_plugin_notification::NotificationExt;
 
 /// 前端轮询用的配对/状态信息（QR 以 SVG 字符串内联渲染，无需前端构建链）
 #[derive(Serialize)]
@@ -279,16 +280,14 @@ fn promote_session(state: tauri::State<'_, Arc<Mutex<AppServerState>>>) -> Resul
     server.promote_current_session()
 }
 
-/// 重启应用：装好新版本后一键切换（不必手动退出再打开）。
-/// 先确认新进程能起来，再退出自己；失败则返回错误、留在界面提示。
-#[tauri::command]
-fn restart_app(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, Arc<Mutex<AppServerState>>>,
-) -> Result<(), String> {
-    let server = state.lock().unwrap();
-    let exe = server.restart_self()?;
-    drop(server);
+/// 重启应用（托盘菜单调用）：先确认新进程能起来，再退出自己。
+/// 失败返回错误，由调用方决定怎么提示（托盘用系统通知）。
+fn restart_app_impl(app: &tauri::AppHandle) -> Result<(), String> {
+    let exe = {
+        let state = app.state::<Arc<Mutex<AppServerState>>>();
+        let server = state.lock().unwrap();
+        server.restart_self()?
+    };
     info!("Restarting app (relaunch of {exe} scheduled)");
     app.exit(0);
     Ok(())
@@ -417,9 +416,12 @@ pub fn run() {
             let status_item =
                 MenuItem::with_id(app, "status", "⚪ 等待配对", true, None::<&str>)?;
             let show_qr_item = MenuItem::with_id(app, "show_qr", "打开主窗口", true, None::<&str>)?;
+            let settings_item = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
             let disconnect_item =
                 MenuItem::with_id(app, "disconnect", "断开当前手机", false, None::<&str>)?;
             let separator = tauri::menu::PredefinedMenuItem::separator(app)?;
+            let restart_item =
+                MenuItem::with_id(app, "restart", "重启应用", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
 
             let menu = Menu::with_items(
@@ -427,8 +429,10 @@ pub fn run() {
                 &[
                     &status_item,
                     &show_qr_item,
+                    &settings_item,
                     &disconnect_item,
                     &separator,
+                    &restart_item,
                     &quit_item,
                 ],
             )?;
@@ -443,10 +447,29 @@ pub fn run() {
                 .on_menu_event(move |app, event| match event.id().as_ref() {
                     "quit" => app.exit(0),
                     "show_qr" => show_main_window(app),
+                    "settings" => {
+                        // 打开窗口并直接切到设置页
+                        show_main_window(app);
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.emit("open-settings", ());
+                        }
+                    }
                     "disconnect" => {
                         let state = app.state::<Arc<Mutex<AppServerState>>>();
                         let server = state.lock().unwrap();
                         server.disconnect_current();
+                    }
+                    "restart" => {
+                        // 托盘没有界面可以提示，失败时用系统通知告知
+                        if let Err(e) = restart_app_impl(app) {
+                            log::error!("Restart from tray failed: {e}");
+                            let _ = app
+                                .notification()
+                                .builder()
+                                .title("BeeType")
+                                .body(&format!("重启失败：{e}"))
+                                .show();
+                        }
                     }
                     _ => {}
                 })
@@ -493,7 +516,6 @@ pub fn run() {
             set_resume_ttl,
             set_autostart,
             promote_session,
-            restart_app,
             set_window_height
         ])
         .run(tauri::generate_context!())
