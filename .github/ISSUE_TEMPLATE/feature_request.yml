@@ -1,0 +1,35 @@
+name: Feature Request
+description: 提交一个新功能或改进建议
+labels: enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        想让 BeeType 变得更好？告诉我们你的想法！
+  - type: textarea
+    id: motivation
+    attributes:
+      label: 动机
+      description: 你遇到了什么问题？为什么现有功能满足不了？
+      placeholder: 我经常在 VS Code 里写注释，不想打字...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 方案
+      description: 你觉得应该怎么实现？不要求技术细节，产品方向也行。
+      placeholder: 希望能支持手机侧选择"只在当前应用里自动发送"...
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 替代方案（可选）
+      description: 有没有考虑过其他做法？为什么最终推荐这个？
+  - type: input
+    id: priority
+    attributes:
+      label: 影响范围
+      description: 影响多少人？对核心场景的侵入程度？
+      placeholder: 仅影响 Linux 用户 / 会改协议需要双端同步

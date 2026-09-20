@@ -1,0 +1,47 @@
+name: Bug Report
+description: 提交一个 Bug
+labels: bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢你报告 Bug！请尽量填全以下信息，这能帮我们更快定位问题。
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: PC 端和手机端各是什么版本？
+      placeholder: 例如 PC v0.1.1 / Android release 0.1.1
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: 运行环境
+      description: PC 端的操作系统、窗口系统（X11 / Wayland）、手机机型和 Android/iOS 版本
+      placeholder: 例如 Linux 6.10 X11 / 小米 14 Android 15
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 你做了什么、期望什么、实际发生了什么。越具体越好。
+      placeholder: |
+        1. 打开 PC 端 BeeType
+        2. 手机扫码连接
+        3. 手机发一条 "测试"
+        4. 结果：没有粘贴，日志里看到 ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志（可选）
+      description: PC 端日志（~/.config/beetype/ 或控制台输出）、手机端 adb logcat 片段
+      render: text
+  - type: textarea
+    id: notes
+    attributes:
+      label: 其他信息
+      description: 你的网络环境（是否同网段）、杀毒软件、是否使用代理等
