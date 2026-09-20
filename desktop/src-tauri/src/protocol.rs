@@ -27,6 +27,11 @@ pub enum Message {
         client_id: String,
         #[serde(default)]
         device_name: String,
+        /// 手机硬件指纹（Android ANDROID_ID）。重装 APP 后不变，
+        /// 用于 PC 端重新识别"这台手机我之前绑定过"，绕过 client_id 丢失问题。
+        /// 旧客户端不发此字段，按 None 处理。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hardware_id: Option<String>,
     },
 
     /// PC → 手机端：握手响应。
@@ -132,6 +137,7 @@ impl Message {
             token: None,
             client_id: client_id.to_string(),
             device_name: device_name.to_string(),
+            hardware_id: None,
         }
     }
 
@@ -142,6 +148,7 @@ impl Message {
             token: Some(token.to_string()),
             client_id: client_id.to_string(),
             device_name: device_name.to_string(),
+            hardware_id: None,
         }
     }
 

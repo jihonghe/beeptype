@@ -11,10 +11,10 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "beetype/device")
             .setMethodCallHandler { call, result ->
-                if (call.method == "getDeviceName") {
-                    result.success(deviceName())
-                } else {
-                    result.notImplemented()
+                when (call.method) {
+                    "getDeviceName" -> result.success(deviceName())
+                    "getAndroidId" -> result.success(androidId())
+                    else -> result.notImplemented()
                 }
             }
     }
@@ -66,5 +66,18 @@ class MainActivity : FlutterActivity() {
         val maker = Build.MANUFACTURER.replaceFirstChar { it.uppercase() }
         val model = Build.MODEL
         return if (model.startsWith(maker, ignoreCase = true)) model else "$maker $model"
+    }
+
+    /**
+     * 硬件指纹：Android ID（Settings.Secure）。
+     * 同签名 APP 重装不变、系统升级不变、无需特殊权限；
+     * 恢复出厂设置或换签名 APP 才会变（预期行为）。
+     */
+    private fun androidId(): String? = try {
+        Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+    } catch (_: Exception) {
+        null
     }
 }

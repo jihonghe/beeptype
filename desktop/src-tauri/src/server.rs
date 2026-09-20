@@ -379,7 +379,8 @@ impl ServerState {
                 token,
                 client_id,
                 device_name,
-            } => self.handle_hello(code, token, client_id, device_name, peer_ip, ctx),
+                hardware_id,
+            } => self.handle_hello(code, token, client_id, device_name, hardware_id, peer_ip, ctx),
 
             Message::Text { id, text, ts: _ } => {
                 // 必须是席位持有者；等待接管/未认证连接一律拒绝
@@ -434,6 +435,7 @@ impl ServerState {
         token: Option<String>,
         client_id: String,
         device_name: String,
+        hardware_id: Option<String>,
         peer_ip: IpAddr,
         ctx: &mut ConnCtx,
     ) -> Option<Message> {
@@ -555,14 +557,29 @@ impl ServerState {
             let remember = self.remember_next.load(Ordering::Relaxed);
             let (is_primary, token_out, new_code, returning_primary) = {
                 let mut config = self.config.lock().unwrap();
-                let returning = !client_id.is_empty()
+                // returning: client_id 匹配 OR hardware_id 匹配
+                // 硬件指纹是关键——手机重装后 client_id 变了，但 hardware_id 不变，
+                // 仍能被识别为"我认识这台手机"并恢复主力身份
+                let client_match = !client_id.is_empty()
                     && config
                         .primary
                         .as_ref()
                         .is_some_and(|p| p.client_id == client_id);
+                let hw_match = hardware_id.as_deref().is_some_and(|hid| {
+                    config
+                        .primary
+                        .as_ref()
+                        .is_some_and(|p| p.hardware_id.as_deref() == Some(hid))
+                });
+                let returning = client_match || hw_match;
                 let bind = remember && !config.has_primary() && !client_id.is_empty();
                 let token_out = if bind {
-                    Some(config.bind_primary(&client_id, &device_name, &peer_ip.to_string()))
+                    Some(config.bind_primary(
+                        &client_id,
+                        &device_name,
+                        &peer_ip.to_string(),
+                        hardware_id.as_deref(),
+                    ))
                 } else {
                     None
                 };

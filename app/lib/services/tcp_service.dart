@@ -166,6 +166,7 @@ class TcpService {
   Future<HelloOutcome> hello({
     String? code,
     String? token,
+    String? hardwareId,
     required String clientId,
     required String deviceName,
     Duration timeout = const Duration(seconds: 10),
@@ -180,6 +181,7 @@ class TcpService {
       if (token != null) 'token': token,
       'client_id': clientId,
       'device_name': deviceName,
+      if (hardwareId != null && hardwareId.isNotEmpty) 'hardware_id': hardwareId,
     }));
     if (code != null) {
       _statusController.add(ConnectionStatus.pairing);

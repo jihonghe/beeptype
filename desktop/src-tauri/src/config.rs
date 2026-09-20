@@ -43,6 +43,10 @@ pub struct PrimaryDevice {
     pub last_ip: String,
     pub paired_at: u64,
     pub last_seen: u64,
+    /// 手机硬件指纹（Android ANDROID_ID）。APP 重装不变，
+    /// 用于"重装后扫同一台手机仍能识别为已绑定主力"。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardware_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -282,7 +286,14 @@ impl Config {
 
     /// 绑定主力手机：生成新 token，持久化 client_id/name/token_hash，
     /// 返回 token 明文（仅此一次，调用方负责下发给手机）。
-    pub fn bind_primary(&mut self, client_id: &str, name: &str, ip: &str) -> String {
+    /// hardware_id 可选——有则存，用于 APP 重装后识别同一物理设备。
+    pub fn bind_primary(
+        &mut self,
+        client_id: &str,
+        name: &str,
+        ip: &str,
+        hardware_id: Option<&str>,
+    ) -> String {
         let token = generate_token();
         let ts = now_ms();
         self.primary = Some(PrimaryDevice {
@@ -292,6 +303,7 @@ impl Config {
             last_ip: ip.to_string(),
             paired_at: ts,
             last_seen: ts,
+            hardware_id: hardware_id.map(|s| s.to_string()),
         });
         let _ = self.save();
         token

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/services.dart';
 import 'tcp_service.dart';
 import 'storage_service.dart';
 import 'discovery_service.dart';
@@ -20,6 +21,20 @@ class TextSender {
 
   TcpService get tcp => _tcp;
   StorageService get storage => _storage;
+
+  /// 硬件指纹（Android ANDROID_ID）。从原生通道一次性获取，缓存在内存。
+  /// 同签名 APP 重装不变；用于 PC 端识别"重装后仍是同一台手机"。
+  String? _hardwareId;
+  Future<String?> get hardwareId async {
+    if (_hardwareId != null) return _hardwareId;
+    try {
+      _hardwareId = await const MethodChannel('beetype/device')
+          .invokeMethod<String>('getAndroidId');
+    } catch (_) {
+      _hardwareId = null;
+    }
+    return _hardwareId;
+  }
 
   /// 自动连接 TCP 直连超时（缓存 IP 失活场景，包被丢弃时挂到超时）
   static const Duration _directConnectTimeout = Duration(milliseconds: 2500);
@@ -59,12 +74,14 @@ class TextSender {
         .catchError((Object _) => <DiscoveredDevice>[]);
 
     HelloOutcome? outcome;
+    final hid = await hardwareId;
     try {
       await _tcp.connect(dev.ip, dev.port, timeout: _directConnectTimeout);
       outcome = await _tcp.hello(
         token: dev.token,
         clientId: _storage.clientId,
         deviceName: _storage.getDeviceName(),
+        hardwareId: hid,
         timeout: _helloTimeout,
       );
     } catch (_) {
@@ -101,6 +118,7 @@ class TextSender {
         token: dev.token,
         clientId: _storage.clientId,
         deviceName: _storage.getDeviceName(),
+        hardwareId: hid,
         timeout: _helloTimeout,
       );
     } catch (_) {
@@ -130,10 +148,12 @@ class TextSender {
       return HelloOutcome.networkFail();
     }
 
+    final hid = await hardwareId;
     final outcome = await _tcp.hello(
       code: code,
       clientId: _storage.clientId,
       deviceName: _storage.getDeviceName(),
+      hardwareId: hid,
     );
 
     if (outcome.ok) {
