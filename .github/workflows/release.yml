@@ -169,7 +169,7 @@ jobs:
           draft: ${{ github.event_name == 'workflow_dispatch' }}
           files: |
             android-apk/app-release.apk
-            linux-desktop/*.deb
-            linux-desktop/*.AppImage
-            macos-desktop/*.dmg
-            windows-desktop/*.msi
+            linux-desktop/**/*.deb
+            linux-desktop/**/*.AppImage
+            macos-desktop/**/*.dmg
+            windows-desktop/**/*.msi
