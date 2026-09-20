@@ -39,6 +39,13 @@ class AckResult {
   });
 }
 
+/// 降级为临时连接时，PC 补发的续连凭证
+class ResumeGrant {
+  final String token;
+  final int expiresInSec;
+  ResumeGrant(this.token, this.expiresInSec);
+}
+
 /// hello_ack 的结构化结果
 class HelloOutcome {
   final bool ok;
@@ -113,6 +120,19 @@ class TcpService {
   /// 消息到达后服务端会随即关闭 TCP。
   final _sessionEndedController = StreamController<String>.broadcast();
 
+  /// 会话被降级为临时（PC 端解绑）时，PC 补发的续连凭证。
+  /// 降级来的临时会话必须和扫码临时连接一样能断线续连，否则体验不一致。
+  final _downgradeGrantController = StreamController<ResumeGrant>.broadcast();
+  Stream<ResumeGrant> get downgradeGrantStream =>
+      _downgradeGrantController.stream;
+
+  String? _lastIp;
+  int? _lastPort;
+
+  /// 最近一次成功连接的端点（落盘临时续连记录时要用）
+  String? get lastIp => _lastIp;
+  int? get lastPort => _lastPort;
+
   Completer<HelloOutcome>? _helloCompleter;
   Completer<bool>? _takeoverCompleter;
   Completer<void>? _byeCompleter;
@@ -147,6 +167,8 @@ class TcpService {
 
     try {
       _socket = await Socket.connect(ip, port, timeout: timeout);
+      _lastIp = ip;
+      _lastPort = port;
 
       _isConnected = true;
 
@@ -394,8 +416,14 @@ class TcpService {
         break;
 
       case 'session_downgraded':
-        // PC 端解绑本机：连接降级为临时（会话保持，不断开）
-        debugPrint('VL_TCP session_downgraded');
+        // PC 端解绑本机：连接降级为临时（会话保持，不断开），并可能补发续连凭证
+        final grantToken = d['resume_token'] as String?;
+        final grantExpires = (d['resume_expires_in'] as num?)?.toInt();
+        debugPrint('VL_TCP session_downgraded withGrant=${grantToken != null}');
+        if (grantToken != null && grantToken.isNotEmpty) {
+          _downgradeGrantController.add(
+              ResumeGrant(grantToken, grantExpires ?? 300));
+        }
         _sessionEndedController.add('downgraded');
         break;
 
@@ -465,6 +493,7 @@ class TcpService {
     _socket?.destroy();
     _statusController.close();
     _sessionEndedController.close();
+    _downgradeGrantController.close();
   }
 }
 

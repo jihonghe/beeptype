@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'tcp_service.dart';
 import 'storage_service.dart';
@@ -62,7 +63,29 @@ class TextSender {
   Future<void> init() async {
     if (_initialized) return;
     await _storage.init();
+    // 被降级为临时连接时，PC 会补发续连凭证：立刻落盘，
+    // 这样"降级来的临时会话"和扫码临时连接一样能断线续连
+    _downgradeSub = _tcp.downgradeGrantStream.listen(_onDowngradeGrant);
     _initialized = true;
+  }
+
+  StreamSubscription<ResumeGrant>? _downgradeSub;
+
+  void _onDowngradeGrant(ResumeGrant grant) {
+    final ip = _tcp.lastIp;
+    final port = _tcp.lastPort;
+    final s = session;
+    if (ip == null || port == null || s == null) return;
+    unawaited(_storage.saveTransientSession(TransientSession(
+      deviceId: s.deviceId ?? '',
+      name: s.deviceName ?? ip,
+      ip: ip,
+      port: port,
+      token: grant.token,
+      expiresAtMs:
+          DateTime.now().millisecondsSinceEpoch + grant.expiresInSec * 1000,
+    )));
+    debugPrint('VL_TCP 降级续连凭证已落盘（${grant.expiresInSec}s 窗口）');
   }
 
   /// 重新读取系统设备名（切回前台时调用；用户改手机名后，下次连接 PC 即显示新名）
@@ -373,6 +396,7 @@ class TextSender {
   }
 
   void dispose() {
+    _downgradeSub?.cancel();
     _tcp.dispose();
   }
 }

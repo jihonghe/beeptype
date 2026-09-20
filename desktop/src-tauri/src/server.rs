@@ -78,12 +78,16 @@ fn send_session_ended(writer: &mut TcpStream, name: &str, reason: u8) {
 }
 
 /// 通知席位持有者：主力已解绑，连接降级为临时（会话保持）
-fn send_session_downgraded(writer: &mut TcpStream, name: &str) {
-    if let Ok(encoded) = Message::SessionDowngraded.encode() {
+fn send_session_downgraded(writer: &mut TcpStream, name: &str, resume: Option<(String, u64)>) {
+    let with_resume = resume.is_some();
+    if let Ok(encoded) = Message::session_downgraded(resume).encode() {
         let _ = writer.write_all(encoded.as_bytes());
         let _ = writer.flush();
     }
-    info!("Session downgraded to transient for {}", name);
+    info!(
+        "Session downgraded to transient for {} (resume credential issued: {})",
+        name, with_resume
+    );
 }
 
 fn clone_wake(w: &Option<TcpStream>) -> Option<TcpStream> {
@@ -1073,7 +1077,10 @@ fn handle_connection(stream: TcpStream, state: ServerState) {
         if !downgrade_sent && ctx.downgrade.load(Ordering::SeqCst) {
             downgrade_sent = true;
             ctx.is_primary = false;
-            send_session_downgraded(&mut writer, &ctx.name);
+            // 降级后的身份就是"临时会话"，凭证待遇必须与扫码临时连接一致：
+            // 补发续连凭证，否则这条会话被系统杀掉后就再也回不来（曾经漏了这一步）
+            let grant = state.issue_transient_resume(&ctx.client_id, &ctx.name);
+            send_session_downgraded(&mut writer, &ctx.name, grant);
         }
 
         line.clear();
@@ -1251,3 +1258,4 @@ mod tests {
         assert_eq!(kick_reason(KICK_REPLACED), "replaced");
     }
 }
+

@@ -118,9 +118,16 @@ pub enum Message {
     SessionEnded { reason: String },
 
     /// PC → 手机端：主力已解绑，当前连接降级为临时（会话保持，不断开）。
-    /// 手机端收到后应删除本地凭证并把当前会话标记为临时连接。
+    /// 手机端收到后应删除本地凭证、把当前会话标记为临时，并保存随之补发的续连凭证
+    /// （否则"降级来的临时会话"就享受不到断线续连，与扫码临时连接不一致）。
     #[serde(rename = "session_downgraded")]
-    SessionDowngraded,
+    SessionDowngraded {
+        /// 降级后补发的续连凭证；续连窗口被关掉时为空
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume_token: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume_expires_in: Option<u64>,
+    },
 }
 
 fn ack_status_default() -> String {
@@ -174,6 +181,18 @@ impl Message {
             client_id: client_id.to_string(),
             device_name: device_name.to_string(),
             hardware_id: None,
+        }
+    }
+
+    /// 构造"降级为临时"的会话事件，可携带补发的续连凭证
+    pub fn session_downgraded(resume: Option<(String, u64)>) -> Self {
+        let (resume_token, resume_expires_in) = match resume {
+            Some((t, secs)) => (Some(t), Some(secs)),
+            None => (None, None),
+        };
+        Message::SessionDowngraded {
+            resume_token,
+            resume_expires_in,
         }
     }
 
@@ -347,7 +366,8 @@ mod tests {
             Message::SessionEnded {
                 reason: "owner_takeover".to_string(),
             },
-            Message::SessionDowngraded,
+            Message::session_downgraded(Some(("resume-token".to_string(), 300))),
+            Message::session_downgraded(None),
         ] {
             let encoded = msg.encode().unwrap();
             let decoded = Message::decode_line(&encoded).unwrap();
