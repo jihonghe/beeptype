@@ -18,6 +18,9 @@ pub struct Config {
     /// 粘贴完成后自动发送（模拟 Enter）。仅在 auto_paste=true 时生效。
     #[serde(default)]
     pub auto_send: bool,
+    /// 手机连上后自动隐藏主窗口到托盘（关闭则窗口一直留在桌面，便于看状态/管理设备）
+    #[serde(default = "default_true")]
+    pub auto_hide: bool,
     pub code_hash: Option<String>,
     pub code_expires_at: Option<u64>,
 
@@ -91,6 +94,7 @@ impl Default for Config {
             autostart: false,
             auto_paste: true,
             auto_send: false,
+            auto_hide: true,
             code_hash: None,
             code_expires_at: None,
             device_id: String::new(),
@@ -455,5 +459,19 @@ mod tests {
         let migrated: Config = serde_json::from_str(legacy).unwrap();
         assert!(!migrated.has_primary());
         assert!(migrated.auto_paste);
+    }
+}
+
+#[cfg(test)]
+mod auto_hide_tests {
+    use super::*;
+
+    /// 旧配置里没有 auto_hide 字段时，必须按"开启"处理（保持既有行为不变）
+    #[test]
+    fn test_auto_hide_defaults_true() {
+        let legacy = r#"{"port": 8765, "autostart": false, "auto_paste": true}"#;
+        let cfg: Config = serde_json::from_str(legacy).unwrap();
+        assert!(cfg.auto_hide);
+        assert!(Config::default().auto_hide);
     }
 }

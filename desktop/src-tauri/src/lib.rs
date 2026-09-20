@@ -51,6 +51,8 @@ struct SettingsInfo {
     auto_paste_supported: bool,
     /// 当前会话是否支持自动发送（条件和 auto_paste 完全一致）
     auto_send_supported: bool,
+    /// 手机连上后是否自动隐藏主窗口到托盘
+    auto_hide: bool,
     /// 开机自启是否开启（读系统实际状态）
     autostart: bool,
     /// 是否已绑定主力手机
@@ -116,16 +118,8 @@ fn build_pairing_info(server: &ServerState) -> PairingInfo {
 }
 
 /// 显示并聚焦主窗口（托盘菜单/托盘左键共用）。
-/// 标记为"手动打开"：连接/重连成功后不再自动收回窗口。
+/// 窗口是否在连接后自动收回由设置项「连接后自动隐藏窗口」决定（见 server.rs）。
 fn show_main_window(app: &tauri::AppHandle) {
-    {
-        let state = app.state::<Arc<Mutex<ServerState>>>();
-        state
-            .lock()
-            .unwrap()
-            .manual_window
-            .store(true, Ordering::Relaxed);
-    }
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
@@ -133,16 +127,6 @@ fn show_main_window(app: &tauri::AppHandle) {
         // 通知前端立即刷新一次，不必等下一个 1s 轮询周期
         let _ = window.emit("pairing-show", ());
     }
-}
-
-/// 窗口被点叉隐藏：清除"手动打开"标记，下次扫码配对恢复自动收回行为
-fn mark_window_hidden(app: &tauri::AppHandle) {
-    let state = app.state::<Arc<Mutex<ServerState>>>();
-    state
-        .lock()
-        .unwrap()
-        .manual_window
-        .store(false, Ordering::Relaxed);
 }
 
 #[tauri::command]
@@ -181,7 +165,7 @@ fn unbind_primary(state: tauri::State<'_, Arc<Mutex<ServerState>>>) {
     server.unbind_primary();
 }
 
-/// 读取设置区状态（自动粘贴生效值/平台支持/开机自启）
+/// 读取设置区状态（自动粘贴生效值/平台支持/自动隐藏/开机自启）
 #[tauri::command]
 fn get_settings(
     app: tauri::AppHandle,
@@ -190,6 +174,7 @@ fn get_settings(
     let server = state.lock().unwrap();
     let auto_paste = server.auto_paste.load(Ordering::Relaxed);
     let auto_send = server.auto_send.load(Ordering::Relaxed);
+    let auto_hide = server.auto_hide.load(Ordering::Relaxed);
     let (has_primary, primary_name) = {
         let config = server.config.lock().unwrap();
         (
@@ -204,6 +189,7 @@ fn get_settings(
         auto_send,
         auto_paste_supported: paste::auto_paste_supported(),
         auto_send_supported: paste::auto_send_supported(),
+        auto_hide,
         autostart,
         has_primary,
         primary_name,
@@ -266,6 +252,21 @@ fn set_auto_send(
     info!("Auto-send toggled: {value} (effective: {effective}, paste_on: {paste_on})");
 }
 
+/// 切换「连接后自动隐藏窗口」：手机连上后是否把主窗口收起到托盘。
+/// 关掉时窗口一直留在桌面，便于盯状态、管理设备；不涉及任何平台能力判断。
+#[tauri::command]
+fn set_auto_hide(
+    value: bool,
+    state: tauri::State<'_, Arc<Mutex<ServerState>>>,
+) {
+    let server = state.lock().unwrap();
+    server.auto_hide.store(value, Ordering::Relaxed);
+    let mut config = server.config.lock().unwrap();
+    config.auto_hide = value;
+    let _ = config.save();
+    info!("Auto-hide toggled: {value}");
+}
+
 /// 切换开机自启：操作系统自启项 + 持久化用户意愿
 #[tauri::command]
 fn set_autostart(
@@ -308,8 +309,6 @@ pub fn run() {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
-                // 窗口被点叉收走：恢复"配对弹窗"身份，下次扫码后自动收回
-                mark_window_hidden(window.app_handle());
             }
         })
         .setup(|app| {
@@ -325,6 +324,7 @@ pub fn run() {
             let autostart_on = config.autostart;
             let auto_paste_config = config.auto_paste;
             let auto_send_config = config.auto_send;
+            let auto_hide_config = config.auto_hide;
             let ip = lan_ip().unwrap_or_else(|| "127.0.0.1".to_string());
             info!("BeeType starting on {}:{} (device {})", ip, port, config.device_name);
 
@@ -356,6 +356,7 @@ pub fn run() {
                 code,
                 effective_auto_paste,
                 effective_auto_send,
+                auto_hide_config,
                 config,
             );
             let shared_state = Arc::new(Mutex::new(server_state.clone()));
@@ -442,6 +443,7 @@ pub fn run() {
             get_settings,
             set_auto_paste,
             set_auto_send,
+            set_auto_hide,
             set_autostart,
             set_window_height
         ])

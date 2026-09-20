@@ -85,6 +85,7 @@ pub struct Config {
     pub auto_paste: bool,             // 默认 true（实际生效还需平台支持）
     #[serde(default)]
     pub auto_send: bool,              // 默认 false，依赖 auto_paste
+    pub auto_hide: bool,              // 默认 true：手机连上后自动隐藏主窗口到托盘
     pub code_hash: Option<String>,    // SHA-256(配对码)
     pub code_expires_at: Option<u64>, // 毫秒时间戳
     pub device_id: String,            // 本机 UUIDv4
@@ -293,7 +294,7 @@ PC 端处理规则：
 主窗口（380×520，可缩放，最小 340×120，启动即可见）：
 
 - 前端每 1s 轮询 `get_pairing_info`；轮询顺带调用 `ensure_code_fresh()`——只要没连接、且配对码已过期或剩余不足 2 分钟就自动换新，保证窗口上展示的二维码永远可用（PC 长期运行时不会变成死码）。
-- 配对成功后先通知前端渲染绿色「已连接」页，0.9s 后自动隐藏到托盘；除非窗口是用户从托盘手动打开的（`manual_window` 标记，点叉关闭时清除）。
+- 配对成功后先通知前端渲染绿色「已连接」页，0.9s 后自动隐藏到托盘；是否收回由设置项「连接后自动隐藏窗口」（`auto_hide`，默认开）决定。历史上这里用的是"窗口是否被用户手动打开"的隐形标记（`manual_window`），它会因为"为了扫码从托盘打开一次窗口"而永久禁用自动收回——v0.2.4 换成了显式设置项，该标记已删除。
 - QR 内容格式 `beetype://<ip>:<port>?code=<code>`，由 `qrcode` 渲染成 SVG 内联返回，无需前端构建链。
 - TCP 绑定 `0.0.0.0:<port>`；`lan_ip()` 仅是取默认路由网卡的 IPv4（`UdpSocket::connect` 只做路由选择，**不发包**）用于生成二维码里的地址。
 
@@ -306,6 +307,7 @@ Tauri commands（10 个）：
 | `get_settings` | 自动粘贴/自动发送的实际生效值、平台支持情况、开机自启、主力机名、版本号 |
 | `set_auto_paste` | 存用户意愿；运行态存「意愿 && 平台支持」；关闭时联动关闭 auto_send |
 | `set_auto_send` | 存用户意愿；运行态存「意愿 && auto_paste 生效 && 平台支持」 |
+| `set_auto_hide` | 「连接后自动隐藏窗口」开关（纯 PC 端行为，无平台能力判断） |
 | `set_autostart` | 操作系统自启项 + 持久化 |
 | `set_remember_next` | 「记住这台手机」勾选（仅对下一次码配对生效） |
 | `disconnect_session` | 托盘/窗口断开当前手机 |
@@ -317,7 +319,7 @@ Tauri commands（10 个）：
 - 主页与设置页**绝对定位叠放**，切换只改 `opacity`/`visibility`（交叉淡化），元素几何全程不变——规避 WebKitGTK 层重建导致的标题闪烁。
 - 窗口高度在启动时用离屏克隆渲染「等待态」量出真实高度（两种勾选文案取高者）后固定，之后不再随状态跳变：主页内容裁切、设置页内部滚动。
 - 渲染做了结构键缓存（`lastStatusKey`/`lastPairKey`），避免 1s 轮询全量重绘导致 hover/勾选态丢失；只有「无连接 → 有连接」这类跨状态切换才播入场动画。
-- 设置页每次进入都拉一次 `get_settings`；「记住这台手机」勾选框仅在主力位空缺时出现，默认不勾（扫码默认即临时连接）。
+- 设置页每次进入都拉一次 `get_settings`；通用区四个开关：自动粘贴 / 粘贴后自动发送 / **连接后自动隐藏窗口** / 开机自启。「记住这台手机」勾选框仅在主力位空缺时出现，默认不勾（扫码默认即临时连接）。
 
 ---
 
@@ -561,11 +563,11 @@ log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
 
 ## 8. 测试与验证
 
-**Rust 单测（21 个，`cargo test`）**
+**Rust 单测（22 个，`cargo test`）**
 
 | 文件 | 覆盖 |
 |---|---|
-| `config.rs` | 配对码校验与过期、UUIDv4 形态、主力绑定/校验/解绑全生命周期、硬件指纹随主力记录持久化、落盘不含明文 token、旧配置迁移 |
+| `config.rs` | 配对码校验与过期、UUIDv4 形态、主力绑定/校验/解绑全生命周期、硬件指纹随主力记录持久化、落盘不含明文 token、旧配置迁移、`auto_hide` 缺省视为开启 |
 | `protocol.rs` | 各消息 encode/decode 往返、旧客户端字段缺省兼容、畸形 JSON 不 panic |
 | `server.rs` | 席位仲裁三分支（空席接入/同主力替换/被临时方占用）、踢人原因映射、QR 内容格式 |
 | `discovery.rs` | 请求解析的合法/畸形样本、应答 JSON 字段 |

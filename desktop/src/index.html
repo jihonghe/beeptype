@@ -309,6 +309,16 @@
             </div>
             <div class="setting-row">
                 <div class="setting-text">
+                    <div class="setting-title">连接后自动隐藏窗口</div>
+                    <div class="setting-sub" id="ah-note">手机连上电脑后，窗口自动收起到系统托盘</div>
+                </div>
+                <label class="switch">
+                    <input type="checkbox" id="set-autohide">
+                    <span class="track"></span>
+                </label>
+            </div>
+            <div class="setting-row">
+                <div class="setting-text">
                     <div class="setting-title">开机自动启动</div>
                     <div class="setting-sub">登录系统后在后台运行 BeeType</div>
                 </div>
@@ -555,11 +565,17 @@
             const ap = document.getElementById('set-autopaste');
             const as = document.getElementById('set-autostart');
             const ans = document.getElementById('set-autosend');
+            const ah = document.getElementById('set-autohide');
             const apNote = document.getElementById('ap-note');
             const asNote = document.getElementById('as-note');
+            const ahNote = document.getElementById('ah-note');
             ap.checked = !!s.autoPaste;
             as.checked = !!s.autostart;
             ans.checked = !!s.autoSend;
+            ah.checked = !!s.autoHide;
+            ahNote.textContent = ah.checked
+                ? '手机连上电脑后，窗口自动收起到系统托盘'
+                : '窗口会一直留在桌面，方便查看状态和管理设备';
             ap.disabled = !s.autoPasteSupported;
             // 自动发送依赖自动粘贴：autoPaste 关 → autoSend 也 disabled
             ans.disabled = !s.autoPaste || !s.autoSendSupported;
@@ -603,6 +619,14 @@
             as.onchange = async () => {
                 try { await invoke('set_autostart', { value: as.checked }); }
                 catch (e) { alert('设置失败：' + e); as.checked = !as.checked; }
+            };
+            ah.onchange = async () => {
+                try {
+                    await invoke('set_auto_hide', { value: ah.checked });
+                    ahNote.textContent = ah.checked
+                        ? '手机连上电脑后，窗口自动收起到系统托盘'
+                        : '窗口会一直留在桌面，方便查看状态和管理设备';
+                } catch (e) { alert('设置失败：' + e); ah.checked = !ah.checked; }
             };
 
             document.getElementById('app-version').textContent = 'v' + escapeHtml(s.version || '');

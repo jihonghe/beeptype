@@ -189,8 +189,8 @@ pub struct ServerState {
     pub auto_paste: Arc<AtomicBool>,
     /// 自动发送开关（粘贴后模拟 Enter）。实际生效值：auto_paste 生效 && 平台支持
     pub auto_send: Arc<AtomicBool>,
-    /// 主窗口是否为用户手动打开：手动打开时连接成功不自动收回窗口
-    pub manual_window: Arc<AtomicBool>,
+    /// 手机连上后是否自动隐藏主窗口到托盘（用户设置项）
+    pub auto_hide: Arc<AtomicBool>,
 }
 
 impl ServerState {
@@ -200,6 +200,7 @@ impl ServerState {
         code: String,
         auto_paste: bool,
         auto_send: bool,
+        auto_hide: bool,
         config: Config,
     ) -> Self {
         // 扫码默认就是临时连接：勾选"绑为主力"必须是用户的主动行为
@@ -218,7 +219,7 @@ impl ServerState {
             disconnect_item: Arc::new(Mutex::new(None)),
             auto_paste: Arc::new(AtomicBool::new(auto_paste)),
             auto_send: Arc::new(AtomicBool::new(auto_send)),
-            manual_window: Arc::new(AtomicBool::new(false)),
+            auto_hide: Arc::new(AtomicBool::new(auto_hide)),
         }
     }
 
@@ -761,30 +762,29 @@ impl ServerState {
     }
 }
 
-/// 配对成功后的窗口收回：
+/// 配对成功后的窗口收回（受设置项「连接后自动隐藏窗口」控制，默认开启）：
 /// 先通知前端立刻渲染绿色"已连接"页，停留约 0.9 秒作为确认，再自动隐藏到托盘，
 /// 用户无需手动点叉。断线自动重连成功时同样触发（窗口本就隐藏时 hide 为空操作）。
 ///
-/// 例外：窗口是用户从托盘手动打开的"控制台"时不收回——不能打断用户正在
-/// 进行的管理操作（窗口隐藏瞬间会再次检查标志，点叉关闭后标志已被重置）。
+/// 关掉该设置后窗口一直留在桌面（便于盯着状态、管理设备）。
 fn auto_hide_after_pairing(app: &AppHandle) {
     let state = app.state::<Arc<Mutex<ServerState>>>();
     let server = state.lock().unwrap();
     let _ = app.emit("pairing-show", ());
-    if server.manual_window.load(Ordering::Relaxed) {
+    if !server.auto_hide.load(Ordering::Relaxed) {
         return;
     }
     let app = app.clone();
     thread::spawn(move || {
         thread::sleep(std::time::Duration::from_millis(900));
-        // 隐藏前再查一次：用户可能在 0.9s 内刚手动点开了窗口
+        // 隐藏前再查一次：用户可能在 0.9s 内把设置关掉了
         let state = app.state::<Arc<Mutex<ServerState>>>();
-        let manual = state
+        let enabled = state
             .lock()
             .unwrap()
-            .manual_window
+            .auto_hide
             .load(Ordering::Relaxed);
-        if !manual {
+        if enabled {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.hide();
             }
