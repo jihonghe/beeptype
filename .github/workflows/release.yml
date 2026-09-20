@@ -157,15 +157,32 @@ jobs:
     needs: [android, desktop]
     runs-on: ubuntu-latest
     steps:
+      # 需要仓库内容来读手写发布说明（下载产物不含仓库文件）
+      - uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
+
+      # 手写发布说明优先：docs/releases/<tag>.md 存在就用它替换自动生成的变更列表；
+      # 不存在则回退到 GitHub 自动生成（行为与过去一致）
+      - name: Pick release notes
+        id: notes
+        run: |
+          FILE="docs/releases/${GITHUB_REF_NAME}.md"
+          if [ -f "$FILE" ]; then
+            echo "使用手写发布说明：$FILE"
+            echo "path=$FILE" >> "$GITHUB_OUTPUT"
+          else
+            echo "无手写发布说明，回退到自动生成"
+          fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: BeeType ${{ github.ref_name }}
-          generate_release_notes: true
+          body_path: ${{ steps.notes.outputs.path }}
+          generate_release_notes: ${{ steps.notes.outputs.path == '' }}
           draft: ${{ github.event_name == 'workflow_dispatch' }}
           files: |
             android-apk/app-release.apk
