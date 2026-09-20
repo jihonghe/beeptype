@@ -35,6 +35,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   late FocusNode _focusNode;
   late StreamSubscription<ConnectionStatus> _statusSub;
   late StreamSubscription<String> _sessionEndedSub;
+  late StreamSubscription<void> _sessionUpdatedSub;
   Timer? _debounce;
   Timer? _reconnectTimer;
   ConnectionStatus _status = ConnectionStatus.disconnected;
@@ -60,6 +61,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _statusSub = widget.sender.tcp.statusStream.listen(_onStatus);
     _sessionEndedSub =
         widget.sender.tcp.sessionEndedStream.listen(_onSessionEnded);
+    // 电脑端可能随时把本机设为主力（身份变化），刷新界面
+    _sessionUpdatedSub = widget.sender.sessionUpdated.listen((_) {
+      if (mounted) setState(() {});
+    });
 
     // 冷启动：有绑定电脑且不是"本进程已手动断开"状态时自动连接
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -72,6 +77,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _statusSub.cancel();
     _sessionEndedSub.cancel();
+    _sessionUpdatedSub.cancel();
     _debounce?.cancel();
     _reconnectTimer?.cancel();
     _inputController.dispose();

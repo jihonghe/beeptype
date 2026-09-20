@@ -271,7 +271,30 @@ fn set_auto_hide(
     info!("Auto-hide toggled: {value}");
 }
 
-/// 设置临时连接的续连窗口（分钟；0 = 关闭续连）。
+/// 把当前连接的临时手机设为主力（设置页「常用手机」按钮）。
+/// 只在"主力位空缺 + 当前是临时连接"时可用；失败原因会原样返回给界面。
+#[tauri::command]
+fn promote_session(state: tauri::State<'_, Arc<Mutex<AppServerState>>>) -> Result<(), String> {
+    let server = state.lock().unwrap();
+    server.promote_current_session()
+}
+
+/// 重启应用：装好新版本后一键切换（不必手动退出再打开）。
+/// 先确认新进程能起来，再退出自己；失败则返回错误、留在界面提示。
+#[tauri::command]
+fn restart_app(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<Mutex<AppServerState>>>,
+) -> Result<(), String> {
+    let server = state.lock().unwrap();
+    let exe = server.restart_self()?;
+    drop(server);
+    info!("Restarting app (relaunch of {exe} scheduled)");
+    app.exit(0);
+    Ok(())
+}
+
+/// 设置临时连接的续连窗口（分钟；0 = 关闭连）。
 /// 改完立即生效：窗口期在每次活动/续连时读取，已签发的凭证最长活到下一个刷新点。
 #[tauri::command]
 fn set_resume_ttl(
@@ -361,6 +384,10 @@ pub fn run() {
                 }
             }
 
+            // 捕获本进程的可执行文件路径（重启功能要用；启动时装到内存，
+            // 之后即使安装包被覆盖、路径变成 "(deleted)" 也不受影响）
+            let exe_path = std::env::current_exe().ok();
+
             // 创建服务端状态
             let paste_supported = paste::auto_paste_supported();
             let send_supported = paste::auto_send_supported();
@@ -377,6 +404,7 @@ pub fn run() {
                 auto_hide_config,
                 config,
             );
+            *server_state.exe_path.lock().unwrap() = exe_path;
             let shared_state = Arc::new(Mutex::new(server_state.clone()));
 
             app.manage(shared_state.clone());
@@ -464,6 +492,8 @@ pub fn run() {
             set_auto_hide,
             set_resume_ttl,
             set_autostart,
+            promote_session,
+            restart_app,
             set_window_height
         ])
         .run(tauri::generate_context!())

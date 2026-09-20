@@ -117,6 +117,23 @@ pub enum Message {
     #[serde(rename = "session_ended")]
     SessionEnded { reason: String },
 
+    /// PC → 手机：把这台手机设为主力（设置页「常用手机」里点"设为主力手机"）。
+    /// token 为长期凭证，明文仅此一次；手机端应像扫码绑定那样落盘，并回 promoted_ack。
+    #[serde(rename = "promoted")]
+    Promoted {
+        token: String,
+        device_id: String,
+        device_name: String,
+        #[serde(default)]
+        device_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capabilities: Option<Capabilities>,
+    },
+
+    /// 手机 → PC：已保存主力凭证
+    #[serde(rename = "promoted_ack")]
+    PromotedAck,
+
     /// PC → 手机端：主力已解绑，当前连接降级为临时（会话保持，不断开）。
     /// 手机端收到后应删除本地凭证、把当前会话标记为临时，并保存随之补发的续连凭证
     /// （否则"降级来的临时会话"就享受不到断线续连，与扫码临时连接不一致）。
@@ -181,6 +198,22 @@ impl Message {
             client_id: client_id.to_string(),
             device_name: device_name.to_string(),
             hardware_id: None,
+        }
+    }
+
+    /// 构造"转正为主力"的推送（长期凭证明文仅此一次）
+    pub fn promoted(
+        token: &str,
+        device_id: &str,
+        device_name: &str,
+        caps: Capabilities,
+    ) -> Self {
+        Message::Promoted {
+            token: token.to_string(),
+            device_id: device_id.to_string(),
+            device_name: device_name.to_string(),
+            device_type: "pc".to_string(),
+            capabilities: Some(caps),
         }
     }
 
@@ -368,6 +401,13 @@ mod tests {
             },
             Message::session_downgraded(Some(("resume-token".to_string(), 300))),
             Message::session_downgraded(None),
+            Message::promoted(
+                "primary-token",
+                "dev-1",
+                "hejiong-PC",
+                Capabilities { auto_paste: true },
+            ),
+            Message::PromotedAck,
         ] {
             let encoded = msg.encode().unwrap();
             let decoded = Message::decode_line(&encoded).unwrap();

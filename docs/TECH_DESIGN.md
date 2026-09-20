@@ -166,6 +166,8 @@ pub struct ActiveSession {
 
 `KICK_TAKEOVER = 1`（主力接管）、`KICK_DISCONNECT = 2`（托盘/窗口断开）、`KICK_REPLACED = 4`（同主力僵尸连接被替换），映射为 `session_ended.reason` 的 `owner_takeover` / `owner_disconnect` / `replaced`。
 
+**写入统一走一把锁**（`SharedWriter = Arc<Mutex<TcpStream>>`）：连接线程的回复与**命令线程的推送**（例如"设为主力手机"要从设置页往活动连接里推凭证）共用同一个句柄，避免两条线程各持 socket 克隆并发写、把一条 JSON 行写交错。踢人用的 `wake` 仍是独立克隆（只做 `shutdown(Read)`）。
+
 踢人不靠等对端心跳：`kick_session()` 置标志后立即 `shutdown(Shutdown::Read)`，让阻塞在 `read_line` 的连接线程马上醒来自行发 `session_ended` 并退出，延迟从最长 5s 降到毫秒级。
 
 #### 连接生命周期
@@ -321,7 +323,7 @@ PC 端处理规则：
 - QR 内容格式 `beetype://<ip>:<port>?code=<code>`，由 `qrcode` 渲染成 SVG 内联返回，无需前端构建链。
 - TCP 绑定 `0.0.0.0:<port>`；`lan_ip()` 仅是取默认路由网卡的 IPv4（`UdpSocket::connect` 只做路由选择，**不发包**）用于生成二维码里的地址。
 
-Tauri commands（10 个）：
+Tauri commands（12 个）：
 
 | command | 作用 |
 |---|---|
@@ -332,6 +334,8 @@ Tauri commands（10 个）：
 | `set_auto_send` | 存用户意愿；运行态存「意愿 && auto_paste 生效 && 平台支持」 |
 | `set_auto_hide` | 「连接后自动隐藏窗口」开关（纯 PC 端行为，无平台能力判断） |
 | `set_resume_ttl` | 临时连接续连窗口（分钟，0=关闭）；改完立即生效（窗口期在每次活动时读取） |
+| `promote_session` | 把当前在线的**临时**手机设为主力（仅主力位空缺时；凭证推送失败会回滚绑定） |
+| `restart_app` | 重启应用（见下） |
 | `set_autostart` | 操作系统自启项 + 持久化 |
 | `set_remember_next` | 「记住这台手机」勾选（仅对下一次码配对生效） |
 | `disconnect_session` | 托盘/窗口断开当前手机 |
@@ -343,7 +347,17 @@ Tauri commands（10 个）：
 - 主页与设置页**绝对定位叠放**，切换只改 `opacity`/`visibility`（交叉淡化），元素几何全程不变——规避 WebKitGTK 层重建导致的标题闪烁。
 - 窗口高度在启动时用离屏克隆渲染「等待态」量出真实高度（两种勾选文案取高者）后固定，之后不再随状态跳变：主页内容裁切、设置页内部滚动。
 - 渲染做了结构键缓存（`lastStatusKey`/`lastPairKey`），避免 1s 轮询全量重绘导致 hover/勾选态丢失；只有「无连接 → 有连接」这类跨状态切换才播入场动画。
-- 设置页每次进入都拉一次 `get_settings`；通用区四项开关（自动粘贴 / 粘贴后自动发送 / 连接后自动隐藏窗口 / 开机自启）+ 一个下拉（**临时连接断线后自动续连**：关闭 / 5 分钟（默认）/ 30 分钟 / 2 小时）。「记住这台手机」勾选框仅在主力位空缺时出现，默认不勾（扫码默认即临时连接）。
+**重启应用**（`restart_app`）：用于"装好新版本后一键切换"。两个要点：
+
+1. **必须延迟启动**：单实例插件在检测到已有实例时会直接 `exit(0)`。若新旧进程重叠，新进程会自杀、旧进程也在退出——应用凭空消失。因此先起一个"等 1 秒再 exec"的启动器（unix：`sh -c 'sleep 1; exec "$0"' <exe>`，Windows 经环境变量交给 `cmd`），**确认 spawn 成功后才退出自己**；失败则返回错误、留在界面提示。
+2. **路径在启动时捕获**（`exe_path`，setup 里写入）：装新版本后 `/proc/self/exe` 会变成 "… (deleted)"，运行时再取就找不到可执行文件；启动时捕获则正好指向**新装**的那个二进制。
+
+- 设置页每次进入都拉一次 `get_settings`；分区顺序是**定死的规则**：**粘贴与发送 → 连接行为 → 启动 → 常用手机 → 关于**。新增设置项按这条线归位，不要再"就近插入"——之前"临时连接断线后自动续连"被插到开机自启前面，就是随手追加造成的排序漂移（用户反馈过）。
+  - 粘贴与发送：接收后自动粘贴 / 粘贴后自动发送
+  - 连接行为：连接后自动隐藏窗口 / 临时连接断线后自动续连
+  - 启动：开机自动启动
+  - 常用手机：主力机卡片（解绑）／**临时手机一键转正**／空态引导
+  - 关于：版本 / **重启应用**「记住这台手机」勾选框仅在主力位空缺时出现，默认不勾（扫码默认即临时连接）。
 
 ---
 
@@ -402,7 +416,9 @@ TCP 长连接，UTF-8，每条消息一行 JSON 以 `\n` 结尾，单行上限 2
 | `{"type":"takeover"}` / `{"type":"takeover_ack","ok":bool}` | 手机 → PC → 手机 | 主力接管被占用的席位 |
 | `{"type":"bye"}` / `{"type":"bye_ack"}` | 手机 → PC → 手机 | 优雅断开，PC 随即释放席位 |
 | `{"type":"session_ended","reason":"..."}` | PC → 手机 | 被踢前通知；`owner_takeover` / `owner_disconnect` / `replaced` |
-| `{"type":"session_downgraded"}` | PC → 手机 | 主力被解绑，当前会话降级为临时（连接保持） |
+| `{"type":"session_downgraded"}` | PC → 手机 | 主力被解绑，当前会话降级为临时（连接保持）；可携带补发的续连凭证 |
+| `{"type":"promoted","token":"…","device_id":"…","device_name":"…","device_type":"pc","capabilities":{…}}` | PC → 手机 | 在设置页把这台临时手机设为主力：长期凭证明文仅此一次下发 |
+| `{"type":"promoted_ack"}` | 手机 → PC | 已保存主力凭证（PC 只记日志） |
 
 ### 3.3 容错与兼容
 
@@ -524,6 +540,8 @@ app/lib/
         勾选「记住」且主力位空缺 → 生成 token，明文随 hello_ack 下发一次
         主力位已有主人 → 临时会话：PC 不落盘，但签发短期续连凭证（窗口期内可免扫码续连）
 重连：hello{token} → SHA-256 比对命中 → 免码接入
+转正：在设置页把在线的临时手机设为主力 → PC 生成 token 并推送 promoted
+        （写入主力记录前先确认推送成功，失败回滚）→ 手机落盘为常用电脑
 解绑：config.primary 清空 → 在线主力会话降级为临时（session_downgraded，不断开）→ 旧 token 立即失效
 ```
 
@@ -588,7 +606,7 @@ log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
 
 ## 8. 测试与验证
 
-**Rust 测试（31 个，`cargo test`）**
+**Rust 测试（34 个，`cargo test`）**
 
 | 文件 | 覆盖 |
 |---|---|
@@ -599,6 +617,7 @@ log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
 | `paste.rs` | 回车余量的边界（基准值、按长度递增、上限、整体 <1s） |
 | `winicon.rs` | 图标数据格式（`[宽, 高, ARGB...]` 长度自洽、含不透明像素） |
 | 续连相关 | 续连凭证校验（哈希/client_id/过期三者缺一不可）、窗口边界、协议往返（含 `resume` / `resume_expires_in`）、`resume_ttl_min` 默认值与旧配置缺省 |
+| 转正相关 | 转正的端到端集成测试（推送凭证 → 用该 token 换到 primary 席位）、无连接时拒绝、重启命令的形状（延迟启动 + 路径作为参数传入） |
 
 **集成测试（4 个，`server::integration_tests`）**：用**真实 TCP 连接**扮演手机，驱动完整的握手/席位/凭证状态机——能挡住的正是"某条路径忘了做某事"这类单测覆盖不到的漏洞。
 

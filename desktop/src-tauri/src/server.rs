@@ -3,7 +3,9 @@ use crate::protocol::{Capabilities, now_ms, Message, MAX_LINE_BYTES};
 use log::{info, warn};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+use std::process::Command;
 use std::net::{IpAddr, Shutdown, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -53,6 +55,37 @@ pub struct ActiveSession {
     /// 连接 socket 的克隆：踢人时 shutdown(Read) 唤醒阻塞中的 read_line，
     /// 让 session_ended 与席位释放立刻完成，而不用等对端下一条心跳（最长 5s）
     pub wake: Mutex<Option<TcpStream>>,
+    /// 本连接的共享写句柄：转正要从命令线程往连接里推消息（见 SharedWriter）
+    pub writer: Option<SharedWriter>,
+    /// 该手机上报的硬件指纹（转正时写入主力记录，保住"重装后仍认得出"）
+    pub hardware_id: Option<String>,
+    /// 对端 IP（写进主力记录的 last_ip，仅供参考）
+    pub ip: String,
+}
+
+impl ActiveSession {
+    /// 建一个新席位，并把它的 kick/downgrade 标志交回调用方（供 `ctx.admit` 绑定）
+    fn new(
+        client_id: String,
+        name: String,
+        is_primary: bool,
+        ctx: &ConnCtx,
+    ) -> (Self, Arc<AtomicU8>, Arc<AtomicBool>) {
+        let kick = Arc::new(AtomicU8::new(0));
+        let downgrade = Arc::new(AtomicBool::new(false));
+        let session = Self {
+            client_id,
+            name,
+            is_primary,
+            kick: kick.clone(),
+            downgrade: downgrade.clone(),
+            wake: Mutex::new(clone_wake(&ctx.wake)),
+            writer: ctx.writer.clone(),
+            hardware_id: ctx.hardware_id.clone(),
+            ip: ctx.peer_ip.map(|ip| ip.to_string()).unwrap_or_default(),
+        };
+        (session, kick, downgrade)
+    }
 }
 
 /// 置踢出标志并唤醒连接线程
@@ -66,24 +99,37 @@ fn kick_session(a: &ActiveSession, reason: u8) {
 }
 
 /// 给席位持有者发 session_ended 并记录日志
-fn send_session_ended(writer: &mut TcpStream, name: &str, reason: u8) {
+/// 统一的发送入口：所有写入（连接线程的回复 + 命令线程的推送）都走这把锁，
+/// 避免两条线程各持一个 socket 克隆并发写、把一条 JSON 行写交错。
+type SharedWriter = Arc<Mutex<TcpStream>>;
+
+/// 通过共享写句柄发一条消息；返回是否成功发出（失败通常意味着连接已断）
+fn send(writer: &SharedWriter, msg: &Message) -> bool {
+    let Ok(encoded) = msg.encode() else {
+        return false;
+    };
+    let Ok(mut w) = writer.lock() else {
+        return false;
+    };
+    if w.write_all(encoded.as_bytes()).is_err() {
+        return false;
+    }
+    let _ = w.flush();
+    true
+}
+
+fn send_session_ended(writer: &SharedWriter, name: &str, reason: u8) {
     let ended = Message::SessionEnded {
         reason: kick_reason(reason).to_string(),
     };
-    if let Ok(encoded) = ended.encode() {
-        let _ = writer.write_all(encoded.as_bytes());
-        let _ = writer.flush();
-    }
+    let _ = send(writer, &ended);
     warn!("Session ended for {} ({})", name, kick_reason(reason));
 }
 
 /// 通知席位持有者：主力已解绑，连接降级为临时（会话保持）
-fn send_session_downgraded(writer: &mut TcpStream, name: &str, resume: Option<(String, u64)>) {
+fn send_session_downgraded(writer: &SharedWriter, name: &str, resume: Option<(String, u64)>) {
     let with_resume = resume.is_some();
-    if let Ok(encoded) = Message::session_downgraded(resume).encode() {
-        let _ = writer.write_all(encoded.as_bytes());
-        let _ = writer.flush();
-    }
+    let _ = send(writer, &Message::session_downgraded(resume));
     info!(
         "Session downgraded to transient for {} (resume credential issued: {})",
         name, with_resume
@@ -112,6 +158,12 @@ struct ConnCtx {
     last_active: Instant,
     /// 收到 bye：回完 ack 即退出
     closing: bool,
+    /// 本连接的共享写句柄（连接线程与命令线程共用）
+    writer: Option<SharedWriter>,
+    /// 对端 IP（建席位时记进 ActiveSession）
+    peer_ip: Option<IpAddr>,
+    /// hello 里上报的硬件指纹
+    hardware_id: Option<String>,
 }
 
 impl Default for ConnCtx {
@@ -127,6 +179,9 @@ impl Default for ConnCtx {
             wake: None,
             last_active: Instant::now(),
             closing: false,
+            writer: None,
+            peer_ip: None,
+            hardware_id: None,
         }
     }
 }
@@ -227,6 +282,10 @@ pub struct ServerState<R: Runtime> {
     pub auto_hide: Arc<AtomicBool>,
     /// 临时会话的续连记录（仅内存，只留最近一条；窗口期 0 = 关闭续连）
     pub transient_resume: Arc<Mutex<Option<TransientResume>>>,
+    /// 本进程的可执行文件路径，**启动时捕获**（setup 里写入）。
+    /// 重启功能必须用它而不是运行时再取：装新版本后 /proc/self/exe 会变成
+    /// "… (deleted)"，那时再取就找不到可执行文件了。
+    pub exe_path: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl<R: Runtime> Clone for ServerState<R> {
@@ -247,6 +306,7 @@ impl<R: Runtime> Clone for ServerState<R> {
             auto_send: self.auto_send.clone(),
             auto_hide: self.auto_hide.clone(),
             transient_resume: self.transient_resume.clone(),
+            exe_path: self.exe_path.clone(),
         }
     }
 }
@@ -282,6 +342,7 @@ impl<R: Runtime> ServerState<R> {
             auto_send: Arc::new(AtomicBool::new(auto_send)),
             auto_hide: Arc::new(AtomicBool::new(auto_hide)),
             transient_resume: Arc::new(Mutex::new(None)),
+            exe_path: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -571,6 +632,11 @@ impl<R: Runtime> ServerState<R> {
                 Some(Message::Pong)
             }
 
+            Message::PromotedAck => {
+                info!("Phone confirmed primary credentials: {}", ctx.name);
+                None
+            }
+
             Message::Takeover => self.handle_takeover(ctx),
 
             Message::Bye => {
@@ -620,6 +686,9 @@ impl<R: Runtime> ServerState<R> {
             ));
         }
 
+        // 记下硬件指纹：转正为主力时写进记录（"重装后仍认得出"靠它）
+        ctx.hardware_id = hardware_id.clone();
+
         let caps = Capabilities {
             auto_paste: self.auto_paste.load(Ordering::Relaxed),
         };
@@ -646,16 +715,9 @@ impl<R: Runtime> ServerState<R> {
                 // 席位被占（例如主力正在用）：按既有规则拒绝，连接不保持
                 return Some(Message::hello_ack_err("occupied", "电脑使用中"));
             }
-            let kick = Arc::new(AtomicU8::new(0));
-            let downgrade = Arc::new(AtomicBool::new(false));
-            *session = Some(ActiveSession {
-                client_id: client_id.clone(),
-                name: name.clone(),
-                is_primary: false,
-                kick: kick.clone(),
-                downgrade: downgrade.clone(),
-                wake: Mutex::new(clone_wake(&ctx.wake)),
-            });
+            let (seat, kick, downgrade) =
+                ActiveSession::new(client_id.clone(), name.clone(), false, ctx);
+            *session = Some(seat);
             drop(session);
 
             ctx.admit(client_id, name.clone(), false, kick, downgrade);
@@ -695,16 +757,13 @@ impl<R: Runtime> ServerState<R> {
             let mut session = self.session.lock().unwrap();
             match arbitrate_primary(session.as_ref(), &client_id) {
                 PrimaryArbitration::Admit => {
-                    let kick = Arc::new(AtomicU8::new(0));
-                    let downgrade = Arc::new(AtomicBool::new(false));
-                    *session = Some(ActiveSession {
-                        client_id: client_id.clone(),
-                        name: device_name.clone(),
-                        is_primary: true,
-                        kick: kick.clone(),
-                        downgrade: downgrade.clone(),
-                        wake: Mutex::new(clone_wake(&ctx.wake)),
-                    });
+                    let (seat, kick, downgrade) = ActiveSession::new(
+                        client_id.clone(),
+                        device_name.clone(),
+                        true,
+                        ctx,
+                    );
+                    *session = Some(seat);
                     drop(session);
                     ctx.admit(client_id, device_name, true, kick, downgrade);
                     self.publish_state();
@@ -724,16 +783,13 @@ impl<R: Runtime> ServerState<R> {
                     if let Some(old) = session.as_ref() {
                         kick_session(old, KICK_REPLACED);
                     }
-                    let kick = Arc::new(AtomicU8::new(0));
-                    let downgrade = Arc::new(AtomicBool::new(false));
-                    *session = Some(ActiveSession {
-                        client_id: client_id.clone(),
-                        name: device_name.clone(),
-                        is_primary: true,
-                        kick: kick.clone(),
-                        downgrade: downgrade.clone(),
-                        wake: Mutex::new(clone_wake(&ctx.wake)),
-                    });
+                    let (seat, kick, downgrade) = ActiveSession::new(
+                        client_id.clone(),
+                        device_name.clone(),
+                        true,
+                        ctx,
+                    );
+                    *session = Some(seat);
                     drop(session);
                     ctx.admit(client_id, device_name, true, kick, downgrade);
                     self.publish_state();
@@ -830,16 +886,9 @@ impl<R: Runtime> ServerState<R> {
             };
 
             let (device_id, pc_name) = self.device_identity();
-            let kick = Arc::new(AtomicU8::new(0));
-            let downgrade = Arc::new(AtomicBool::new(false));
-            *session = Some(ActiveSession {
-                client_id: client_id.clone(),
-                name: device_name.clone(),
-                is_primary,
-                kick: kick.clone(),
-                downgrade: downgrade.clone(),
-                wake: Mutex::new(clone_wake(&ctx.wake)),
-            });
+            let (seat, kick, downgrade) =
+                ActiveSession::new(client_id.clone(), device_name.clone(), is_primary, ctx);
+            *session = Some(seat);
             drop(session);
 
             ctx.admit(client_id, device_name, is_primary, kick, downgrade);
@@ -870,6 +919,81 @@ impl<R: Runtime> ServerState<R> {
         }
     }
 
+    /// 把当前在线席位上的**临时**手机设为主力（设置页「常用手机」的按钮）。
+    ///
+    /// 只在"主力位空缺 + 当前席位是临时身份"时允许。凭证由 PC 生成后推给手机，
+    /// 手机落盘即成为常用手机——效果等价于扫码时勾选"记住这台手机"。
+    /// 推送失败会回滚绑定，避免"PC 以为绑了、手机没凭据"的不一致。
+    pub fn promote_current_session(&self) -> Result<(), String> {
+        let (client_id, name, writer, hardware_id, ip) = {
+            let session = self.session.lock().unwrap();
+            let a = session.as_ref().ok_or("当前没有手机连接")?;
+            if a.is_primary {
+                return Err("当前连接已经是常用手机".to_string());
+            }
+            (
+                a.client_id.clone(),
+                a.name.clone(),
+                a.writer.clone(),
+                a.hardware_id.clone(),
+                a.ip.clone(),
+            )
+        };
+
+        let token = {
+            let mut config = self.config.lock().unwrap();
+            if config.has_primary() {
+                return Err("已经绑定了常用手机，请先解除绑定".to_string());
+            }
+            config.bind_primary(&client_id, &name, &ip, hardware_id.as_deref())
+        };
+
+        let (device_id, pc_name) = self.device_identity();
+        let caps = Capabilities {
+            auto_paste: self.auto_paste.load(Ordering::Relaxed),
+        };
+        let delivered = writer
+            .as_ref()
+            .is_some_and(|w| send(w, &Message::promoted(&token, &device_id, &pc_name, caps)));
+        if !delivered {
+            self.config.lock().unwrap().unbind_primary();
+            return Err("下发凭证失败，连接可能已断开".to_string());
+        }
+
+        // 席位身份升级为常用；临时续连记录作废（手机接下来用长期 token）
+        {
+            let mut session = self.session.lock().unwrap();
+            if let Some(a) = session.as_mut() {
+                if a.client_id == client_id {
+                    a.is_primary = true;
+                }
+            }
+        }
+        self.clear_transient_resume(&client_id);
+        self.publish_state();
+        info!("Session promoted to primary: {name} ({client_id})");
+        Ok(())
+    }
+
+    /// 重启应用：延迟启动一份新进程，然后退出当前进程。
+    ///
+    /// 为什么"延迟"：单实例插件在检测到已有实例时会直接 exit(0)。若新旧进程重叠，
+    /// 新进程会认为自己不该启动而自杀、旧进程同时也在退出 —— 应用凭空消失。
+    /// 因此先起一个"等 1 秒再 exec"的启动器，确认 spawn 成功后才退出自己。
+    ///
+    /// 路径来自启动时捕获的 exe_path，所以"先装新 deb、再点重启"会启动到**新装**的
+    /// 二进制（运行时读 /proc/self/exe 会拿到 "(deleted)" 路径而失败）。
+    pub fn restart_self(&self) -> Result<String, String> {
+        let exe = self
+            .exe_path
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| "无法确定程序路径".to_string())?;
+        spawn_relaunch(&exe)?;
+        Ok(exe.display().to_string())
+    }
+
     fn device_identity(&self) -> (String, String) {
         let config = self.config.lock().unwrap();
         (config.device_id.clone(), config.device_name.clone())
@@ -887,16 +1011,9 @@ impl<R: Runtime> ServerState<R> {
         if let Some(cur) = session.as_ref() {
             kick_session(cur, KICK_TAKEOVER);
         }
-        let kick = Arc::new(AtomicU8::new(0));
-        let downgrade = Arc::new(AtomicBool::new(false));
-        *session = Some(ActiveSession {
-            client_id: ctx.client_id.clone(),
-            name: ctx.name.clone(),
-            is_primary: true,
-            kick: kick.clone(),
-            downgrade: downgrade.clone(),
-            wake: Mutex::new(clone_wake(&ctx.wake)),
-        });
+        let (seat, kick, downgrade) =
+            ActiveSession::new(ctx.client_id.clone(), ctx.name.clone(), true, ctx);
+        *session = Some(seat);
         drop(session);
 
         ctx.waiting_takeover = false;
@@ -1088,7 +1205,9 @@ fn handle_connection<R: Runtime>(stream: TcpStream, state: ServerState<R>) {
     let mut reader = BufReader::new(stream.try_clone().expect("clone"));
     let mut ctx = ConnCtx::default();
     ctx.wake = stream.try_clone().ok();
-    let mut writer = stream;
+    ctx.peer_ip = Some(peer);
+    let writer: SharedWriter = Arc::new(Mutex::new(stream));
+    ctx.writer = Some(writer.clone());
 
     let mut line = String::new();
     let mut downgrade_sent = false;
@@ -1096,7 +1215,7 @@ fn handle_connection<R: Runtime>(stream: TcpStream, state: ServerState<R>) {
         // 被踢/被替换：发 session_ended 后退出（清理段靠 kick 指针比对不会误清新席位）
         let kicked = ctx.kick.load(Ordering::SeqCst);
         if kicked != 0 {
-            send_session_ended(&mut writer, &ctx.name, kicked);
+            send_session_ended(&writer, &ctx.name, kicked);
             break 'conn;
         }
 
@@ -1108,7 +1227,7 @@ fn handle_connection<R: Runtime>(stream: TcpStream, state: ServerState<R>) {
             // 降级后的身份就是"临时会话"，凭证待遇必须与扫码临时连接一致：
             // 补发续连凭证，否则这条会话被系统杀掉后就再也回不来（曾经漏了这一步）
             let grant = state.issue_transient_resume(&ctx.client_id, &ctx.name);
-            send_session_downgraded(&mut writer, &ctx.name, grant);
+            send_session_downgraded(&writer, &ctx.name, grant);
         }
 
         line.clear();
@@ -1117,7 +1236,7 @@ fn handle_connection<R: Runtime>(stream: TcpStream, state: ServerState<R>) {
                 // shutdown(Read) 唤醒的踢人路径也表现为 EOF：先查 kick 再下结论
                 let kicked = ctx.kick.load(Ordering::SeqCst);
                 if kicked != 0 {
-                    send_session_ended(&mut writer, &ctx.name, kicked);
+                    send_session_ended(&writer, &ctx.name, kicked);
                     break 'conn;
                 }
                 info!("Connection closed by {}", peer);
@@ -1134,14 +1253,8 @@ fn handle_connection<R: Runtime>(stream: TcpStream, state: ServerState<R>) {
                 }
 
                 if let Some(reply) = state.handle_message(trimmed, peer, &mut ctx) {
-                    match reply.encode() {
-                        Ok(encoded) => {
-                            if writer.write_all(encoded.as_bytes()).is_err() {
-                                break 'conn;
-                            }
-                            let _ = writer.flush();
-                        }
-                        Err(e) => warn!("Encode error: {}", e),
+                    if !send(&writer, &reply) {
+                        break 'conn;
                     }
                 }
                 if ctx.closing {
@@ -1179,6 +1292,63 @@ fn handle_connection<R: Runtime>(stream: TcpStream, state: ServerState<R>) {
     }
 }
 
+/// 重启前等待旧进程退出的秒数（给单实例锁释放留出余量）
+const RESTART_DELAY_SECS: u64 = 1;
+
+/// 构造"延迟重启"命令（程序名, 参数）。独立成函数是为了可单测：
+/// 路径必须作为参数传入，不能拼进脚本文本里（否则路径含引号/空格就会坏）。
+fn relaunch_command(exe: &Path) -> (String, Vec<std::ffi::OsString>) {
+    #[cfg(unix)]
+    {
+        (
+            "sh".to_string(),
+            vec![
+                "-c".into(),
+                format!("sleep {RESTART_DELAY_SECS}; exec \"$0\"").into(),
+                exe.as_os_str().to_owned(),
+            ],
+        )
+    }
+    #[cfg(windows)]
+    {
+        // Windows 没有 sh：路径通过环境变量交给 cmd，同样避免引号拼接
+        (
+            "cmd".to_string(),
+            vec![
+                "/C".into(),
+                format!(
+                    "timeout /t {RESTART_DELAY_SECS} /nobreak >nul & start \"\" \"%BEETYPE_RESTART_EXE%\""
+                )
+                .into(),
+            ],
+        )
+    }
+}
+
+/// 拉起延迟重启进程（失败返回错误，调用方据此决定是否还要退出自己）
+fn spawn_relaunch(exe: &Path) -> Result<(), String> {
+    let (program, args) = relaunch_command(exe);
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    cmd.env("BEETYPE_RESTART_EXE", exe);
+    #[cfg(unix)]
+    unsafe {
+        // 脱离当前会话，避免父进程（或终端）退出时把它一起带走
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| format!("启动新进程失败：{e}"))
+}
+
 /// 获取局域网 IP（优先 IPv4）
 pub fn lan_ip() -> Option<String> {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
@@ -1213,6 +1383,9 @@ mod tests {
             kick: kick.clone(),
             downgrade: Arc::new(AtomicBool::new(false)),
             wake: Mutex::new(None),
+            writer: None,
+            hardware_id: None,
+            ip: String::new(),
         };
         let transient_session = ActiveSession {
             client_id: "t1".to_string(),
@@ -1221,6 +1394,9 @@ mod tests {
             kick: Arc::new(AtomicU8::new(0)),
             downgrade: Arc::new(AtomicBool::new(false)),
             wake: Mutex::new(None),
+            writer: None,
+            hardware_id: None,
+            ip: String::new(),
         };
 
         // 空席：直接接入
@@ -1279,6 +1455,36 @@ mod tests {
         assert!(!record.verify("c", &token, now + std::time::Duration::from_secs(6)));
     }
 
+    /// 重启命令：必须"延迟启动"（等旧进程退出，否则新进程会被单实例锁挡掉而自杀），
+    /// 且可执行文件路径作为**独立参数**传入、不拼进脚本字符串（路径含空格/引号也安全）
+    #[test]
+    fn test_relaunch_command_shape() {
+        let exe = Path::new("/usr/bin/beetype");
+        let (program, args) = relaunch_command(exe);
+
+        #[cfg(unix)]
+        {
+            assert_eq!(program, "sh");
+            assert_eq!(args.len(), 3);
+            assert_eq!(args[0].to_string_lossy(), "-c");
+            let script = args[1].to_string_lossy();
+            assert!(script.starts_with("sleep "), "应先等旧进程退出再启动");
+            assert!(script.contains("$0"), "路径应通过参数传入");
+            assert!(
+                !script.contains("/usr/bin/beetype"),
+                "路径不能拼进脚本文本"
+            );
+            assert_eq!(args[2].to_string_lossy(), "/usr/bin/beetype");
+        }
+        #[cfg(windows)]
+        {
+            assert_eq!(program, "cmd");
+            let script = args.last().map(|a| a.to_string_lossy().into_owned()).unwrap_or_default();
+            assert!(script.contains("timeout /t"), "应先等旧进程退出再启动");
+            assert!(script.contains("%BEETYPE_RESTART_EXE%"), "路径应经环境变量传入");
+        }
+    }
+
     #[test]
     fn test_kick_reason_mapping() {
         assert_eq!(kick_reason(KICK_TAKEOVER), "owner_takeover");
@@ -1324,6 +1530,7 @@ mod integration_tests {
     fn test_state() -> (TestState, String) {
         let app = tauri::test::mock_app();
         let mut config = crate::config::Config::default();
+        config.device_name = "测试电脑".to_string();
         let code = config.regenerate_code();
         let state = ServerState::new(
             app.handle().clone(),
@@ -1461,6 +1668,59 @@ mod integration_tests {
         sock.write_all(b"{\"type\":\"ping\"}\n").expect("write ping");
         let ev = read_until(&mut reader, "session_downgraded");
         assert!(ev["resume_token"].is_null(), "关闭续连时不应签发凭证");
+    }
+
+    /// 转正：把在线的临时手机设为主力 → 手机收到带长期 token 的 promoted，
+    /// 该 token 之后能换到 primary 席位（等价于扫码时勾选"记住这台手机"）
+    #[test]
+    fn test_promote_transient_to_primary() {
+        let (state, code) = test_state();
+        let (mut sock, mut reader) = connect_as_phone(spawn_server(state.clone()));
+
+        send_hello(
+            &mut sock,
+            serde_json::json!({"type":"hello","code":code,"client_id":"cid-p","device_name":"临时手机"}),
+        );
+        let ack = read_until(&mut reader, "hello_ack");
+        assert_eq!(ack["session"], "transient");
+        assert!(!state.config.lock().unwrap().has_primary(), "转正前不应有主力");
+
+        // 主人点"设为主力手机"
+        state.promote_current_session().expect("转正应当成功");
+        assert!(state.config.lock().unwrap().has_primary(), "应写入主力记录");
+
+        let ev = read_until(&mut reader, "promoted");
+        let token = ev["token"].as_str().unwrap_or_default().to_string();
+        assert_eq!(token.len(), 64, "长期 token 应为 64 位 hex");
+        assert_eq!(ev["device_name"], "测试电脑");
+        sock.write_all(b"{\"type\":\"promoted_ack\"}\n").expect("ack");
+
+        // 再次转正应被拒（当前已是主力）
+        assert!(
+            state.promote_current_session().is_err(),
+            "已经是主力时不应重复转正"
+        );
+
+        // 手机端拿到 token 后重连 → 应直接进 primary 席位
+        drop(sock);
+        drop(reader);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let (mut sock2, mut reader2) = connect_as_phone(spawn_server(state.clone()));
+        send_hello(
+            &mut sock2,
+            serde_json::json!({"type":"hello","token":token,
+                               "client_id":"cid-p","device_name":"临时手机"}),
+        );
+        let ack2 = read_until(&mut reader2, "hello_ack");
+        assert_eq!(ack2["ok"], true);
+        assert_eq!(ack2["session"], "primary", "转正后凭 token 应拿到主力席位");
+    }
+
+    /// 没有连接时转正应报错（界面据此提示）
+    #[test]
+    fn test_promote_requires_live_session() {
+        let (state, _code) = test_state();
+        assert!(state.promote_current_session().is_err());
     }
 
     /// 陌生/伪造的续连凭证必须被拒，且不会让连接进入席位

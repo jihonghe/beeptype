@@ -66,10 +66,52 @@ class TextSender {
     // 被降级为临时连接时，PC 会补发续连凭证：立刻落盘，
     // 这样"降级来的临时会话"和扫码临时连接一样能断线续连
     _downgradeSub = _tcp.downgradeGrantStream.listen(_onDowngradeGrant);
+    _promotedSub = _tcp.promotedStream.listen(_onPromoted);
     _initialized = true;
   }
 
   StreamSubscription<ResumeGrant>? _downgradeSub;
+  StreamSubscription<PromotedGrant>? _promotedSub;
+
+  /// 会话身份发生变化（例如被电脑设为主力）时通知界面刷新
+  final _sessionUpdatedController = StreamController<void>.broadcast();
+  Stream<void> get sessionUpdated => _sessionUpdatedController.stream;
+
+  /// PC 端在设置页把本机设为主力：落盘长期凭证 + 作废临时续连记录 + 刷新界面
+  Future<void> _onPromoted(PromotedGrant g) async {
+    final ip = _tcp.lastIp;
+    final port = _tcp.lastPort;
+    if (ip == null || port == null || g.token.isEmpty || g.deviceId.isEmpty) {
+      debugPrint('VL_TCP promoted 缺少端点信息，忽略');
+      return;
+    }
+    await _storage.upsertDevice(OutputDevice(
+      deviceId: g.deviceId,
+      name: g.deviceName.isEmpty ? ip : g.deviceName,
+      deviceType: g.deviceType,
+      ip: ip,
+      port: port,
+      token: g.token,
+      capabilities: g.capabilities,
+      lastConnectedMs: DateTime.now().millisecondsSinceEpoch,
+    ));
+    // 已是主力：临时续连记录不再需要
+    await _storage.clearTransientSession();
+    final s = session;
+    if (s != null) {
+      session = HelloOutcome(
+        ok: s.ok,
+        status: s.status,
+        session: 'primary',
+        deviceId: s.deviceId,
+        deviceName: s.deviceName,
+        deviceType: s.deviceType,
+        capabilities: s.capabilities,
+      );
+    }
+    _sessionUpdatedController.add(null);
+    debugPrint('VL_TCP 已被设为常用手机，凭证已落盘');
+  }
 
   void _onDowngradeGrant(ResumeGrant grant) {
     final ip = _tcp.lastIp;
@@ -397,6 +439,8 @@ class TextSender {
 
   void dispose() {
     _downgradeSub?.cancel();
+    _promotedSub?.cancel();
+    _sessionUpdatedController.close();
     _tcp.dispose();
   }
 }

@@ -253,6 +253,12 @@
         }
         .btn-danger-block:hover { background: #ef9a9a15; color: var(--danger); }
 
+        .btn-primary-block {
+            width: 100%; margin-top: 10px; padding: 8px;
+            color: var(--primary); border: 1px solid #4fc3f755;
+        }
+        .btn-primary-block:hover { background: #4fc3f715; color: var(--primary); }
+
         /* ---- 关于 ---- */
         .about-row {
             display: flex; align-items: center; justify-content: space-between;
@@ -300,7 +306,9 @@
             <span class="nav-title">设置</span>
         </header>
 
-        <p class="group-label">通用</p>
+        <!-- 分组规则（与 TECH_DESIGN 一致）：粘贴与发送 → 连接行为 → 启动 → 常用手机 → 关于。
+             新增设置项按这条线归位，不要再"就近插入"，否则排序会漂。 -->
+        <p class="group-label">粘贴与发送</p>
         <div class="card">
             <div class="setting-row">
                 <div class="setting-text">
@@ -322,6 +330,10 @@
                     <span class="track"></span>
                 </label>
             </div>
+        </div>
+
+        <p class="group-label">连接行为</p>
+        <div class="card">
             <div class="setting-row">
                 <div class="setting-text">
                     <div class="setting-title">连接后自动隐藏窗口</div>
@@ -344,6 +356,10 @@
                     <option value="120">2 小时</option>
                 </select>
             </div>
+        </div>
+
+        <p class="group-label">启动</p>
+        <div class="card">
             <div class="setting-row">
                 <div class="setting-text">
                     <div class="setting-title">开机自动启动</div>
@@ -364,6 +380,13 @@
             <div class="about-row">
                 <span>BeeType</span>
                 <span class="ver" id="app-version"></span>
+            </div>
+            <div class="setting-row">
+                <div class="setting-text">
+                    <div class="setting-title">重启应用</div>
+                    <div class="setting-sub" id="rs-note">装好新版本后点这里即可切换，不必手动退出再打开；会短暂断开手机连接</div>
+                </div>
+                <button id="btn-restart">重启</button>
             </div>
         </div>
     </div>
@@ -654,6 +677,24 @@
                 try { await invoke('set_autostart', { value: as.checked }); }
                 catch (e) { alert('设置失败：' + e); as.checked = !as.checked; }
             };
+            // 重启应用：装好新版本后一键切换（后端会延迟启动新进程再退出）
+            const btnRestart = document.getElementById('btn-restart');
+            const rsNote = document.getElementById('rs-note');
+            const RS_NOTE = '装好新版本后点这里即可切换，不必手动退出再打开；会短暂断开手机连接';
+            btnRestart.onclick = async () => {
+                btnRestart.disabled = true;
+                btnRestart.textContent = '重启中…';
+                rsNote.textContent = '正在重启，窗口会短暂消失后自动回来…';
+                try {
+                    await invoke('restart_app');
+                } catch (e) {
+                    alert('重启失败：' + e);
+                    btnRestart.disabled = false;
+                    btnRestart.textContent = '重启';
+                    rsNote.textContent = RS_NOTE;
+                }
+            };
+
             rt.onchange = async () => {
                 try {
                     await invoke('set_resume_ttl', { minutes: Number(rt.value) });
@@ -672,6 +713,11 @@
             document.getElementById('app-version').textContent = 'v' + escapeHtml(s.version || '');
 
             const dc = document.getElementById('device-card');
+            // 在线会话信息来自 get_pairing_info（1s 轮询同一份数据），
+            // 用来判断"主力位空缺且当前是临时连接"→ 可以一键转正
+            let pair = null;
+            try { pair = await invoke('get_pairing_info'); } catch (e) { /* 忽略 */ }
+            const canPromote = !!(pair && pair.connected && !pair.sessionIsPrimary);
             if (s.hasPrimary) {
                 dc.innerHTML =
                     '<div class="device-name">' + escapeHtml(s.primaryName || '已绑定的手机') + '</div>' +
@@ -689,10 +735,29 @@
                         e.target.textContent = '解除绑定';
                     }
                 };
+            } else if (canPromote) {
+                dc.innerHTML =
+                    '<div class="device-name">' + escapeHtml(pair.connectedName || '这台手机') + '</div>' +
+                    '<div class="setting-sub">当前是临时连接。设为主力后，这台手机将获得长期凭证，' +
+                    '以后打开 APP 自动连接。</div>' +
+                    '<button class="btn-primary-block" id="btn-promote">设为主力手机</button>';
+                document.getElementById('btn-promote').onclick = async (e) => {
+                    e.target.disabled = true;
+                    e.target.textContent = '设置中…';
+                    try {
+                        await invoke('promote_session');
+                        await Promise.all([renderSettings(), refresh()]);
+                    } catch (err) {
+                        console.error(err);
+                        alert('设置失败：' + err);
+                        e.target.disabled = false;
+                        e.target.textContent = '设为主力手机';
+                    }
+                };
             } else {
                 dc.innerHTML =
-                    '<div class="device-empty">还没有常用手机。在主页扫码连接时勾选「记住这台手机」，' +
-                    '以后打开手机 BeeType 即可自动连接。</div>';
+                    '<div class="device-empty">还没有常用手机。可以：在主页扫码连接时勾选「记住这台手机」；' +
+                    '或让手机先临时连接上，再回到这里点「设为主力手机」。</div>';
             }
         }
 

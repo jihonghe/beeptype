@@ -39,6 +39,22 @@ class AckResult {
   });
 }
 
+/// PC 端把本机"设为主力"时下发的长期凭证（明文仅此一次）
+class PromotedGrant {
+  final String token;
+  final String deviceId;
+  final String deviceName;
+  final String deviceType;
+  final Map<String, dynamic> capabilities;
+  PromotedGrant({
+    required this.token,
+    required this.deviceId,
+    required this.deviceName,
+    required this.deviceType,
+    required this.capabilities,
+  });
+}
+
 /// 降级为临时连接时，PC 补发的续连凭证
 class ResumeGrant {
   final String token;
@@ -125,6 +141,10 @@ class TcpService {
   final _downgradeGrantController = StreamController<ResumeGrant>.broadcast();
   Stream<ResumeGrant> get downgradeGrantStream =>
       _downgradeGrantController.stream;
+
+  /// PC 端在设置页把本机设为主力时的推送（手机据此落盘长期凭证）
+  final _promotedController = StreamController<PromotedGrant>.broadcast();
+  Stream<PromotedGrant> get promotedStream => _promotedController.stream;
 
   String? _lastIp;
   int? _lastPort;
@@ -415,6 +435,23 @@ class TcpService {
         _sessionEndedController.add(reason);
         break;
 
+      case 'promoted':
+        // PC 端把这台手机设为主力：落盘长期凭证（等同扫码勾选"记住这台手机"）
+        final pToken = d['token'] as String?;
+        final pDeviceId = d['device_id'] as String?;
+        if (pToken != null && pToken.isNotEmpty && pDeviceId != null) {
+          _promotedController.add(PromotedGrant(
+            token: pToken,
+            deviceId: pDeviceId,
+            deviceName: d['device_name'] as String? ?? '',
+            deviceType: d['device_type'] as String? ?? 'pc',
+            capabilities:
+                (d['capabilities'] as Map?)?.cast<String, dynamic>() ?? const {},
+          ));
+          _send(TcpMessage('promoted_ack', {}));
+        }
+        break;
+
       case 'session_downgraded':
         // PC 端解绑本机：连接降级为临时（会话保持，不断开），并可能补发续连凭证
         final grantToken = d['resume_token'] as String?;
@@ -494,6 +531,7 @@ class TcpService {
     _statusController.close();
     _sessionEndedController.close();
     _downgradeGrantController.close();
+    _promotedController.close();
   }
 }
 
