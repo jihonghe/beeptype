@@ -767,9 +767,19 @@ impl<R: Runtime> ServerState<R> {
             };
 
             let mut session = self.session.lock().unwrap();
-            if session.is_some() {
-                // 席位被占（例如常用设备正在用）：按既有规则拒绝，连接不保持
-                return Some(Message::hello_ack_err("occupied", "电脑使用中").with_device_id(&device_id));
+            if let Some(cur) = session.as_ref() {
+                if cur.client_id == client_id {
+                    // 席位被**同一台手机**的旧连接占着 = 它自己的僵尸连接。
+                    // 手机换网络时 socket 死在本地、发不出 FIN，电脑只能等 15 秒心跳超时，
+                    // 而手机往往几秒后就回来续连——若不在这里踢旧接新，就会回「占用中」，
+                    // 手机按规则把窗口作废、把人赶去重新扫码（用户实测踩到过）。
+                    // 与绑定手机的凭证分支判定一致（那边走 PrimaryArbitration::ReplaceSelf）。
+                    info!("Transient resume replaces stale connection for {client_id}");
+                    kick_session(cur, KICK_REPLACED);
+                } else {
+                    // 真被别的手机占着（例如常用设备正在用）：按既有规则拒绝，连接不保持
+                    return Some(Message::hello_ack_err("occupied", "电脑使用中").with_device_id(&device_id));
+                }
             }
             let (seat, kick, identity) =
                 ActiveSession::new(client_id.clone(), name.clone(), false, ctx);
@@ -1826,6 +1836,41 @@ mod integration_tests {
             !reported.is_empty() && reported == state.device_identity().0,
             "拒绝应答必须带上本机 device_id（手机要核对拒绝方是谁），实际 ack = {ack}"
         );
+    }
+
+    /// 临时连接"换网后又恢复"的续连：旧连接**不给电脑任何告别信号**（没 FIN、
+    /// 电脑还把它算在席位上），此时立刻续连也必须成功——电脑要把同一台手机的
+    /// 旧连接当僵尸踢掉，而不是回「占用中」（那会让手机把窗口作废、逼用户重扫）。
+    #[test]
+    fn test_transient_resume_replaces_own_stale_connection() {
+        let (state, code) = test_state();
+        let (mut first, mut first_reader) = connect_as_phone(spawn_server(state.clone()));
+        send_hello(
+            &mut first,
+            serde_json::json!({"type":"hello","code":code,"client_id":"cid-t","device_name":"临时手机"}),
+        );
+        let ack = read_until(&mut first_reader, "hello_ack");
+        assert_eq!(ack["session"], "transient");
+        let resume_token = ack["resume_token"]
+            .as_str()
+            .expect("临时连接应下发续连凭证")
+            .to_string();
+
+        // 关键：**不 drop 旧连接**（不给 FIN），模拟"手机换网、旧连接还挂在电脑上"
+        assert!(state.session.lock().unwrap().is_some(), "席位仍被旧连接占着");
+
+        let (mut second, mut second_reader) = connect_as_phone(spawn_server(state.clone()));
+        send_hello(
+            &mut second,
+            serde_json::json!({"type":"hello","resume":resume_token,
+                               "client_id":"cid-t","device_name":"临时手机"}),
+        );
+        let ack2 = read_until(&mut second_reader, "hello_ack");
+        assert_eq!(ack2["ok"], true, "同一台手机的僵尸连接应被踢旧接新");
+        assert_eq!(ack2["session"], "transient");
+
+        let ended = read_until(&mut first_reader, "session_ended");
+        assert_eq!(ended["reason"], "replaced", "旧连接应收到被替换的通知");
     }
 
     /// 心跳回报权威身份：常用设备 primary、解绑降级后 transient。

@@ -108,7 +108,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _retryDeadlineMs = null;
   }
 
-  /// 用户点「停止」：立刻停手、本进程不再自动重试；**记录不动**
+  /// 用户点「中断」：立刻停手、本进程不再自动重试；**记录不动**
   /// （临时连接的窗口照样有效，重启 APP 后也会自动再试）
   void _stopRetrying() {
     _reconnectTimer?.cancel();
@@ -642,11 +642,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           style: pillButtonStyle(null),
           child: const Text('连接'),
         ),
-      // 停止：重试中给的动作——不想等就立刻停手（不是"再连一次"）
+      // 中断：重试中给的动作——不想等就立刻停手（不是"再连一次"）
       PillAction.stop => TextButton(
           onPressed: _stopRetrying,
           style: pillButtonStyle(Colors.grey.shade600),
-          child: const Text('停止'),
+          child: const Text('中断'),
         ),
     };
 
