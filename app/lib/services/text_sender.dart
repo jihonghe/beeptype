@@ -492,11 +492,20 @@ class TextSender {
     String code,
   ) async {
     lastAuthMode = AuthMode.code;
-    await _tcp.disconnect();
-    try {
-      await _tcp.connect(ip, port);
-    } catch (_) {
-      return HelloOutcome.networkFail();
+    // 扫的是**当前已经连着的那台电脑**（同一个地址）时复用现有连接：
+    // 没必要为了配对先把好好的连接拆掉——那会让首页立刻进入自动重连，
+    // 甚至在你还在扫码页时就把键盘唤起来（用户实测反馈）。
+    // 换到别的电脑才需要断开（一台手机同时只连一台电脑）。
+    final sameEndpoint = _tcp.isConnected &&
+        _tcp.lastIp == ip &&
+        _tcp.lastPort == port;
+    if (!sameEndpoint) {
+      await _tcp.disconnect();
+      try {
+        await _tcp.connect(ip, port);
+      } catch (_) {
+        return HelloOutcome.networkFail();
+      }
     }
 
     final hid = await hardwareId;
@@ -564,7 +573,11 @@ class TextSender {
       final off = looksOffLan(uri.host, net);
       return (
         ok: false,
-        error: off ? '连接失败，请确认手机和电脑连着同一个 Wi-Fi' : '连接失败',
+        error: off
+            ? '连接失败，请确认手机和电脑连着同一个 Wi-Fi'
+            // 同一网络却连不上：多半扫到的是**旧地址**的码（电脑换过网），
+            // 让它去扫窗口上的最新码才是可执行的下一步
+            : '连接失败，请扫描电脑窗口上的最新二维码',
       );
     }
     return (ok: false, error: _describe(outcome));

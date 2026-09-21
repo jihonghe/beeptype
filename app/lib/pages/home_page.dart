@@ -76,6 +76,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 倒计时的每秒刷新器（一轮进行中且已开始重试时才跑）
   Timer? _countdownTimer;
 
+  /// 扫码页是否正在前台：那期间不做自动重连、也不唤起键盘
+  /// （否则扫另一台电脑时，首页会立刻去重连旧电脑，甚至把键盘盖到扫码页上）
+  bool _scanPageOpen = false;
+
   /// 是否正在探活（回到前台时先问一句"对面还在吗"）
   bool _probing = false;
 
@@ -298,7 +302,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         // 主动尝试中的连接失败由 _attemptConnect 收尾统一排程；
         // 这里只处理"**刚断开**"这个事件（状态真的发生跳变时）：
         // 已有的一轮在跑就不动它——否则每次尝试失败都会开新的一轮（历史事故）。
-        if (!_retry.active &&
+        if (!_scanPageOpen &&
+            !_retry.active &&
             prev != ConnectionStatus.disconnected &&
             !_connecting &&
             _canAutoConnect()) {
@@ -498,6 +503,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 未弹则以 350ms 间隔重试，最多 3 次；切回前台等窗口就绪的场景首次即成功。
   Future<void> _requestKeyboard() async {
     if (_status != ConnectionStatus.paired) return;
+    // 扫码页还在前台：别把键盘盖上去（配对成功会先把那个页面弹掉）
+    if (_scanPageOpen) return;
     for (var attempt = 0; attempt < 3; attempt++) {
       // 键盘已经在显示就不重复召唤，避免多余的收起/弹起闪动
       final views = WidgetsBinding.instance.platformDispatcher.views;
@@ -931,6 +938,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _attemptGen++;
     widget.sender.abortConnectAttempts();
     _connecting = false;
+    _scanPageOpen = true; // 扫码期间不做自动重连、不唤键盘
     setState(() {});
     // 先取好 Navigator，避免 await 之后再碰 context
     final navigator = Navigator.of(context);
@@ -938,6 +946,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     final result = await navigator.pushNamed('/scan');
     if (!mounted) return;
+    _scanPageOpen = false;
+    if (result != true && _canAutoConnect()) {
+      // 没配对成功就回来了：把之前那条连接找回来（扫别的电脑失败 / 中途返回）
+      _beginRetryEpisode();
+      unawaited(_attemptConnect());
+    }
     if (result == true) {
       // 配对成功：一切重试状态清零，并以 TCP 层的真实状态为准同步一次界面
       _endRetryEpisode();

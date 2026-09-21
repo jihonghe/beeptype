@@ -38,9 +38,12 @@ class DiscoveredDevice {
 /// 因此本服务收到的应答必然属于【持有该 token 的那台电脑】，无需再猜。
 class DiscoveryService {
   static const int _protocolVersion = 1;
-  static const int _rounds = 3;
-  static const Duration _roundInterval = Duration(milliseconds: 250);
-  static const Duration _listenAfter = Duration(milliseconds: 450);
+  /// 广播轮次与间隔：UDP 广播本身会丢包（AP 限速、省电、信道忙），
+  /// 于是改成"多而密"——5 轮 × 120ms + 收尾 400ms ≈ 1 秒，
+  /// 与"少而稀"相比总时长不变，但单次被全丢的概率大幅下降
+  static const int _rounds = 5;
+  static const Duration _roundInterval = Duration(milliseconds: 120);
+  static const Duration _listenAfter = Duration(milliseconds: 400);
 
   /// 发现持有 [token] 对应凭证的电脑。
   ///

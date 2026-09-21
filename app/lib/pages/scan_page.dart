@@ -4,6 +4,51 @@ import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import '../services/text_sender.dart';
 
+/// 扫描框里那条来回扫动的光带（微信扫一扫的观感）
+class _ScanLine extends StatefulWidget {
+  const _ScanLine();
+
+  @override
+  State<_ScanLine> createState() => _ScanLineState();
+}
+
+class _ScanLineState extends State<_ScanLine>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1800),
+  )..repeat(reverse: true);
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _c,
+      builder: (context, _) => Align(
+        alignment: Alignment(0, _c.value * 2 - 1),
+        child: Container(
+          height: 2,
+          margin: const EdgeInsets.symmetric(horizontal: 10),
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [
+                Color(0x004fc3f7),
+                Color(0xff4fc3f7),
+                Color(0x004fc3f7),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class ScanPage extends StatefulWidget {
   final TextSender sender;
 
@@ -18,15 +63,11 @@ class _ScanPageState extends State<ScanPage> {
   String _message = '扫描 PC 端显示的二维码';
   Color _messageColor = Colors.white;
 
-  /// 上一次配对失败（用于显示「重新扫描」入口与提示）
-  bool _failed = false;
-
-  /// 同一张二维码自动重试的次数：够 2 次就停下等新码——
-  /// 既避免取景框不挪开时反复请求，又让"把镜头移到新码上"能自动继续
-  int _sameCodeAttempts = 0;
-
   /// 失败提示的自动让位计时器：1.5 秒后重新武装扫描，不用手点按钮
   Timer? _rearmTimer;
+
+  /// 上一次失败后是否已经重新武装过（允许同一张码再试一次）
+  bool _rearmedOnce = false;
 
   /// 扫描器控制器：**必须常驻**。
   ///
@@ -51,19 +92,11 @@ class _ScanPageState extends State<ScanPage> {
   /// 所以不会出现"提示还挂着、其实什么都没发生"的误导。
   void _rearmScan() {
     setState(() {
-      _failed = false;
       _scanning = true;
+      _rearmedOnce = true;
       _message = '扫描 PC 端显示的二维码';
       _messageColor = Colors.white;
     });
-  }
-
-  /// 原地重扫（手动兜底）：清掉去重、复位提示，允许同一张码再试
-  void _retryScan() {
-    _rearmTimer?.cancel();
-    _lastAttemptedRaw = null;
-    _sameCodeAttempts = 0;
-    _rearmScan();
   }
 
   /// 上一次已发起配对的二维码原文。
@@ -88,15 +121,17 @@ class _ScanPageState extends State<ScanPage> {
           // 扫描器：常驻不拆装（拆一次就得重新初始化相机，失败后往往回不来）
           MobileScanner(controller: _controller, onDetect: _onDetect),
 
-          // 扫描框
+          // 扫描框 + 扫动光带
           Center(
             child: Container(
               width: 250,
               height: 250,
+              clipBehavior: Clip.antiAlias,
               decoration: BoxDecoration(
                 border: Border.all(color: Colors.white54, width: 2),
                 borderRadius: BorderRadius.circular(12),
               ),
+              child: const _ScanLine(),
             ),
           ),
 
@@ -113,13 +148,6 @@ class _ScanPageState extends State<ScanPage> {
                   textAlign: TextAlign.center,
                   style: TextStyle(color: _messageColor, fontSize: 16),
                 ),
-                if (_failed) ...[
-                  const SizedBox(height: 12),
-                  TextButton(
-                    onPressed: _retryScan,
-                    child: const Text('重新扫描'),
-                  ),
-                ],
               ],
             ),
           ),
@@ -145,15 +173,12 @@ class _ScanPageState extends State<ScanPage> {
       return;
     }
 
-    // 同一张二维码最多自动试 2 次（第 2 次失败后停下等新码）：
-    // 既避免取景框不挪开时反复请求，又让"把镜头移到新码上"能自动继续
-    if (raw == _lastAttemptedRaw) {
-      if (_sameCodeAttempts >= 2) return;
-    } else {
-      _lastAttemptedRaw = raw;
-      _sameCodeAttempts = 0;
-    }
-    _sameCodeAttempts++;
+    // 同一张码在"上一次尝试还没结束"时不重复发起（避免同一帧连发）：
+    // 失败后 1.5 秒会自动重新武装，届时同一张码也可以再试——扫码页不设次数上限
+    if (!_scanning) return;
+    if (raw == _lastAttemptedRaw && !_rearmedOnce) return;
+    _lastAttemptedRaw = raw;
+    _rearmedOnce = false;
     _rearmTimer?.cancel();
 
     setState(() {
@@ -175,12 +200,11 @@ class _ScanPageState extends State<ScanPage> {
           _message = result.error ?? '配对失败，请重试';
           _messageColor = Colors.red;
           _scanning = true;
-          _failed = true;
         });
-        // 1.5 秒后自动让位：提示收掉、扫描重新武装（仍可点「重新扫描」手动重来）
+        // 1.5 秒后自动让位：提示收掉、扫描重新武装（同一张码也可以再试，全程无需手动）
         _rearmTimer?.cancel();
         _rearmTimer = Timer(const Duration(milliseconds: 1500), () {
-          if (mounted && _failed) _rearmScan();
+          if (mounted) _rearmScan();
         });
       }
     } catch (e) {
@@ -188,7 +212,10 @@ class _ScanPageState extends State<ScanPage> {
         _message = '连接失败：$e';
         _messageColor = Colors.red;
         _scanning = true;
-        _failed = true;
+      });
+      _rearmTimer?.cancel();
+      _rearmTimer = Timer(const Duration(milliseconds: 1500), () {
+        if (mounted) _rearmScan();
       });
     }
   }
