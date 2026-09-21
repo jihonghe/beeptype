@@ -80,9 +80,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 否则它超时后会把刚配对好的界面按回"连接中"（用户实测过）
   int _attemptGen = 0;
 
-  /// 一轮重试还没开始（没有在跑的倒计时）——用于"首次尝试时起倒计时"
-  bool get _reconnectDeadlineMissing => _countdownTimer == null;
-
   /// 开始一轮快速重试的倒计时（首次尝试时调用）
   void _startRetryCountdown() {
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -356,9 +353,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     _reconnectTimer?.cancel();
 
-    // 只有移动数据（枚举不到任何局域网网卡）→ 停手，不做无意义的尝试
+    // 只有移动数据（枚举不到任何局域网网卡）→ 停手，不做无意义的尝试。
+    // 这里也把倒计时收掉：否则会残留一个"承诺还会试 30 秒"的假象（用户实测过）
     if (net != null && !net.hasLan) {
-      return; // 只有移动数据：本产品只在同一局域网下能工作，不做无意义的重试
+      _stopRetryCountdown();
+      return;
     }
     // 快速试满一轮就停手：慢速重试的价值极低，不如让用户当场点「连接」，
     // 或等下一次"用户回来了 / 环境变了"的触发
@@ -367,6 +366,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return;
     }
 
+    // 倒计时在"**第一次重试真的被排上**"时才起：这样它承诺的就是真实剩余的重试时间，
+    // 而不是"可能马上就不试了"（只有移动数据、试满等情况下不该出现倒计时）
+    if (_reconnectAttempt == 0) {
+      _startRetryCountdown();
+    }
     final delayMs = retryDelayMs(_reconnectAttempt);
     _reconnectAttempt++;
     _reconnectTimer =
@@ -386,9 +390,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final gen = ++_attemptGen; // 本次尝试的代号：中途去扫码就作废
     _connecting = true;
     _sessionEndedHandled = false;
-    if (_reconnectDeadlineMissing) {
-      _startRetryCountdown(); // 新的一轮：从整轮时长开始倒计
-    }
     HelloOutcome? outcome;
     try {
       // 上次已经判明"电脑那个地址不在我任何网段里"→ 跳过无意义的直连，只广播：
