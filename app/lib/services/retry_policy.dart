@@ -10,22 +10,29 @@
 /// 切回前台、网络变化、用户点「重新连接」、重新扫码。
 library;
 
-/// 快速重试的间隔序列（毫秒），累计约 30 秒、共 7 次尝试。
+/// 一轮快速重试的时长（毫秒，墙上时钟）——倒计时与它同一个基准。
 ///
 /// 为什么是 30 秒而不是更长：快速重试的目的是"帮用户省掉手动操作"，不是让用户干等——
 /// 超过半分钟还连不上，用户早就想自己点一下了（用户实测后定的）。
-const List<int> retryDelaysMs = [1000, 2000, 4000, 6000, 8000, 9000];
+const int retryEpisodeMs = 30000;
+
+/// 重试间隔：**等间隔 2 秒**。
+///
+/// 为什么不用指数退避：一轮的预算是固定的 30 秒，而每次尝试本身要花 1～4 秒
+/// （直连超时最多 2.5s + 广播约 1.1s）——退避的前段短等待被尝试耗时吃掉、
+/// 没起到作用，后段 8/9 秒的长等待则纯属白等。等间隔把预算铺匀：
+/// 期望恢复延迟从约 3.3 秒降到约 1 秒（电脑在 30 秒内随机时刻恢复时），
+/// 尝试次数还更多（约 6～9 次）。代价只是"电脑恰好 1 秒内恢复"这种最快情形晚约 1 秒。
+const int retryIntervalMs = 2000;
 
 /// 第 [attempt] 次（从 0 起）重试前的等待时长
-int retryDelayMs(int attempt) => attempt < retryDelaysMs.length
-    ? retryDelaysMs[attempt]
-    : retryDelaysMs.last;
+int retryDelayMs(int attempt) => retryIntervalMs;
 
-/// 还有没有下一次重试：试满 [retryDelaysMs] 这么多轮就停手
-bool retryAllowed(int attempt) => attempt < retryDelaysMs.length;
+/// 兜底上限：30 秒 ÷ 2 秒 = 最多 15 次尝试。
+/// 一轮真正的结束以 [retryRoundExpired]（墙上时钟）为准，这个只是保险丝。
+bool retryAllowed(int attempt) => attempt < retryEpisodeMs ~/ retryIntervalMs;
 
-/// 一轮快速重试的总时长（毫秒）——当前设计正好 30 秒，仅用于文档与测试断言
-int get retryEpisodeMs => retryDelaysMs.fold(0, (a, b) => a + b);
+
 
 /// 这次"对端关闭连接"该不该算在**电脑侧**（临时接入据此决定要不要丢记录）。
 ///
