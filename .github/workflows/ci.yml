@@ -32,6 +32,8 @@ jobs:
             librsvg2-dev \
             libxdo-dev
 
+      # 注意：缓存里的 target 带绝对路径（/home/runner/work/<仓库名>/…），
+      # 仓库改名或工作区路径变化后必须删一次 cargo 缓存，否则构建脚本会去找旧路径。
       - uses: actions/cache@v5
         with:
           path: |
