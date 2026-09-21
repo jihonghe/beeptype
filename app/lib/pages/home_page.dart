@@ -53,6 +53,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 直到切回前台 / 网络变化 / 用户点「重新连接」才会重新开始
   bool _retryStopped = false;
 
+  /// 这次断开是不是"对端关闭连接"造成的（电脑上退出了程序）——只影响文案
+  bool _peerClosed = false;
+
   /// 当前占用态是不是"扫码"撞上的：只有凭凭证回来的常用设备才配显示接管按钮
   bool _occupiedViaScan = false;
 
@@ -125,6 +128,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       unawaited(SystemChannels.textInput.invokeMethod<void>('TextInput.hide'));
     }
 
+    // 判活只在前后台做：后台/Doze 定时器被延迟，那种空档不能算"连接已死"
+    widget.sender.tcp.setForeground(state == AppLifecycleState.resumed);
+
     if (state == AppLifecycleState.resumed) {
       _onResumed();
     }
@@ -159,6 +165,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _onStatus(ConnectionStatus status) {
     if (!mounted) return;
+    if (status == ConnectionStatus.disconnected) {
+      // 读一次断开来源（重连会重置它）：区分"电脑端退出"与普通连不上
+      _peerClosed = widget.sender.tcp.lastDisconnectWasPeer;
+    }
     setState(() => _status = status);
 
     switch (status) {
@@ -492,12 +502,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           title = '未连接电脑';
         } else {
           title = knownName ?? '电脑';
-          final stopped = _retryStopped || widget.sender.manualDisconnected;
-          tag = stopped ? '已停止重试' : '连接失败，重试中…';
+          final manual = widget.sender.manualDisconnected;
+          tag = disconnectedTag(
+            manualDisconnected: manual,
+            retryStopped: _retryStopped,
+            peerClosed: _peerClosed,
+          );
           trailing = TextButton(
             onPressed: _manualConnect,
             style: pillButtonStyle(null),
-            child: Text(stopped ? '重新连接' : '立即重试'),
+            child: Text(manual || _retryStopped ? '重新连接' : '立即重试'),
           );
         }
     }

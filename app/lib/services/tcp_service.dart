@@ -130,6 +130,20 @@ class HelloOutcome {
       HelloOutcome(ok: false, status: 'network_fail');
 }
 
+/// 判活是否超时：前台、有基准时刻、且静默超过窗口 → 已死。
+///
+/// 抽成纯函数是为了能单测：这条判定错一个方向就是"健康连接被误断"或"假死连接一直绿灯"。
+bool livenessExpired({
+  required DateTime? lastInboundAt,
+  required DateTime now,
+  required bool foreground,
+  required Duration timeout,
+}) {
+  if (!foreground) return false; // 后台不判定（Doze 会延迟定时器，判了就是误伤）
+  if (lastInboundAt == null) return false;
+  return now.difference(lastInboundAt) > timeout;
+}
+
 /// TCP 连接
 class TcpService {
   Socket? _socket;
@@ -204,11 +218,18 @@ class TcpService {
       _lastPort = port;
 
       _isConnected = true;
+      _lastInboundAt = DateTime.now();
+      _peerClosed = false;
+      _localClose = false;
 
       _subscription = _socket!.listen(
         _onData,
         onError: (error) => _onError('Stream error: $error'),
-        onDone: () => _onDisconnected(),
+        onDone: () {
+          // 对端关闭（FIN）与本地主动关闭要分开：前者意味着"电脑上的程序退出了"
+          _peerClosed = !_localClose;
+          _onDisconnected();
+        },
       );
 
       // 吸收 IOSink.done 通道重复上报的写入错误
@@ -299,6 +320,7 @@ class TcpService {
   /// 主动告别：发 bye 等 bye_ack（兜底 1.5s），再关闭连接
   Future<void> bye() async {
     if (!_isConnected) return;
+    _localClose = true;
     final completer = Completer<void>();
     _byeCompleter = completer;
     _send(TcpMessage('bye', {}));
@@ -347,6 +369,7 @@ class TcpService {
 
   /// 硬断开（无 bye；异常清理用）
   Future<void> disconnect() async {
+    _localClose = true;
     await _teardown(announce: false);
     _isPaired = false;
     _statusController.add(ConnectionStatus.disconnected);
@@ -400,6 +423,7 @@ class TcpService {
   }
 
   void _onData(List<int> data) {
+    _lastInboundAt = DateTime.now(); // 任何服务端消息都算活着的证据
     _buffer.write(utf8.decode(data));
 
     final content = _buffer.toString();
@@ -528,10 +552,52 @@ class TcpService {
   /// 延迟时也有足够余量；恢复后首个 ping 立即探活。
   static const Duration _heartbeatInterval = Duration(seconds: 5);
 
+  /// 判活超时：心跳发出后这么久没收到**任何**服务端消息，就判定连接已死。
+  ///
+  /// 为什么必须有：对端只是断网（关 Wi-Fi、拔网线、路由器重启）时，TCP 不会报错
+  /// ——没有 FIN 也没有 RST，手机上这条连接看起来一切正常。旧实现的心跳是"只发不问"，
+  /// 于是界面一直显示"已连接"（绿灯），既不重连也感知不到，直到用户重开 APP。
+  static const Duration livenessTimeout = Duration(seconds: 15);
+
+  /// 最近一次收到服务端消息的时刻（判活基准）
+  DateTime? _lastInboundAt;
+
+  /// 是否在前台：只在前后台判定，且切回前台重置基准——后台/Doze 期间定时器被系统
+  /// 延迟，拿休眠前的时刻判定会把健康连接误判成已死
+  bool _foreground = true;
+
+  /// 这次断开是不是**对端关闭**造成的（收到 FIN/RST，典型：电脑上退出了程序）。
+  /// 只用于界面文案（"电脑端已退出" vs "连接失败"），不影响重试行为。
+  bool _peerClosed = false;
+
+  /// 本次连接是不是我们自己主动关的（主动断开/说再见）：用来把"对端关闭"区分出来
+  bool _localClose = false;
+
+  /// 最近一次断开是否由对端关闭造成
+  bool get lastDisconnectWasPeer => _peerClosed;
+
+  /// 前后台切换：切回前台时重置判活基准，避免拿休眠期间的空档误判
+  void setForeground(bool value) {
+    _foreground = value;
+    if (value) _lastInboundAt = DateTime.now();
+  }
+
   void _startHeartbeat() {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = Timer.periodic(_heartbeatInterval, (_) {
-      if (_isConnected) _send(TcpMessage('ping', {}));
+      if (!_isConnected) return;
+      // 先判活：连"任何"服务端消息都收不到这么久，说明连接已经假死
+      if (livenessExpired(
+        lastInboundAt: _lastInboundAt,
+        now: DateTime.now(),
+        foreground: _foreground,
+        timeout: livenessTimeout,
+      )) {
+        debugPrint('VL_TCP 判活超时（${livenessTimeout.inSeconds}s 无任何回应），判定连接已断');
+        _onError('liveness timeout');
+        return;
+      }
+      _send(TcpMessage('ping', {}));
     });
   }
 

@@ -23,3 +23,23 @@ bool retryAllowed(int attempt) => attempt < retryDelaysMs.length;
 
 /// 一轮快速重试的总时长（毫秒），仅用于文档与测试断言
 int get retryEpisodeMs => retryDelaysMs.fold(0, (a, b) => a + b);
+
+/// 断线后状态胶囊上那行状态词（纯逻辑，便于单测）。
+///
+/// 三种来源要分清楚，它们行为一致（都靠用户点「重新连接」或环境变化恢复），
+/// 但说法不同——曾经把"用户主动点断开"也写成「已停止重试」，那是错的：
+/// 主动断开本来就是"我不连了"，词应该是「重新连接」。
+///
+/// - [manualDisconnected]：用户自己点的断开（或电脑端托盘断开）→「重新连接」
+/// - [retryStopped]：自动重试试满一轮停手 →「已停止重试」
+/// - [peerClosed]：断开是**对端关闭连接**造成的（电脑上退出了程序）→「电脑端已退出」
+String disconnectedTag({
+  required bool manualDisconnected,
+  required bool retryStopped,
+  required bool peerClosed,
+  String retrying = '连接失败，重试中…',
+}) {
+  if (manualDisconnected) return '重新连接';
+  if (peerClosed) return retryStopped ? '电脑端已退出' : '电脑端已退出，重试中…';
+  return retryStopped ? '已停止重试' : retrying;
+}

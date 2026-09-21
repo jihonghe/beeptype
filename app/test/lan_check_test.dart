@@ -84,6 +84,113 @@ void main() {
     });
   });
 
+  group('判活超时（发现"假死"的连接）', () {
+    final now = DateTime(2026, 9, 21, 12, 0, 0);
+    const timeout = Duration(seconds: 15);
+
+    test('前台静默超过窗口 → 判定已断（对端断网时 TCP 不会报错，只能这样发现）', () {
+      expect(
+        livenessExpired(
+          lastInboundAt: now.subtract(const Duration(seconds: 16)),
+          now: now,
+          foreground: true,
+          timeout: timeout,
+        ),
+        isTrue,
+      );
+    });
+
+    test('窗口内还有回应 → 不算断', () {
+      expect(
+        livenessExpired(
+          lastInboundAt: now.subtract(const Duration(seconds: 14)),
+          now: now,
+          foreground: true,
+          timeout: timeout,
+        ),
+        isFalse,
+      );
+    });
+
+    test('后台不判定（Doze 会延迟定时器，判了就是误伤）', () {
+      expect(
+        livenessExpired(
+          lastInboundAt: now.subtract(const Duration(minutes: 10)),
+          now: now,
+          foreground: false,
+          timeout: timeout,
+        ),
+        isFalse,
+      );
+    });
+
+    test('还没有基准时刻（刚连上）→ 不判定', () {
+      expect(
+        livenessExpired(
+          lastInboundAt: null,
+          now: now,
+          foreground: true,
+          timeout: timeout,
+        ),
+        isFalse,
+      );
+    });
+  });
+
+  group('断线状态词（用户在 APP 上主动断开不该显示"已停止重试"）', () {
+    test('用户主动断开 → 重新连接', () {
+      expect(
+        disconnectedTag(
+          manualDisconnected: true,
+          retryStopped: true,
+          peerClosed: true,
+        ),
+        '重新连接',
+      );
+    });
+
+    test('自动重试试满 → 已停止重试', () {
+      expect(
+        disconnectedTag(
+          manualDisconnected: false,
+          retryStopped: true,
+          peerClosed: false,
+        ),
+        '已停止重试',
+      );
+    });
+
+    test('电脑端退出程序 → 电脑端已退出（重试中/已停止两种说法）', () {
+      expect(
+        disconnectedTag(
+          manualDisconnected: false,
+          retryStopped: false,
+          peerClosed: true,
+        ),
+        '电脑端已退出，重试中…',
+      );
+      expect(
+        disconnectedTag(
+          manualDisconnected: false,
+          retryStopped: true,
+          peerClosed: true,
+        ),
+        '电脑端已退出',
+      );
+    });
+
+    test('网络不通（对端没关闭连接）→ 连接失败，重试中…', () {
+      expect(
+        disconnectedTag(
+          manualDisconnected: false,
+          retryStopped: false,
+          peerClosed: false,
+        ),
+        '连接失败，重试中…',
+      );
+    });
+  });
+
   group('重试节奏（快速试一阵就停手）', () {
     test('一轮约 1 分钟就停：不再有"永远每 10 秒一次"', () {
       expect(retryEpisodeMs, greaterThan(60000));
