@@ -87,12 +87,15 @@ class TextSender {
     _promotedSub = _tcp.promotedStream.listen(_onPromoted);
     // 心跳里的权威信息：身份自愈 + 同步临时窗口（PC 是权威方）
     _identitySub = _tcp.heartbeatStream.listen(_onHeartbeat);
+    // 设置项「临时连接保活」改动：PC 当场同步——带 token 就落盘，不带就清掉
+    _keepaliveSub = _tcp.keepaliveStream.listen(_onKeepaliveUpdate);
     _initialized = true;
   }
 
   StreamSubscription<ResumeGrant>? _downgradeSub;
   StreamSubscription<PromotedGrant>? _promotedSub;
   StreamSubscription<HeartbeatInfo>? _identitySub;
+  StreamSubscription<KeepaliveUpdate>? _keepaliveSub;
 
   /// 上一次把窗口时长写回本地的时刻（节流：心跳 2 秒一次，不必每次都写盘）
   int? _lastTtlSyncMs;
@@ -100,6 +103,33 @@ class TextSender {
   /// 会话身份发生变化（例如被电脑设为常用设备）时通知界面刷新
   final _sessionUpdatedController = StreamController<void>.broadcast();
   Stream<void> get sessionUpdated => _sessionUpdatedController.stream;
+
+  /// 保活凭证的当场同步：设置项一改，PC 立刻把结果推过来。
+  /// 带 token → 落盘/续期；不带 → 清掉本地记录（保活被关了）。
+  void _onKeepaliveUpdate(KeepaliveUpdate u) {
+    final s = session;
+    if (s != null && s.ok && s.isPrimary) return; // 常用连接不需要保活记录
+    if (u.disabled) {
+      debugPrint('VL_TCP 保活被关闭：清掉本地续连记录');
+      unawaited(_storage.clearTransientSession().then((_) {
+        _sessionUpdatedController.add(null);
+      }));
+      return;
+    }
+    final ip = _tcp.lastIp;
+    final port = _tcp.lastPort;
+    if (ip == null || port == null || s == null) return;
+    unawaited(_storage.saveTransientSession(TransientSession(
+      deviceId: s.deviceId ?? '',
+      name: s.deviceName ?? ip,
+      ip: ip,
+      port: port,
+      token: u.token!,
+      expiresAtMs: DateTime.now().millisecondsSinceEpoch +
+          u.expiresInSec * 1000,
+    )));
+    debugPrint('VL_TCP 保活凭证已按设置落盘（${u.expiresInSec}s）');
+  }
 
   /// PC 端在设置页把本机设为常用设备：落盘长期凭证 + 作废临时续连记录 + 刷新界面
   Future<void> _onPromoted(PromotedGrant g) async {
@@ -313,7 +343,7 @@ class TextSender {
             port: dev.port,
             expectDeviceId: dev.deviceId,
           )
-          .timeout(const Duration(seconds: 2))
+          .timeout(const Duration(seconds: 5))
           .catchError((Object _) => <DiscoveredDevice>[]);
     } catch (_) {
       found = const [];
@@ -648,6 +678,7 @@ class TextSender {
     _downgradeSub?.cancel();
     _promotedSub?.cancel();
     _identitySub?.cancel();
+    _keepaliveSub?.cancel();
     _sessionUpdatedController.close();
     _tcp.dispose();
   }

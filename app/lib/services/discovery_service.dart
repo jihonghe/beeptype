@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
-import 'package:network_info_plus/network_info_plus.dart';
 
 import 'lan_check.dart';
 
@@ -40,8 +39,8 @@ class DiscoveredDevice {
 class DiscoveryService {
   static const int _protocolVersion = 1;
   static const int _rounds = 3;
-  static const Duration _roundInterval = Duration(milliseconds: 300);
-  static const Duration _listenAfter = Duration(milliseconds: 500);
+  static const Duration _roundInterval = Duration(milliseconds: 250);
+  static const Duration _listenAfter = Duration(milliseconds: 450);
 
   /// 发现持有 [token] 对应凭证的电脑。
   ///
@@ -146,36 +145,11 @@ class DiscoveryService {
     debugPrint('VL_DISC 本机网卡：'
         '${net.entries.map((e) => '${e.name}=${e.ip}').join(', ')}'
         ' → 广播目标：${targets.map((t) => t.address).join(', ')}');
-    // 补充一路：个别机型上网卡枚举受限，但 WiFi IP 能拿到
-    try {
-      final wifiIp = await NetworkInfo().getWifiIP().timeout(
-            const Duration(seconds: 1),
-          );
-      if (wifiIp != null) {
-        final bcast = _subnetBroadcast(wifiIp);
-        if (bcast != null) targets.add(InternetAddress(bcast));
-      }
-    } catch (_) {
-      // 拿不到就算了：上面枚举出来的网段已经覆盖 Wi-Fi 与热点
-    }
     return targets;
   }
 
   /// 只处理常见的 /24 家用网段（192.168.x.x / 10.x.x.x / 172.16-31.x.x），
   /// 掩码不一致则不推算，返回 null。
-  static String? _subnetBroadcast(String ip) {
-    final parts = ip.split('.');
-    if (parts.length != 4) return null;
-    final octets = parts.map(int.tryParse).toList();
-    if (octets.any((o) => o == null || o < 0 || o > 255)) return null;
-    final a = octets[0]!, b = octets[1]!;
-    final isPrivate24 = (a == 192 && b == 168) ||
-        a == 10 ||
-        (a == 172 && b >= 16 && b <= 31);
-    // 简化：v1 家用环境一律按 /24 推算（10 段也常见 /24 部署）
-    if (!isPrivate24) return null;
-    return '${octets[0]}.${octets[1]}.${octets[2]}.255';
-  }
 
   DiscoveredDevice? _parseResponse(List<int> data, String srcIp) {
     try {

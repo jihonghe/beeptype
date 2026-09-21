@@ -1,7 +1,6 @@
 use crate::config::Config;
 use crate::protocol::{Capabilities, now_ms, Message, MAX_LINE_BYTES};
 use log::{info, warn};
-use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::Command;
 use std::net::{IpAddr, Shutdown, TcpListener, TcpStream};
@@ -15,8 +14,6 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_notification::NotificationExt;
 
 /// 鉴权失败冷却配置
-const MAX_AUTH_FAILS: u32 = 5;
-const COOLDOWN_SECS: u64 = 60;
 /// 读超时（秒）：心跳 5s 一次；踢人走 shutdown(Read) 唤醒，不受此粒度限制
 const READ_TIMEOUT_SECS: u64 = 5;
 /// 连接级心跳超时（秒）：连续 3 次心跳无响应即收尸
@@ -255,8 +252,6 @@ fn arbitrate_primary(current: Option<&ActiveSession>, client_id: &str) -> Primar
 /// （见文件末尾的 integration_tests）。桌面应用固定用 `AppServerState = ServerState<Wry>`。
 pub struct ServerState<R: Runtime> {
     pub state: Arc<Mutex<ConnState>>,
-    pub auth_fails: Arc<Mutex<HashMap<IpAddr, u32>>>,
-    pub auth_cooldowns: Arc<Mutex<HashMap<IpAddr, Instant>>>,
     pub app_handle: AppHandle<R>,
     pub port: u16,
     pub pairing_code: Arc<Mutex<String>>,
@@ -288,8 +283,6 @@ impl<R: Runtime> Clone for ServerState<R> {
     fn clone(&self) -> Self {
         Self {
             state: self.state.clone(),
-            auth_fails: self.auth_fails.clone(),
-            auth_cooldowns: self.auth_cooldowns.clone(),
             app_handle: self.app_handle.clone(),
             port: self.port,
             pairing_code: self.pairing_code.clone(),
@@ -324,8 +317,6 @@ impl<R: Runtime> ServerState<R> {
         let remember_default = false;
         Self {
             state: Arc::new(Mutex::new(ConnState::Waiting)),
-            auth_fails: Arc::new(Mutex::new(HashMap::new())),
-            auth_cooldowns: Arc::new(Mutex::new(HashMap::new())),
             app_handle,
             port,
             pairing_code: Arc::new(Mutex::new(code)),
@@ -345,40 +336,6 @@ impl<R: Runtime> ServerState<R> {
     /// setup 建完托盘后注入菜单项句柄
     pub fn set_menu_items(&self, disconnect: Option<MenuItem<R>>) {
         *self.disconnect_item.lock().unwrap() = disconnect;
-    }
-
-    /// 检查 IP 是否在冷却期
-    pub fn is_in_cooldown(&self, ip: IpAddr) -> bool {
-        if let Ok(cooldowns) = self.auth_cooldowns.lock() {
-            if let Some(start) = cooldowns.get(&ip) {
-                return start.elapsed().as_secs() < COOLDOWN_SECS;
-            }
-        }
-        false
-    }
-
-    /// 记录鉴权失败
-    pub fn record_auth_fail(&self, ip: IpAddr) {
-        if let Ok(mut fails) = self.auth_fails.lock() {
-            let count = fails.entry(ip).or_insert(0);
-            *count += 1;
-            if *count >= MAX_AUTH_FAILS {
-                if let Ok(mut cooldowns) = self.auth_cooldowns.lock() {
-                    cooldowns.insert(ip, Instant::now());
-                }
-                *count = 0;
-            }
-        }
-    }
-
-    /// 清除鉴权失败计数
-    pub fn clear_auth_fails(&self, ip: IpAddr) {
-        if let Ok(mut fails) = self.auth_fails.lock() {
-            fails.remove(&ip);
-        }
-        if let Ok(mut cooldowns) = self.auth_cooldowns.lock() {
-            cooldowns.remove(&ip);
-        }
     }
 
     /// 同步托盘状态行与"断开"项可用性
@@ -478,6 +435,46 @@ impl<R: Runtime> ServerState<R> {
                 info!("Transient resume cleared for {client_id}");
             }
         }
+    }
+
+    /// 把「临时连接保活」的当前设置**当场**同步给在线的临时连接。
+    ///
+    /// 开启/调长 → 当场签发并推送凭证；关闭 → 当场作废并通知手机清掉本地记录。
+    /// 没有这一步的话，设置只在"签发凭证那一刻"被读取，改了要等下次配对或降级才生效
+    /// （用户实测反馈）。
+    pub fn sync_transient_keepalive(&self) {
+        let live = {
+            let session = self.session.lock().unwrap();
+            match session.as_ref() {
+                // 只对"当前是临时身份"的在线会话同步
+                Some(a) if !a.identity.load(Ordering::SeqCst) => {
+                    Some((a.client_id.clone(), a.name.clone(), a.writer.clone()))
+                }
+                _ => None,
+            }
+        };
+        let Some((client_id, name, writer)) = live else {
+            return;
+        };
+        let ttl = self.resume_ttl();
+        let grant = if ttl.is_zero() {
+            self.clear_transient_resume(&client_id); // 关闭：立刻作废
+            None
+        } else {
+            self.issue_transient_resume(&client_id, &name)
+        };
+        if let Some(w) = writer {
+            let msg = match &grant {
+                Some((token, secs)) => Message::resume_grant(Some(token), *secs),
+                None => Message::resume_grant(None, 0),
+            };
+            let _ = send(&w, &msg);
+        }
+        info!(
+            "Transient keepalive synced (ttl {}s, grant issued: {})",
+            ttl.as_secs(),
+            grant.is_some()
+        );
     }
 
     /// 只读校验一张临时续连凭证（**不续期**），供 UDP 发现门控使用。
@@ -732,16 +729,6 @@ impl<R: Runtime> ServerState<R> {
         // 本机身份：拒绝类应答都要带上 device_id（手机用来核对拒绝方）
         let (device_id, pc_name) = self.device_identity();
 
-        // 冷却优先
-        if self.is_in_cooldown(peer_ip) {
-            warn!("IP in cooldown: {}", peer_ip);
-            return Some(Message::hello_ack_err(
-                "cooldown",
-                "尝试过于频繁，请 60 秒后再试",
-            )
-            .with_device_id(&device_id));
-        }
-
         // 记下硬件指纹：设为常用设备时写进记录（"重装后仍认得出"靠它）
         ctx.hardware_id = hardware_id.clone();
 
@@ -810,7 +797,6 @@ impl<R: Runtime> ServerState<R> {
                 config.verify_token(&client_id, &token, &device_name, &peer_ip.to_string())
             };
             if !verified {
-                self.record_auth_fail(peer_ip);
                 warn!("Token rejected from {}", peer_ip);
                 return Some(Message::hello_ack_err(
                     "unauthorized",
@@ -818,8 +804,6 @@ impl<R: Runtime> ServerState<R> {
                 )
                 .with_device_id(&device_id));
             }
-            self.clear_auth_fails(peer_ip);
-
             let mut session = self.session.lock().unwrap();
             match arbitrate_primary(session.as_ref(), &client_id) {
                 PrimaryArbitration::Admit => {
@@ -890,12 +874,9 @@ impl<R: Runtime> ServerState<R> {
                 config.verify_code(&code)
             };
             if !code_ok {
-                self.record_auth_fail(peer_ip);
                 warn!("Bad code from {}", peer_ip);
                 return Some(Message::hello_ack_err("bad_code", "配对码错误或已过期").with_device_id(&device_id));
             }
-            self.clear_auth_fails(peer_ip);
-
             let mut session = self.session.lock().unwrap();
             if session.is_some() {
                 // 码对但席位占用：不认证、不绑定，直接拒绝
@@ -979,7 +960,6 @@ impl<R: Runtime> ServerState<R> {
             ))
         } else {
             // 既无码也无 token
-            self.record_auth_fail(peer_ip);
             warn!("Empty credentials from {}", peer_ip);
             Some(Message::hello_ack_err("unauthorized", "握手缺少凭证").with_device_id(&device_id))
         }

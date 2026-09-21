@@ -39,7 +39,7 @@ pub enum Message {
     },
 
     /// PC → 手机端：握手响应。
-    /// status: "ok" | "occupied" | "bad_code" | "unauthorized" | "cooldown"
+    /// status: "ok" | "occupied" | "bad_code" | "unauthorized"
     /// session: "primary" | "transient"（仅成功时出现）
     /// token: 仅新绑定常用设备的那一次响应出现，明文仅此下发一次
     #[serde(rename = "hello_ack")]
@@ -145,6 +145,16 @@ pub enum Message {
     #[serde(rename = "promoted_ack")]
     PromotedAck,
 
+    /// PC → 手机：临时连接保活凭证（设置项「临时连接保活」一改就当场同步）。
+    /// 带 `resume_token` = 签发或续期；不带 = 作废（设置被关闭），手机应清掉本地记录。
+    #[serde(rename = "resume_grant")]
+    ResumeGrant {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume_token: Option<String>,
+        #[serde(default)]
+        resume_expires_in: u64,
+    },
+
     /// PC → 手机端：常用设备已解绑，当前连接降级为临时设备（会话保持，不断开）。
     /// 手机端收到后应删除本地凭证、把当前会话标记为临时设备，并保存随之补发的续连凭证
     /// （否则"降级来的临时设备"就享受不到断线续连，与扫码临时设备不一致）。
@@ -164,6 +174,14 @@ fn ack_status_default() -> String {
 
 impl Message {
     /// 编码为 JSON 行（以 \n 结尾）
+    /// 临时连接保活凭证的同步消息（token: None 表示作废）
+    pub fn resume_grant(token: Option<&str>, expires_in: u64) -> Self {
+        Message::ResumeGrant {
+            resume_token: token.map(|t| t.to_string()),
+            resume_expires_in: expires_in,
+        }
+    }
+
     /// 心跳响应（session: Some("primary"|"transient") 或 None 表示不给身份声明）
     pub fn pong(session: Option<&str>) -> Self {
         Message::Pong {

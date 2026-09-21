@@ -361,8 +361,8 @@
             </div>
             <div class="setting-row">
                 <div class="setting-text">
-                    <div class="setting-title">临时接入断线后自动续连</div>
-                    <div class="setting-sub" id="rt-note">临时接入的手机被系统杀掉后，这段时间内重开 App 可自动连回</div>
+                    <div class="setting-title">临时连接保活</div>
+                    <div class="setting-sub" id="rt-note">临时手机被系统杀掉后，这段时间内重开 App 可自动连回</div>
                 </div>
                 <select class="select" id="set-resume-ttl">
                     <option value="0">关闭</option>
@@ -658,8 +658,8 @@
                 ? '手机连上电脑后，窗口自动收起到系统托盘'
                 : '窗口会一直留在桌面，方便查看状态和管理设备';
             const rtText = () => rt.value === '0'
-                ? '临时接入断开后需重新扫码'
-                : '临时接入的手机被系统杀掉后，这段时间内重开 App 可自动连回（超时需重新扫码）';
+                ? '临时连接断开后需重新扫码'
+                : '临时手机被系统杀掉后，这段时间内重开 App 可自动连回（超时需重新扫码）';
             rt.value = String(s.resumeTtlMin ?? 5);
             rtNote.textContent = rtText();
             ap.disabled = !s.autoPasteSupported;

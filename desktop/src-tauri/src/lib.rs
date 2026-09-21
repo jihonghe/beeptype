@@ -302,10 +302,15 @@ fn set_resume_ttl(
     state: tauri::State<'_, Arc<Mutex<AppServerState>>>,
 ) {
     let server = state.lock().unwrap();
-    let mut config = server.config.lock().unwrap();
-    config.resume_ttl_min = minutes;
-    let _ = config.save();
-    info!("Transient resume TTL set to {minutes} min");
+    {
+        let mut config = server.config.lock().unwrap();
+        config.resume_ttl_min = minutes;
+        let _ = config.save();
+    }
+    info!("Transient keepalive TTL set to {minutes} min");
+    // 改完立刻对在线的临时连接生效（开启就补发凭证、关闭就作废），
+    // 不必等下次配对或降级
+    server.sync_transient_keepalive();
 }
 
 /// 切换开机自启：操作系统自启项 + 持久化用户意愿

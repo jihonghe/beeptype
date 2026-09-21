@@ -286,10 +286,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         );
         // 必须确实还握着一条有效的临时记录才处理：清记录这个动作本身会再抛一次
         // "断开"事件，缺这个前提就会自激循环、疯狂弹提示（用户实测踩到过）
+        // 判断"这条连接是不是临时身份"要用**会话本身**，不能用
+        // "最近一次连接尝试用了什么凭证"——扫码接入的临时连接 lastAuthMode 是 code，
+        // 用它判断会让"重启电脑端"这条规则对扫码来的临时连接完全失效（用户实测）。
         if (receiverSide &&
             !_sessionEndedHandled &&
-            widget.sender.hasTransientSession &&
-            widget.sender.lastAuthMode == AuthMode.resume) {
+            widget.sender.hasTransientSession) {
           unawaited(_abandonTransientWithNotice());
           break;
         }
@@ -366,7 +368,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 连上去也无从谈起，反复重试与广播只是白耗电；Wi-Fi 回来时由网络变化监听重新拉起。
   /// 传 null 表示"还没来得及判断"（突发断线路径），按可能有局域网处理。
   void _scheduleReconnect([LocalNet? net]) {
-    if (!_canAutoConnect()) return;
+    // 已经没有可连目标了（记录被清、被拒、被解绑）：这一轮结束，
+    // 否则倒计时与「中断」会继续挂在界面上（"未连接电脑 + 连接中 + 倒计时"）
+    if (!_canAutoConnect()) {
+      _endRetryEpisode();
+      return;
+    }
     if (_status == ConnectionStatus.paired ||
         _status == ConnectionStatus.occupied ||
         _connecting) {
@@ -427,6 +434,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (mounted) setState(() {});
         return;
       }
+      _endRetryEpisode(); // 绑定没了：重试也没有意义，立刻收尾
       await widget.sender.forgetDevice(id);
       // 同一次失败只弹一句：临时路径也会记一个"已失效"标记，这里顺手消费掉
       widget.sender.consumeTransientExpiredNotice();

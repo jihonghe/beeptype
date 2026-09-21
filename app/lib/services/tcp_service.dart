@@ -62,6 +62,18 @@ class ResumeGrant {
   ResumeGrant(this.token, this.expiresInSec);
 }
 
+/// 保活凭证的当场同步（设置项「临时连接保活」一改，PC 立刻推过来）。
+/// token 为空 = 作废，手机应清掉本地记录。
+class KeepaliveUpdate {
+  final String? token;
+  final int expiresInSec;
+
+  const KeepaliveUpdate({this.token, this.expiresInSec = 0});
+
+  /// PC 推过来的时长；<= 0 或缺 token 表示保活被关闭
+  bool get disabled => token == null || token!.isEmpty || expiresInSec <= 0;
+}
+
 /// hello_ack 的结构化结果
 class HelloOutcome {
   final bool ok;
@@ -178,6 +190,10 @@ class TcpService {
   /// PC 端在设置页把本机设为常用设备时的推送（手机据此落盘长期凭证）
   final _promotedController = StreamController<PromotedGrant>.broadcast();
   Stream<PromotedGrant> get promotedStream => _promotedController.stream;
+
+  /// 保活凭证的当场同步（见 [KeepaliveUpdate]）。
+  final _keepaliveController = StreamController<KeepaliveUpdate>.broadcast();
+  Stream<KeepaliveUpdate> get keepaliveStream => _keepaliveController.stream;
 
   /// 心跳（pong）里回报的权威信息（见 [HeartbeatInfo]）。
   final _heartbeatController = StreamController<HeartbeatInfo>.broadcast();
@@ -520,6 +536,16 @@ class TcpService {
         }
         break;
 
+      case 'resume_grant':
+        // 设置项「临时连接保活」改动：PC 当场同步（带 token 签发/续期，不带则作废）
+        final kaToken = d['resume_token'] as String?;
+        final kaTtl = (d['resume_expires_in'] as num?)?.toInt() ?? 0;
+        debugPrint('VL_TCP resume_grant token=${kaToken != null} ttl=$kaTtl');
+        _keepaliveController.add(
+          KeepaliveUpdate(token: kaToken, expiresInSec: kaTtl),
+        );
+        break;
+
       case 'session_downgraded':
         // PC 端解绑本机：连接降级为临时（会话保持，不断开），并可能补发续连凭证
         final grantToken = d['resume_token'] as String?;
@@ -708,6 +734,7 @@ class TcpService {
     _statusController.close();
     _sessionEndedController.close();
     _downgradeGrantController.close();
+    _keepaliveController.close();
     _heartbeatController.close();
     _promotedController.close();
   }
