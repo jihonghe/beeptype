@@ -1,38 +1,12 @@
-/// 断线后的自动重连节奏（纯策略，便于单测）。
+/// 断线后的**文案与动作选择**（纯逻辑，便于单测）。
 ///
-/// 设计取舍（与用户一起定的）：**快速试一阵，然后停手**。
-/// 慢速重试（比如每 30 秒一次）价值很低——真到能连上的时候，用户还不如当场点一下
-/// 「重新连接」；反之若不能及时自动连上，长期定时器只是白耗电（在移动数据上还会
-/// 反复把无线电拉回高功耗）。
+/// "一轮快速重试"的节奏与状态机在 retry_episode.dart；这里放的是"说不说、说什么、
+/// 给哪个按钮"这类判断。
 ///
-/// 因此：约 30 秒内快速退避重试；试满即停，界面显示「已停止重试」+「重新连接」。
-/// 以下事件会**重新开始**一轮快速重试（都表示"用户回来了 / 环境变了"）：
-/// 切回前台、网络变化、用户点「重新连接」、重新扫码。
+/// 一轮的节奏（等间隔 2 秒、共 30 秒、到点停手）由 retry_episode.dart 的状态机负责。
+/// 这里只回答"界面说什么"：胶囊里的词（连接中 · N 秒 / 无）、给哪个按钮（连接 /
+/// 中断 / 断开 / 不给）、以及"电脑拒绝时该不该当成本机被解绑"。
 library;
-
-/// 一轮快速重试的时长（毫秒，墙上时钟）——倒计时与它同一个基准。
-///
-/// 为什么是 30 秒而不是更长：快速重试的目的是"帮用户省掉手动操作"，不是让用户干等——
-/// 超过半分钟还连不上，用户早就想自己点一下了（用户实测后定的）。
-const int retryEpisodeMs = 30000;
-
-/// 重试间隔：**等间隔 2 秒**。
-///
-/// 为什么不用指数退避：一轮的预算是固定的 30 秒，而每次尝试本身要花 1～4 秒
-/// （直连超时最多 2.5s + 广播约 1.1s）——退避的前段短等待被尝试耗时吃掉、
-/// 没起到作用，后段 8/9 秒的长等待则纯属白等。等间隔把预算铺匀：
-/// 期望恢复延迟从约 3.3 秒降到约 1 秒（电脑在 30 秒内随机时刻恢复时），
-/// 尝试次数还更多（约 6～9 次）。代价只是"电脑恰好 1 秒内恢复"这种最快情形晚约 1 秒。
-const int retryIntervalMs = 2000;
-
-/// 第 [attempt] 次（从 0 起）重试前的等待时长
-int retryDelayMs(int attempt) => retryIntervalMs;
-
-/// 兜底上限：30 秒 ÷ 2 秒 = 最多 15 次尝试。
-/// 一轮真正的结束以 [retryRoundExpired]（墙上时钟）为准，这个只是保险丝。
-bool retryAllowed(int attempt) => attempt < retryEpisodeMs ~/ retryIntervalMs;
-
-
 
 /// 这次"对端关闭连接"该不该算在**电脑侧**（临时接入据此决定要不要丢记录）。
 ///
@@ -70,6 +44,16 @@ bool rejectionFromOurPc({required String? responderId, required String? expected
 String credentialRejectedMessage({required bool bound}) =>
     bound ? '电脑已解除与你的绑定，请重新扫码' : '连接已失效，请重新扫码';
 
+/// 胶囊里那个词：**只有"在忙"时才有**，其余状态一律不说话。
+///
+/// 用户需要知道的例外（连不上、被占用）放在打字区——状态归胶囊、该做什么归打字区。
+String? pillWord({required bool busy, int? secondsLeft}) {
+  if (!busy) return null;
+  // 0 秒不显示：那一刻通常还有一次尝试在飞，写「· 0 秒」只会让人以为卡住了
+  if (secondsLeft == null || secondsLeft <= 0) return '连接中';
+  return '连接中 · $secondsLeft 秒';
+}
+
 /// 胶囊右侧的按钮
 enum PillAction {
   /// 不显示按钮（还没绑定过电脑；正文就是扫码引导页）
@@ -83,36 +67,6 @@ enum PillAction {
 
   /// 断开（已连接）
   disconnect,
-}
-
-/// 剩余秒数：给一个截止时刻，算还剩几秒（向上取整，最小 0）。
-///
-/// 重试中把它显示在胶囊里（「连接中 · 18 秒」），让用户**看得见**还要等多久——
-/// 愿意等就等，不想等可以点「中断」。
-int retrySecondsLeft({required int deadlineMs, required int nowMs}) {
-  final left = deadlineMs - nowMs;
-  if (left <= 0) return 0;
-  return (left + 999) ~/ 1000;
-}
-
-/// 胶囊里那个词：**只有"在忙"时才有**，其余状态一律不说话。
-///
-/// 用户需要知道的例外（连不上、被占用）放在打字区——状态归胶囊、该做什么归打字区。
-String? pillWord({required bool busy, int? secondsLeft}) {
-  if (!busy) return null;
-  // 0 秒不显示：那一刻通常还有一次尝试在飞，写「· 0 秒」只会让人以为卡住了
-  if (secondsLeft == null || secondsLeft <= 0) return '连接中';
-  return '连接中 · $secondsLeft 秒';
-}
-
-/// 一轮快速重试是否已经到点（以**墙上时钟**为准，倒计时与它同一个基准）。
-///
-/// 一轮的时长不能用"试满 N 次"来判断：每次尝试本身也要花 3～4 秒（直连超时 + 广播），
-/// 按次数算的话真实时长会接近翻倍——倒计时先归零、重试还在跑（用户实测看到"第二段
-/// 只有『连接中』没有秒数"就是这么来的）。
-bool retryRoundExpired({required int? deadlineMs, required int nowMs}) {
-  if (deadlineMs == null) return false;
-  return nowMs >= deadlineMs;
 }
 
 /// 胶囊右侧显示哪个按钮（纯逻辑，便于单测）。

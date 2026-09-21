@@ -186,21 +186,6 @@ void main() {
       expect(pillWord(busy: true, secondsLeft: 0), '连接中');
     });
 
-    test('一轮是否到点：以墙上时钟为准', () {
-      expect(retryRoundExpired(deadlineMs: null, nowMs: 1000), isFalse);
-      expect(retryRoundExpired(deadlineMs: 2000, nowMs: 1500), isFalse);
-      expect(retryRoundExpired(deadlineMs: 2000, nowMs: 2000), isTrue);
-      expect(retryRoundExpired(deadlineMs: 2000, nowMs: 3000), isTrue);
-    });
-
-    test('倒计时剩余秒数（向上取整、到点归零）', () {
-      const now = 1000000;
-      expect(retrySecondsLeft(deadlineMs: now + 30000, nowMs: now), 30);
-      expect(retrySecondsLeft(deadlineMs: now + 1, nowMs: now), 1);
-      expect(retrySecondsLeft(deadlineMs: now, nowMs: now), 0);
-      expect(retrySecondsLeft(deadlineMs: now - 5000, nowMs: now), 0);
-    });
-
     test('已连接 → 断开', () {
       expect(
         pillAction(connected: true, busy: false, hasTarget: true),
@@ -320,24 +305,6 @@ void main() {
         credentialRejectedMessage(bound: false),
         '连接已失效，请重新扫码',
       );
-    });
-  });
-
-  group('重试节奏（快速试一阵就停手）', () {
-    test('一轮 30 秒（墙上时钟）就停：不再有"永远每 10 秒一次"', () {
-      expect(retryEpisodeMs, 30000);
-      expect(retryAllowed(0), isTrue);
-      expect(retryAllowed(14), isTrue);
-      expect(retryAllowed(15), isFalse);
-      expect(retryAllowed(99), isFalse, reason: '兜底上限：最多 15 次尝试');
-    });
-
-    test('等间隔 2 秒（把固定预算铺匀，期望恢复延迟更短）', () {
-      expect(retryDelayMs(0), 2000);
-      expect(retryDelayMs(3), 2000);
-      expect(retryDelayMs(100), 2000);
-      expect(retryIntervalMs, 2000);
-      expect(retryEpisodeMs ~/ retryIntervalMs, 15, reason: '30 秒 ÷ 2 秒的兜底上限');
     });
   });
 

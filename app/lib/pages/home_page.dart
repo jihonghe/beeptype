@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'dart:async';
 import '../services/lan_check.dart';
+import '../services/retry_episode.dart';
 import '../services/retry_policy.dart';
 import '../services/text_sender.dart';
 import '../services/tcp_service.dart';
@@ -44,7 +45,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   /// 是否正处在一次主动连接尝试中（合并事件回调与收尾逻辑，避免双重排程）
   bool _connecting = false;
-  int _reconnectAttempt = 0;
 
   /// 最近一次失败"看起来不在同一局域网"（决定打字区要不要提示检查 Wi-Fi）
   bool _offLan = false;
@@ -70,59 +70,63 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return t != null && DateTime.now().difference(t) < const Duration(seconds: 15);
   }
 
-  /// 本轮快速重试的截止时刻（毫秒）：用来在胶囊里显示倒计时
-  int? _retryDeadlineMs;
+  /// "一轮快速重试"的状态机：显式状态 + 明确的触发，见 retry_episode.dart
+  final _retry = RetryEpisode();
 
-  /// 倒计时的每秒刷新器（只在重试中跑）
+  /// 倒计时的每秒刷新器（一轮进行中且已开始重试时才跑）
   Timer? _countdownTimer;
 
   /// 连接尝试的代号：进扫码页会自增，作废还挂在半空中的旧尝试——
   /// 否则它超时后会把刚配对好的界面按回"连接中"（用户实测过）
   int _attemptGen = 0;
 
-  /// 开始一轮快速重试的倒计时（首次尝试时调用）
-  void _startRetryCountdown() {
-    final now = DateTime.now().millisecondsSinceEpoch;
-    _retryDeadlineMs = now + retryEpisodeMs;
+  /// 开一轮重试。**只由明确的触发调用**：用户点「连接」/ 回到前台 / 网络变化 /
+  /// 冷启动 / 刚断开。已在跑就重置成全新的一轮（环境变了，给足整整一轮）。
+  void _beginRetryEpisode() {
+    _retry.start(DateTime.now().millisecondsSinceEpoch);
+    _reconnectTimer?.cancel();
+    _startCountdownTicker(); // 到第一次重试被排上时，胶囊才会显示秒数
+  }
+
+  /// 结束一轮：彻底停手，等下一次触发。
+  /// 同时作废"在飞的那次尝试"——否则它收尾时会又开一轮（历史事故），
+  /// 界面也会多显示一段没有倒计时的「连接中」。
+  void _endRetryEpisode() {
+    _retry.end();
+    _reconnectTimer?.cancel();
+    _attemptGen++;
+    widget.sender.abortConnectAttempts();
+    _connecting = false;
+    _countdownTimer?.cancel();
+    _countdownTimer = null;
+  }
+
+  void _startCountdownTicker() {
     _countdownTimer?.cancel();
     _countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
-      final left = retrySecondsLeft(
-        deadlineMs: _retryDeadlineMs ?? 0,
-        nowMs: DateTime.now().millisecondsSinceEpoch,
-      );
-      if (left <= 0) {
-        _stopRetryCountdown();
+      if (!_retry.active) {
+        _countdownTimer?.cancel();
+        _countdownTimer = null;
       }
       setState(() {});
     });
   }
 
-  /// 结束一轮重试的倒计时（连上、停手、试满都走这里）
-  void _stopRetryCountdown() {
-    _countdownTimer?.cancel();
-    _countdownTimer = null;
-    _retryDeadlineMs = null;
-  }
-
   /// 用户点「中断」：立刻停手、本进程不再自动重试；**记录不动**
   /// （临时连接的窗口照样有效，重启 APP 后也会自动再试）
   void _stopRetrying() {
-    _reconnectTimer?.cancel();
-    _attemptGen++; // 作废在飞的那次尝试
-    widget.sender.abortConnectAttempts();
     widget.sender.manualDisconnected = true;
-    _connecting = false;
-    _stopRetryCountdown();
+    _endRetryEpisode();
     setState(() {});
   }
 
   /// 是否"在忙"：正在连接，或快速重试那一轮还没结束（有排程中的重试）
   bool get _busy =>
       _connecting ||
+      _retry.active ||
       _status == ConnectionStatus.connecting ||
-      _status == ConnectionStatus.pairing ||
-      (_reconnectTimer?.isActive ?? false);
+      _status == ConnectionStatus.pairing;
 
   StreamSubscription<List<ConnectivityResult>>? _netSub;
 
@@ -151,13 +155,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (!mounted || _connecting) return;
       if (_status == ConnectionStatus.paired) return;
       if (!_canAutoConnect()) return;
-      _reconnectTimer?.cancel();
-      _reconnectAttempt = 0; // 环境变了：重新开始一轮快速重试
+      _beginRetryEpisode(); // 环境变了：重新开始一轮（网络变化本身就是触发）
       unawaited(_attemptConnect());
     });
 
     // 冷启动：有绑定电脑且不是"本进程已手动断开"状态时自动连接
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_canAutoConnect()) _beginRetryEpisode();
       _attemptConnect();
     });
   }
@@ -222,8 +226,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _status == ConnectionStatus.pairing) {
       return;
     }
-    _reconnectTimer?.cancel();
-    _reconnectAttempt = 0;
+    _beginRetryEpisode(); // 回到前台 = 明确的触发
     _attemptConnect();
   }
 
@@ -233,23 +236,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _onStatus(ConnectionStatus status) {
     if (!mounted) return;
+    final prev = _status;
     setState(() => _status = status);
 
     switch (status) {
       case ConnectionStatus.paired:
-        _connecting = false;
-        _reconnectTimer?.cancel();
+        _endRetryEpisode();
         _transientExpiryTimer?.cancel();
-        _stopRetryCountdown();
-        _reconnectAttempt = 0;
         _offLan = false; // 连上了：清掉上次失败留下的网络判断，别残留提示
         unawaited(_requestKeyboard());
         break;
       case ConnectionStatus.occupied:
         // 电脑正被别人用：**立即停止自动重连**，把"要不要接管"留给用户手动决定。
-        _connecting = false;
-        _reconnectTimer?.cancel();
-        _reconnectAttempt = 0;
+        _endRetryEpisode();
         if (widget.sender.lastAuthMode != AuthMode.token) {
           // 扫码/临时凭证连的：属于正常的连接竞争，不必解释——清掉临时记录
           // 回扫码引导页（此刻电脑窗口上也没有二维码，用户一看就知道正忙）
@@ -276,8 +275,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           break;
         }
         // 主动尝试中的连接失败由 _attemptConnect 收尾统一排程；
-        // 这里处理"使用中突发断线"（WiFi 抖动、PC 退出、被踢等）。
-        if (!_connecting && _canAutoConnect()) {
+        // 这里只处理"**刚断开**"这个事件（状态真的发生跳变时）：
+        // 已有的一轮在跑就不动它——否则每次尝试失败都会开新的一轮（历史事故）。
+        if (!_retry.active &&
+            prev != ConnectionStatus.disconnected &&
+            !_connecting &&
+            _canAutoConnect()) {
+          _beginRetryEpisode();
           _scheduleReconnect();
         }
         break;
@@ -317,9 +321,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 临时接入的"接收方出问题"出口：停掉重试、清记录、回扫码引导页，并说明一句
   Future<void> _abandonTransientWithNotice() async {
     if (!widget.sender.hasTransientSession) return; // 已经没什么可作废的了
-    _reconnectTimer?.cancel();
+    _endRetryEpisode();
     _transientExpiryTimer?.cancel();
-    _reconnectAttempt = 0;
     await widget.sender.abandonTransient();
     if (!mounted) return;
     _showSnack('连接已失效，请重新扫码');
@@ -353,33 +356,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     _reconnectTimer?.cancel();
 
-    // 只有移动数据（枚举不到任何局域网网卡）→ 停手，不做无意义的尝试。
-    // 这里也把倒计时收掉：否则会残留一个"承诺还会试 30 秒"的假象（用户实测过）
+    // 只有移动数据（枚举不到任何局域网网卡）→ 这一轮到此为止，不做无意义的尝试
     if (net != null && !net.hasLan) {
-      _stopRetryCountdown();
-      return;
-    }
-    // 一轮的时长以**墙上时钟**为准（倒计时就是它）：到点即停手。
-    // 不用"试满 N 次"来判断——每次尝试本身还要花 3～4 秒，按次数算真实时长会接近
-    // 翻倍，导致倒计时先归零、重试还在跑（用户实测看到"第二段只有『连接中』"）。
-    final now = DateTime.now().millisecondsSinceEpoch;
-    if (retryRoundExpired(deadlineMs: _retryDeadlineMs, nowMs: now) ||
-        !retryAllowed(_reconnectAttempt)) {
-      _stopRetryCountdown(); // 到点：倒计时收掉，界面变灰点 + 「连接」
+      _endRetryEpisode();
       return;
     }
 
-    // 倒计时在"**第一次重试真的被排上**"时才起：它承诺的就是真实剩余时间，
-    // 不重试的场景（只有移动数据）不该出现倒计时
-    if (_retryDeadlineMs == null) {
-      _startRetryCountdown();
+    // 一轮要不要继续：完全交给状态机（到点 / 超上限都会返回 false）
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (!_retry.shouldSchedule(now)) {
+      _endRetryEpisode(); // 到点：界面落到灰点 + 「连接」
+      return;
     }
-    // 最后一次等待压缩进剩余时间里，避免超时后又多等一次
-    final remaining = (_retryDeadlineMs ?? now) - now;
-    final delayMs = retryDelayMs(_reconnectAttempt).clamp(0, remaining);
-    _reconnectAttempt++;
-    _reconnectTimer =
-        Timer(Duration(milliseconds: delayMs), _attemptConnect);
+
+    final delayMs = _retry.nextDelayMs(now);
+    _reconnectTimer = Timer(Duration(milliseconds: delayMs), _attemptConnect);
   }
 
   /// 尝试连接最近使用的常用电脑（缓存 IP 直连 + UDP 发现并行，见 TextSender）
@@ -455,8 +446,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 手动点灰钮连接：清除手动断开标记，立即尝试
   Future<void> _manualConnect() async {
     widget.sender.manualDisconnected = false;
-    _reconnectTimer?.cancel();
-    _reconnectAttempt = 0;
+    _beginRetryEpisode(); // 用户明确要求连接
     await _attemptConnect();
   }
 
@@ -609,12 +599,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final busy = _busy;
     final connected = _status == ConnectionStatus.paired;
     final hasTarget = widget.sender.hasAnyTarget;
-    final secondsLeft = _retryDeadlineMs == null
-        ? null
-        : retrySecondsLeft(
-            deadlineMs: _retryDeadlineMs!,
-            nowMs: DateTime.now().millisecondsSinceEpoch,
-          );
+    final secondsLeft =
+        _retry.remainingSeconds(DateTime.now().millisecondsSinceEpoch);
     final word = pillWord(busy: busy, secondsLeft: secondsLeft);
     final action = pillAction(
       connected: connected,
@@ -927,9 +913,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (!mounted) return;
     if (result == true) {
       // 配对成功：一切重试状态清零，并以 TCP 层的真实状态为准同步一次界面
-      _reconnectTimer?.cancel();
-      _reconnectAttempt = 0;
-      _connecting = false;
+      _endRetryEpisode();
       if (widget.sender.tcp.isPairedNow) {
         _status = ConnectionStatus.paired;
       }
