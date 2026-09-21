@@ -182,6 +182,17 @@ void main() {
           reason: '用户主动断开也不该出现状态词');
     });
 
+    test('0 秒不显示秒数（那一刻通常还有一次尝试在飞）', () {
+      expect(pillWord(busy: true, secondsLeft: 0), '连接中');
+    });
+
+    test('一轮是否到点：以墙上时钟为准', () {
+      expect(retryRoundExpired(deadlineMs: null, nowMs: 1000), isFalse);
+      expect(retryRoundExpired(deadlineMs: 2000, nowMs: 1500), isFalse);
+      expect(retryRoundExpired(deadlineMs: 2000, nowMs: 2000), isTrue);
+      expect(retryRoundExpired(deadlineMs: 2000, nowMs: 3000), isTrue);
+    });
+
     test('倒计时剩余秒数（向上取整、到点归零）', () {
       const now = 1000000;
       expect(retrySecondsLeft(deadlineMs: now + 30000, nowMs: now), 30);

@@ -359,19 +359,24 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _stopRetryCountdown();
       return;
     }
-    // 快速试满一轮就停手：慢速重试的价值极低，不如让用户当场点「连接」，
-    // 或等下一次"用户回来了 / 环境变了"的触发
-    if (!retryAllowed(_reconnectAttempt)) {
-      _stopRetryCountdown(); // 试满一轮：倒计时收掉，界面变灰点 + 「连接」
+    // 一轮的时长以**墙上时钟**为准（倒计时就是它）：到点即停手。
+    // 不用"试满 N 次"来判断——每次尝试本身还要花 3～4 秒，按次数算真实时长会接近
+    // 翻倍，导致倒计时先归零、重试还在跑（用户实测看到"第二段只有『连接中』"）。
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (retryRoundExpired(deadlineMs: _retryDeadlineMs, nowMs: now) ||
+        !retryAllowed(_reconnectAttempt)) {
+      _stopRetryCountdown(); // 到点：倒计时收掉，界面变灰点 + 「连接」
       return;
     }
 
-    // 倒计时在"**第一次重试真的被排上**"时才起：这样它承诺的就是真实剩余的重试时间，
-    // 而不是"可能马上就不试了"（只有移动数据、试满等情况下不该出现倒计时）
-    if (_reconnectAttempt == 0) {
+    // 倒计时在"**第一次重试真的被排上**"时才起：它承诺的就是真实剩余时间，
+    // 不重试的场景（只有移动数据）不该出现倒计时
+    if (_retryDeadlineMs == null) {
       _startRetryCountdown();
     }
-    final delayMs = retryDelayMs(_reconnectAttempt);
+    // 最后一次等待压缩进剩余时间里，避免超时后又多等一次
+    final remaining = (_retryDeadlineMs ?? now) - now;
+    final delayMs = retryDelayMs(_reconnectAttempt).clamp(0, remaining);
     _reconnectAttempt++;
     _reconnectTimer =
         Timer(Duration(milliseconds: delayMs), _attemptConnect);

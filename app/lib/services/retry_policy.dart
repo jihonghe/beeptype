@@ -93,7 +93,19 @@ int retrySecondsLeft({required int deadlineMs, required int nowMs}) {
 /// 用户需要知道的例外（连不上、被占用）放在打字区——状态归胶囊、该做什么归打字区。
 String? pillWord({required bool busy, int? secondsLeft}) {
   if (!busy) return null;
-  return secondsLeft == null ? '连接中' : '连接中 · $secondsLeft 秒';
+  // 0 秒不显示：那一刻通常还有一次尝试在飞，写「· 0 秒」只会让人以为卡住了
+  if (secondsLeft == null || secondsLeft <= 0) return '连接中';
+  return '连接中 · $secondsLeft 秒';
+}
+
+/// 一轮快速重试是否已经到点（以**墙上时钟**为准，倒计时与它同一个基准）。
+///
+/// 一轮的时长不能用"试满 N 次"来判断：每次尝试本身也要花 3～4 秒（直连超时 + 广播），
+/// 按次数算的话真实时长会接近翻倍——倒计时先归零、重试还在跑（用户实测看到"第二段
+/// 只有『连接中』没有秒数"就是这么来的）。
+bool retryRoundExpired({required int? deadlineMs, required int nowMs}) {
+  if (deadlineMs == null) return false;
+  return nowMs >= deadlineMs;
 }
 
 /// 胶囊右侧显示哪个按钮（纯逻辑，便于单测）。
