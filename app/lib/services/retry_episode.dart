@@ -28,8 +28,12 @@ class RetryEpisode {
   bool _active = false;
   int _attempt = 0;
 
-  /// 本轮第一次重试被排上时才定下截止时刻；null = 本轮还没真正开始重试
-  /// （例如"只有移动数据"时压根不重试，就不该出现倒计时）
+  /// 本轮的截止时刻（毫秒）——**开轮那一刻就定下**，所以倒计时立刻可见。
+  ///
+  /// 曾经想"等第一次重试真的排上再定"，为的是躲开"只有移动数据时倒计时亮一下就灭"；
+  /// 但那样会让用户看到一段"显示连接中、却没有倒计时"的空白（用户实测反馈），
+  /// 而"亮一下就灭"其实是个诚实的结论——它表示"已经判断出到不了电脑"。
+  /// 两个取舍里后者可接受、前者不可接受（用户拍板）。
   int? _deadlineMs;
 
   RetryEpisode({
@@ -50,10 +54,11 @@ class RetryEpisode {
 
   /// 开一轮（**只由明确的触发调用**）。已在跑就重置成全新的一轮：
   /// 环境变了 / 用户回来了，给足整整一轮的时间。
+  /// 截止时刻当场定下——倒计时与"连接中"同时出现，不留空白。
   void start(int nowMs) {
     _active = true;
     _attempt = 0;
-    _deadlineMs = null;
+    _deadlineMs = nowMs + episodeDuration.inMilliseconds;
   }
 
   /// 结束一轮（到点、用户中断、连上、放弃）：之后不再自动重试，等下一次触发。
@@ -77,18 +82,18 @@ class RetryEpisode {
     return true;
   }
 
-  /// 取下一次重试的等待时长，并把本轮截止时刻定下来（首次调用时）。
-  /// 最后一次等待会被压进剩余时间里，避免到点后又多等一次。
+  /// 取下一次重试的等待时长。最后一次等待会被压进剩余时间里，
+  /// 避免到点后又多等一次。
   int nextDelayMs(int nowMs) {
-    _deadlineMs ??= nowMs + episodeDuration.inMilliseconds;
-    final remaining = _deadlineMs! - nowMs;
+    final deadline = _deadlineMs ?? (nowMs + episodeDuration.inMilliseconds);
+    final remaining = deadline - nowMs;
     _attempt++;
     final delay = interval.inMilliseconds;
     if (remaining <= 0) return 0;
     return delay < remaining ? delay : remaining;
   }
 
-  /// 倒计时显示用的剩余秒数（向上取整）；还没开始重试时返回 null（不显示倒计时）；
+  /// 倒计时显示用的剩余秒数（向上取整）；没在跑时返回 null（不显示倒计时）；
   /// 已经到点返回 0。
   int? remainingSeconds(int nowMs) {
     if (!_active || _deadlineMs == null) return null;

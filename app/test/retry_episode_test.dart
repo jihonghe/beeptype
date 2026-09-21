@@ -8,21 +8,21 @@ import 'package:beetype/services/retry_episode.dart';
 /// ② 一轮结束后又冒出一轮（"是否开新的一轮"判断错，任何后续触发都开新轮）。
 void main() {
   group('一轮的生命周期', () {
-    test('开一轮：进行中、还没定截止（所以还不显示倒计时）', () {
+    test('开一轮：倒计时当场可见（不留"连接中却没有秒数"的空白）', () {
       final e = RetryEpisode();
       expect(e.active, isFalse);
-      expect(e.remainingSeconds(1000), isNull);
+      expect(e.remainingSeconds(1000), isNull, reason: '没在跑时不显示倒计时');
       e.start(1000);
       expect(e.active, isTrue);
-      expect(e.deadlineMs, isNull);
-      expect(e.remainingSeconds(1000), isNull, reason: '还没开始重试就不该有倒计时');
+      expect(e.deadlineMs, 31000, reason: '开轮那一刻就定下 30 秒截止');
+      expect(e.remainingSeconds(1000), 30, reason: '开轮即可见');
     });
 
-    test('排第一次重试时定下 30 秒的截止，此后每次间隔 2 秒', () {
+    test('每次间隔 2 秒（最后一次压进剩余时间）', () {
       final e = RetryEpisode();
       e.start(0);
-      expect(e.nextDelayMs(0), 2000);
       expect(e.deadlineMs, 30000);
+      expect(e.nextDelayMs(0), 2000);
       expect(e.nextDelayMs(2000), 2000);
       expect(e.nextDelayMs(4000), 2000);
       expect(e.attempt, 3);
@@ -40,7 +40,6 @@ void main() {
     test('最后一次等待压进剩余时间，避免到点后又多等一次', () {
       final e = RetryEpisode();
       e.start(0);
-      e.nextDelayMs(0); // 定下 30 秒截止
       expect(e.nextDelayMs(29500), 500, reason: '只剩 500ms 就不该再等 2 秒');
     });
 
@@ -76,9 +75,8 @@ void main() {
       e.start(100000);
       expect(e.active, isTrue);
       expect(e.attempt, 0);
-      expect(e.deadlineMs, isNull);
+      expect(e.deadlineMs, 130000, reason: '再触发 = 全新一轮的 30 秒');
       expect(e.nextDelayMs(100000), 2000);
-      expect(e.deadlineMs, 130000);
     });
 
     test('没在跑的时候不会排任何重试（触发才开轮）', () {
