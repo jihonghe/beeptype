@@ -9,18 +9,18 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final sender = TextSender();
   await sender.init();
-  runApp(BeeTypeApp(sender: sender));
+  runApp(BeepTypeApp(sender: sender));
 }
 
-class BeeTypeApp extends StatelessWidget {
+class BeepTypeApp extends StatelessWidget {
   final TextSender sender;
 
-  const BeeTypeApp({super.key, required this.sender});
+  const BeepTypeApp({super.key, required this.sender});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'BeeType',
+      title: 'BeepType',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),

@@ -1,12 +1,12 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:beetype/services/tcp_service.dart';
+import 'package:beeptype/services/tcp_service.dart';
 
 void main() {
   group('TcpMessage 协议编解码', () {
     test('text 消息编码为 JSON 行（以 \\n 结尾）', () {
       final msg = TcpMessage('text', {
         'id': 'abc-1',
-        'text': '你好，BeeType',
+        'text': '你好，BeepType',
         'ts': 1726000000000,
       });
 

@@ -1,4 +1,4 @@
-# BeeType 技术设计文档
+# BeepType 技术设计文档
 
 > **版本**：v0.2（与当前实现对齐）
 > **日期**：2026-09-20
@@ -13,7 +13,7 @@ v0.1 设计稿与最终实现的差异汇总在[第 9 节](#9-与-v01-设计稿�
 
 ```
 ┌──────────────────────────────┐                    ┌──────────────────────────────┐
-│      手机端 BeeType App      │                    │     PC 端 BeeType Desktop    │
+│      手机端 BeepType App      │                    │     PC 端 BeepType Desktop    │
 │         (Flutter)            │                    │        (Tauri + Rust)        │
 │                              │                    │                              │
 │  pages/  home_page           │   TCP  JSON 行协议  │  server.rs  TCP 服务 + 席位   │
@@ -23,7 +23,7 @@ v0.1 设计稿与最终实现的差异汇总在[第 9 节](#9-与-v01-设计稿�
 │            storage_service   │   takeover / bye    │  config.rs  身份与配置        │
 │            discovery_service │   session_ended     │  lib.rs     托盘/窗口/commands│
 │                              │                    │  src/index.html 主窗口前端     │
-│  平台通道 beetype/device     │   UDP 发现请求/应答  │                              │
+│  平台通道 beeptype/device     │   UDP 发现请求/应答  │                              │
 │  (ANDROID_ID / Keychain)     │ ←────────────────→ │  同上端口（默认 8765）         │
 └──────────────────────────────┘                    └──────────────────────────────┘
 ```
@@ -69,13 +69,13 @@ desktop/
 
 ### 2.2 config.rs — 身份、凭证与配置
 
-配置目录（`BEETYPE_HOME` 环境变量可覆盖，单测用）：
+配置目录（`BEEPTYPE_HOME` 环境变量可覆盖，单测用）：
 
 | 平台 | 路径 |
 |---|---|
-| Linux | `~/.config/beetype/config.json` |
-| macOS | `~/Library/Application Support/beetype/config.json` |
-| Windows | `%HOME%/AppData/Roaming/beetype/config.json` |
+| Linux | `~/.config/beeptype/config.json` |
+| macOS | `~/Library/Application Support/beeptype/config.json` |
+| Windows | `%HOME%/AppData/Roaming/beeptype/config.json` |
 
 ```rust
 pub struct Config {
@@ -218,7 +218,7 @@ accept
 
 窗口期由设置项 `resume_ttl_min`（默认 5 分钟，可关闭）决定，每次心跳与发文字都会刷新——
 "人还在用就一直有效，停手超过窗口才失效"。窗口时长通过 `hello_ack.resume_expires_in`
-告知手机（PC 是权威方）。测试可用环境变量 `BEETYPE_RESUME_TTL_SECS` 覆盖（不进 UI）。
+告知手机（PC 是权威方）。测试可用环境变量 `BEEPTYPE_RESUME_TTL_SECS` 覆盖（不进 UI）。
 
 **身份标志与降级/升级通知（A+C 两处修复）**
 
@@ -268,7 +268,7 @@ accept
 1. 非席位持有者 / 未认证 / 等待接管中的连接 → 回 `ack{ok:false, code:"not_connected"}`。
 2. 文本 `trim()` 为空 → 回 `ack{ok:false, code:"empty_text"}`，不做任何剪贴板操作。
 3. 写入剪贴板并**读回校验**（`clipboard.rs`）：读到别的内容（被其他进程抢先持有）就重写一次；写入报错或重写后仍不一致 → 弹系统通知，回 `ack{ok:false, code:"clipboard_error"}`。读不回来则按原样继续（fail-open，不因"校验不了"把能用的粘贴挡掉）。
-4. 自动粘贴条件全部满足时才模拟粘贴：设置页开关生效 + 当前会话支持按键注入 + **BeeType 自己的窗口没有焦点**（避免把文字糊进配对窗口）。注入前记下焦点窗口，成功则 `pasted = true`，并交回 enigo 实例。
+4. 自动粘贴条件全部满足时才模拟粘贴：设置页开关生效 + 当前会话支持按键注入 + **BeepType 自己的窗口没有焦点**（避免把文字糊进配对窗口）。注入前记下焦点窗口，成功则 `pasted = true`，并交回 enigo 实例。
 5. 自动发送：`auto_send` 生效且**焦点窗口未变**时，复用同一个 enigo 实例、等 `enter_delay(字符数)` 后模拟 Enter；焦点变了就跳过（文字已粘贴，由用户自己按回车），只记日志、不在手机端打扰用户。
 6. 回 `ack{ok:true, pasted, srv_recv_ms}`（`srv_recv_ms` 是服务端收到消息的时间戳，供手机端算延迟）。
 
@@ -357,7 +357,7 @@ SECURITY.md，并在 §8 有对应测试（有效凭证应答、错误凭证与�
 
 - 前端每 1s 轮询 `get_pairing_info`；轮询顺带调用 `ensure_code_fresh()`——只要没连接、且配对码已过期或剩余不足 2 分钟就自动换新，保证窗口上展示的二维码永远可用（PC 长期运行时不会变成死码）。
 - 配对成功后先通知前端渲染绿色「已连接」页，0.9s 后自动隐藏到托盘；是否收回由设置项「连接后自动隐藏窗口」（`auto_hide`，默认开）决定。历史上这里用的是"窗口是否被用户手动打开"的隐形标记（`manual_window`），它会因为"为了扫码从托盘打开一次窗口"而永久禁用自动收回——v0.2.4 换成了显式设置项，该标记已删除。
-- QR 内容格式 `beetype://<ip>:<port>?code=<code>`，由 `qrcode` 渲染成 SVG 内联返回，无需前端构建链。
+- QR 内容格式 `beeptype://<ip>:<port>?code=<code>`，由 `qrcode` 渲染成 SVG 内联返回，无需前端构建链。
 - TCP 绑定 `0.0.0.0:<port>`；`lan_ip()` 仅是取默认路由网卡的 IPv4（`UdpSocket::connect` 只做路由选择，**不发包**）用于生成二维码里的地址。
 
 Tauri commands（13 个）：
@@ -485,7 +485,7 @@ app/lib/
     └── discovery_service.dart     # UDP 广播发现
 ```
 
-平台通道 `beetype/device`：Android 在 `MainActivity.kt` 实现 `getDeviceName`（按品牌优先级取系统设备名）与 `getHardwareId`（ANDROID_ID）；iOS 在 `AppDelegate.swift` 实现（`UIDevice.current.name` 与 Keychain 持久化 UUID）。
+平台通道 `beeptype/device`：Android 在 `MainActivity.kt` 实现 `getDeviceName`（按品牌优先级取系统设备名）与 `getHardwareId`（ANDROID_ID）；iOS 在 `AppDelegate.swift` 实现（`UIDevice.current.name` 与 Keychain 持久化 UUID）。
 
 ### 4.2 依赖
 
@@ -533,7 +533,7 @@ app/lib/
 4. 直连网络层失败才用发现结果补连一次（DHCP 换 IP 的主路径），连上后刷新缓存里的 IP。
 5. 凭证被拒（`unauthorized`）→ 由上层删除本地凭证并停止重连。
 
-其他入口：`pairWithCode()`（扫码配对，只有拿到 token 才落盘）、`pairFromQr()`（解析 `beetype://` URI）、`takeover()`、`userDisconnect()`（手动断开并标记本进程不再自动重连）、`downgradeToTemp()`（PC 解绑后删本地凭证、会话转临时，不断开）、`forgetDevice()`。
+其他入口：`pairWithCode()`（扫码配对，只有拿到 token 才落盘）、`pairFromQr()`（解析 `beeptype://` URI）、`takeover()`、`userDisconnect()`（手动断开并标记本进程不再自动重连）、`downgradeToTemp()`（PC 解绑后删本地凭证、会话转临时，不断开）、`forgetDevice()`。
 
 `manualDisconnected` 是**内存态**标记：用户亲手点断开、或 PC 主动断开（`owner_disconnect`）后本进程内不再自动重连，冷启动即失效。
 
@@ -629,7 +629,7 @@ app/lib/
 - **扫码框有扫动光带**（微信扫一扫那种观感）：`_ScanLine`，1.8 秒一个来回。
 - **不打断已有连接**：扫到的是**当前已连着的那台电脑**（同 ip:port）时复用现有 socket，不为配对先把好连接拆掉；换到别的电脑才断开（一台手机同时只连一台电脑）。扫码页打开期间，首页**不做自动重连、不唤起键盘**（否则扫另一台电脑时会去重连旧电脑、甚至把键盘盖到扫码页上）；从扫码页返回而没配对成功时，再把之前那条连接找回来。
 - **成功直接跳转**：不再先显示一句「连接成功！」再跳（跳转本身就是成功的反馈）。
-- **单帧误读静默忽略**：读到的内容不是 `beetype://…` 就丢帧继续扫（二维码每约 3 分钟自动换新、扫描瞬间也可能糊），只有电脑明确拒绝才给红字提示。
+- **单帧误读静默忽略**：读到的内容不是 `beeptype://…` 就丢帧继续扫（二维码每约 3 分钟自动换新、扫描瞬间也可能糊），只有电脑明确拒绝才给红字提示。
 - **诊断日志**（定位"同一局域网内连不上"）：每次尝试打 `VL_CONN 尝试直连 <ip:port>` / `VL_CONN 直连结果：<status>` / `VL_CONN 广播找到 N 台：…` / `VL_CONN 用新地址补连 …`；广播前打 `VL_DISC 本机网卡：<名=地址…> → 广播目标：…`——这几行能直接回答"广播有没有发到电脑所在网段"。
 
 ### 4.8 语音发送时序（关键设计）
@@ -706,7 +706,7 @@ log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
 
 依赖都不需要用户安装外部命令（剪贴板走 arboard、按键走 enigo + X11 XTest），发行包不再依赖 `xdotool`/`xclip`。
 
-**Linux 任务栏图标（winicon.rs）**：Tauri 的 `window.set_icon()` 在这套 GTK/tao 栈上**实测无效**——调用返回成功，但窗口的 `_NET_WM_ICON` 属性始终不写（立即调用与延后 2 秒调用都试过）。而缺该属性的窗口在 Deepin 的任务栏里会退回通用图标（现象：显示"两个齿轮"）；同机对照，Edge / ZCode 都设了这个属性、图标正常。因此改为自己实现：连 X server，从 `_NET_CLIENT_LIST` 里按 `_NET_WM_PID` == 本进程 pid 且 `WM_CLASS` 含 `beetype` 找到自己的窗口，把 128×128 图标按 `[宽, 高, ARGB...]` 写入该属性（带重试，失败只记日志）。仅作用于 Linux/X11；Wayland 用 app_id 关联，Windows/macOS 用可执行文件图标。
+**Linux 任务栏图标（winicon.rs）**：Tauri 的 `window.set_icon()` 在这套 GTK/tao 栈上**实测无效**——调用返回成功，但窗口的 `_NET_WM_ICON` 属性始终不写（立即调用与延后 2 秒调用都试过）。而缺该属性的窗口在 Deepin 的任务栏里会退回通用图标（现象：显示"两个齿轮"）；同机对照，Edge / ZCode 都设了这个属性、图标正常。因此改为自己实现：连 X server，从 `_NET_CLIENT_LIST` 里按 `_NET_WM_PID` == 本进程 pid 且 `WM_CLASS` 含 `beeptype` 找到自己的窗口，把 128×128 图标按 `[宽, 高, ARGB...]` 写入该属性（带重试，失败只记日志）。仅作用于 Linux/X11；Wayland 用 app_id 关联，Windows/macOS 用可执行文件图标。
 
 ---
 
@@ -719,7 +719,7 @@ log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
   - Android：`flutter build apk --release --target-platform android-arm64`，签名 keystore 由 Secrets 还原并生成 `key.properties`。
   - 桌面：矩阵 `ubuntu-22.04`（GLIBC 兼容性）/ `macos-latest` / `windows-latest`，`tauri build` 后分别产出 `.deb` + `.AppImage`、`.dmg`、`.msi`。
   - Release job 汇总所有产物，`workflow_dispatch` 触发时先建 draft。
-- **本地构建**：桌面端 `cd desktop && cargo tauri build`（开发期 `cargo build` 后直接跑 `target/debug/beetype`，前端是单文件 HTML，无需前端构建链）；手机端 `cd app && flutter build apk --release --target-platform android-arm64`。
+- **本地构建**：桌面端 `cd desktop && cargo tauri build`（开发期 `cargo build` 后直接跑 `target/debug/beeptype`，前端是单文件 HTML，无需前端构建链）；手机端 `cd app && flutter build apk --release --target-platform android-arm64`。
 - 仓库根的行尾与二进制属性由 `.gitattributes` 统一（`* text=auto eol=lf`）；`.trae/`、`target/`、签名文件在 `.gitignore` 中排除。
 
 ---
@@ -754,7 +754,7 @@ log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
 
 **尚未自动化**（当前最薄弱的两块）：`home_page` 的 composing 下降沿发送判定、`text_sender` 的「直连 + 发现并行 / 降级 / 续连兜底」编排路径（这两块靠真机验证）。
 
-**真机联调**：双端部署、装机、抓日志的固定流程见工作区内的 `.trae/skills/beetype-deploy`（本地私有，未纳入版本库）；其中的环境事实（无线 adb 地址、Flutter 路径、日志文件位置）只对本机有效。
+**真机联调**：双端部署、装机、抓日志的固定流程见工作区内的 `.trae/skills/beeptype-deploy`（本地私有，未纳入版本库）；其中的环境事实（无线 adb 地址、Flutter 路径、日志文件位置）只对本机有效。
 
 ---
 

@@ -102,8 +102,7 @@ class _ScanPageState extends State<ScanPage> {
   /// 上一次已发起配对的二维码原文。
   ///
   /// 配对失败后扫描会立即恢复，而二维码往往还停在取景框里，不加去重会在
-  /// 数秒内对同一张码发起多次请求——5 次 bad_code 就会触发 PC 端 60 秒冷却，
-  /// 用户只扫了一次却被关在门外一分钟。PC 端续期后二维码内容必然变化，
+  /// 数秒内对同一张码反复发请求。PC 端续期后二维码内容必然变化，
   /// 届时同位置的新码自然允许再次发起。
   String? _lastAttemptedRaw;
 
@@ -168,7 +167,7 @@ class _ScanPageState extends State<ScanPage> {
     // 不是我们的二维码格式：这一帧没读懂而已（二维码在电脑端每约 3 分钟自动换新，
     // 扫描瞬间也可能糊），静默忽略、继续扫——下一帧通常就对了。
     // 把它当失败报成红字只会吓到用户，而且它本来就不影响最终结果。
-    if (!raw.startsWith('beetype://')) {
+    if (!raw.startsWith('beeptype://')) {
       debugPrint('VL_SCAN 忽略一次未读懂的内容（${raw.length} 字节）');
       return;
     }

@@ -11,8 +11,8 @@
 ### 1. 克隆仓库
 
 ```bash
-git clone https://github.com/jihonghe/beetype.git
-cd beetype
+git clone https://github.com/jihonghe/beeptype.git
+cd beeptype
 ```
 
 ### 2. 系统依赖
@@ -39,7 +39,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ### 3. 项目结构
 
 ```
-beetype/
+beeptype/
 ├── app/                    # Flutter 手机端（Android + iOS）
 │   ├── lib/                # Dart 源码
 │   ├── android/            # Android 原生（Kotlin）
@@ -64,7 +64,7 @@ beetype/
 ```bash
 # 终端 A：桌面端开发模式
 # （前端是 desktop/src/index.html 单文件，没有 npm 工程；改 HTML 后重开窗口即生效）
-cd desktop && cargo tauri dev          # 或 cargo build && ./src-tauri/target/debug/beetype
+cd desktop && cargo tauri dev          # 或 cargo build && ./src-tauri/target/debug/beeptype
 
 # 终端 B：手机端开发模式（热重载）
 cd app && flutter pub get && flutter run
@@ -86,7 +86,7 @@ cd app && flutter build apk --release --target-platform android-arm64
 
 ### 6. 跑起来验证
 
-1. 启动 PC 端 `cargo tauri dev`（或 `cargo build` 后直接跑 `target/debug/beetype`）→ 托盘图标出现
+1. 启动 PC 端 `cargo tauri dev`（或 `cargo build` 后直接跑 `target/debug/beeptype`）→ 托盘图标出现
 2. 手机 `flutter run` → 扫码 → 连 PC
 3. 发一条短消息，确认自动粘贴 / 自动发送正常
 4. 常用设备绑定 → 卸载重装手机 APP → 再扫码 → 确认 hardware_id 恢复常用设备身份

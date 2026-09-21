@@ -25,7 +25,7 @@ bool peerCloseIsReceiverSide({
 /// 这次"凭证被拒"是不是**我们那台电脑**给的？
 ///
 /// 手机拿存储的地址去连时，那个地址可能已经被**另一台设备**占用（含另一台跑着
-/// BeeType 的电脑）。它会拒绝我们的凭证，但那并不代表"我们被解绑了"——只有
+/// BeepType 的电脑）。它会拒绝我们的凭证，但那并不代表"我们被解绑了"——只有
 /// 记忆里那台电脑的拒绝才算数。拿不到对方 device_id（旧版电脑）时按"是"处理，
 /// 保持旧行为。
 bool rejectionFromOurPc({required String? responderId, required String? expectedId}) {

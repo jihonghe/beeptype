@@ -120,7 +120,7 @@ impl Default for Config {
 /// 获取配置目录路径
 fn config_dir() -> Result<PathBuf, ConfigError> {
     // 环境变量覆盖（测试用）优先
-    if let Ok(custom) = std::env::var("BEETYPE_HOME") {
+    if let Ok(custom) = std::env::var("BEEPTYPE_HOME") {
         return Ok(PathBuf::from(custom));
     }
 
@@ -129,11 +129,11 @@ fn config_dir() -> Result<PathBuf, ConfigError> {
         .map_err(|_| ConfigError::NoHomeDir)?;
 
     let dir = if cfg!(target_os = "macos") {
-        home.join("Library/Application Support/beetype")
+        home.join("Library/Application Support/beeptype")
     } else if cfg!(target_os = "windows") {
-        home.join("AppData/Roaming/beetype")
+        home.join("AppData/Roaming/beeptype")
     } else {
-        home.join(".config/beetype")
+        home.join(".config/beeptype")
     };
     Ok(dir)
 }
@@ -303,10 +303,10 @@ impl Config {
 
     /// 临时设备的续连窗口时长。
     ///
-    /// 环境变量 `BEETYPE_RESUME_TTL_SECS` 优先——**仅供测试**（验证"过期后必须重新
+    /// 环境变量 `BEEPTYPE_RESUME_TTL_SECS` 优先——**仅供测试**（验证"过期后必须重新
     /// 扫码"这条路径不用真等 5 分钟），不进设置页、不写进用户文档。
     pub fn resume_ttl(&self) -> std::time::Duration {
-        if let Ok(raw) = std::env::var("BEETYPE_RESUME_TTL_SECS") {
+        if let Ok(raw) = std::env::var("BEEPTYPE_RESUME_TTL_SECS") {
             if let Ok(secs) = raw.trim().parse::<u64>() {
                 return std::time::Duration::from_secs(secs);
             }
@@ -380,14 +380,14 @@ impl Config {
 mod tests {
     use super::*;
 
-    /// 把配置目录重定向到 /tmp，避免单测写盘污染真实 ~/.config/beetype。
+    /// 把配置目录重定向到 /tmp，避免单测写盘污染真实 ~/.config/beeptype。
     /// 多线程共享同一测试目录；save 失败均被容忍，不断言落盘内容。
     fn install_test_home() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            let dir = format!("/tmp/beetype-unittest-{}", std::process::id());
+            let dir = format!("/tmp/beeptype-unittest-{}", std::process::id());
             std::fs::create_dir_all(&dir).unwrap();
-            std::env::set_var("BEETYPE_HOME", dir);
+            std::env::set_var("BEEPTYPE_HOME", dir);
         });
     }
 

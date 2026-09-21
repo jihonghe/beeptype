@@ -48,15 +48,16 @@ jobs:
 
       - name: Restore keystore from Secrets
         run: |
-          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > app/android/app/beetype-release.jks
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > app/android/app/beeptype-release.jks
 
       - name: Generate key.properties
         run: |
           cat > app/android/key.properties <<EOF
           storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          # 别名是签名密钥内部的标识，不随产品改名（改它等于换一把密钥）
           keyAlias=beetype
-          storeFile=beetype-release.jks
+          storeFile=beeptype-release.jks
           EOF
 
       - name: Build release APK
@@ -192,7 +193,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
-          name: BeeType ${{ github.ref_name }}
+          name: BeepType ${{ github.ref_name }}
           body_path: ${{ steps.notes.outputs.path }}
           generate_release_notes: ${{ steps.notes.outputs.path == '' }}
           # 这个作业只可能由 tag 推送触发（手动 dry run 已被上面的 if 跳过）

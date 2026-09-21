@@ -28,7 +28,7 @@ import Security
 
   private func setupBeetypeChannel(messenger: FlutterBinaryMessenger) {
     let channel = FlutterMethodChannel(
-      name: "beetype/device",
+      name: "beeptype/device",
       binaryMessenger: messenger
     )
     channel.setMethodCallHandler(handleDeviceMethodCall)
@@ -52,10 +52,10 @@ import Security
   /// 效果等价于 Android ANDROID_ID。恢复出厂设置才会清空。
   ///
   /// 流程：
-  /// 1. 读 Keychain（service = "com.beetype.hardware-id"）
+  /// 1. 读 Keychain（service = "com.beeptype.hardware-id"）
   /// 2. 读到 → 返回；没读到 → 生成新 UUID → 存 Keychain → 返回
   private func hardwareId() -> String {
-    let service = "com.beetype.hardware-id"
+    let service = "com.beeptype.hardware-id"
 
     // 1. 读
     let query: [String: Any] = [

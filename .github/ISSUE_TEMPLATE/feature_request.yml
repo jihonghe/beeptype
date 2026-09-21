@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        想让 BeeType 变得更好？告诉我们你的想法！
+        想让 BeepType 变得更好？告诉我们你的想法！
   - type: textarea
     id: motivation
     attributes:

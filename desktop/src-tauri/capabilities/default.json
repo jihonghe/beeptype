@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "BeeType default capability",
+  "description": "BeepType default capability",
   "windows": ["main"],
   "permissions": [
     "core:default",

@@ -135,7 +135,7 @@ class StorageService {
   /// 调用，用户在系统设置里改名后 PC 端显示也跟着更新
   Future<void> syncDeviceName() async {
     try {
-      final real = await const MethodChannel('beetype/device')
+      final real = await const MethodChannel('beeptype/device')
           .invokeMethod<String>('getDeviceName');
       final name = real?.trim() ?? '';
       if (name.isEmpty || name.toLowerCase().startsWith('android')) return;

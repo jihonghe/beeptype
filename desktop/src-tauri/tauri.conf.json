@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "BeeType",
+  "productName": "BeepType",
   "version": "0.3.0",
-  "identifier": "io.github.jihonghe.beetype",
+  "identifier": "io.github.jihonghe.beeptype",
   "build": {
     "frontendDist": "../src"
   },
@@ -11,7 +11,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "BeeType",
+        "title": "BeepType",
         "width": 380,
         "height": 520,
         "minWidth": 340,

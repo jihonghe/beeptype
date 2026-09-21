@@ -1,4 +1,4 @@
-# BeeType app
+# BeepType app
 
 A new Flutter project.
 

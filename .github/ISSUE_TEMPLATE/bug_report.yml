@@ -28,7 +28,7 @@ body:
       label: 复现步骤
       description: 你做了什么、期望什么、实际发生了什么。越具体越好。
       placeholder: |
-        1. 打开 PC 端 BeeType
+        1. 打开 PC 端 BeepType
         2. 手机扫码连接
         3. 手机发一条 "测试"
         4. 结果：没有粘贴，日志里看到 ...
@@ -38,7 +38,7 @@ body:
     id: logs
     attributes:
       label: 日志（可选）
-      description: PC 端日志（~/.config/beetype/ 或控制台输出）、手机端 adb logcat 片段
+      description: PC 端日志（~/.config/beeptype/ 或控制台输出）、手机端 adb logcat 片段
       render: text
   - type: textarea
     id: notes

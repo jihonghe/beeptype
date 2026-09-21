@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:beetype/services/retry_episode.dart';
+import 'package:beeptype/services/retry_episode.dart';
 
 /// 「一轮快速重试」状态机的完整护栏。
 ///

@@ -1,6 +1,6 @@
 <p align="center">
-  <strong>BeeType</strong><br>
-  <sub>手机说话 · 电脑自动打字</sub>
+  <strong>BeepType</strong><br>
+  <sub>手机说话，电脑落字</sub>
 </p>
 
 <p align="center">
@@ -12,13 +12,13 @@
 
 ---
 
-**BeeType** 是一个跨平台工具，把手机上的语音输入无缝搬运到电脑上。手机端长按说话（复用你手机输入法自带的语音识别——豆包、讯飞、微信、系统语音都行），松开后文字自动粘贴到 PC 当前焦点输入框，还可以勾选自动回车发送。
+**BeepType** 是一个跨平台工具，**把你说的话，变成电脑里的字**——手机端长按说话（复用你手机输入法自带的语音识别——豆包、讯飞、微信、系统语音都行），松开后文字自动粘贴到 PC 当前焦点输入框，还可以勾选自动回车发送。
 
 局域网直连、不走云端、零账号、零延迟。
 
 ## 它解决什么问题
 
-| 场景 | 之前 | 用 BeeType |
+| 场景 | 之前 | 用 BeepType |
 |---|---|---|
 | 快速记录想法 | 停下来打字 | 手机说一句话，PC 自动粘贴到编辑器 |
 | 远程开会时发消息 | 一只手在键盘一只手在手机 | 说一句话直接发到微信聊天框 |
@@ -52,7 +52,7 @@
 
 #### 方式一：下载预编译版本
 
-前往 [GitHub Releases](https://github.com/jihonghe/beetype/releases) 下载对应平台的安装包：
+前往 [GitHub Releases](https://github.com/jihonghe/beeptype/releases) 下载对应平台的安装包：
 
 | 平台 | 文件 |
 |------|------|
@@ -79,7 +79,7 @@ cargo install tauri-cli --version "^2.0"
 cd desktop
 cargo tauri build
 # 产物在 desktop/src-tauri/target/release/bundle/（.deb / .AppImage / .dmg / .msi）
-# 开发期可直接 `cargo build` 后运行 target/debug/beetype
+# 开发期可直接 `cargo build` 后运行 target/debug/beeptype
 ```
 
 ### 手机端
@@ -94,8 +94,8 @@ flutter install --release  # 装 release 包到真机
 
 ### 使用流程
 
-1. 启动 PC 端 BeeType → 系统托盘出现图标，点击打开主窗口
-2. 手机启动 BeeType → 点顶部扫码按钮 → 扫 PC 上的二维码
+1. 启动 PC 端 BeepType → 系统托盘出现图标，点击打开主窗口
+2. 手机启动 BeepType → 点顶部扫码按钮 → 扫 PC 上的二维码
 3. （可选）PC 上勾选「记住这台手机」→ 下次手机打开自动连接
 4. 手机长按麦克风图标说话 → 松开 → PC 当前焦点处自动粘贴
 
@@ -103,7 +103,7 @@ flutter install --release  # 装 release 包到真机
 
 ```
 ┌────────────────────┐        TCP + JSON（行协议）        ┌────────────────────┐
-│  BeeType App       │  ── 扫码配对码（一次性随机串）──→   │  BeeType Desktop   │
+│  BeepType App       │  ── 扫码配对码（一次性随机串）──→   │  BeepType Desktop   │
 │  (Flutter)         │  ── Token 持久化（免配重连）───→    │  (Tauri + Rust)    │
 │                    │  ── text → ack ───────────────→    │                    │
 │  mobile_scanner    │  ←─ session_ended / downgraded ──   │  enigo（按键注入）  │
@@ -114,7 +114,7 @@ flutter install --release  # 装 release 包到真机
         │                                                          │
   hardware_id                                              device_id / device_name
   (Android ANDROID_ID                                       (首次运行生成 UUIDv4，
-   / iOS Keychain UUID)                                      落盘 ~/.config/beetype/)
+   / iOS Keychain UUID)                                      落盘 ~/.config/beeptype/)
 ```
 
 | 层 | 协议 | 说明 |

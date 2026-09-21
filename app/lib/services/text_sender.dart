@@ -60,13 +60,13 @@ class TextSender {
   }
 
   /// 硬件指纹。Android: ANDROID_ID；iOS: Keychain 持久化 UUID。
-  /// 两端都在同一个 MethodChannel('beetype/device') 上响应 getHardwareId。
+  /// 两端都在同一个 MethodChannel('beeptype/device') 上响应 getHardwareId。
   /// 跨 APP 重装稳定，用于 PC 端识别"重装后仍是同一台手机"。
   String? _hardwareId;
   Future<String?> get hardwareId async {
     if (_hardwareId != null) return _hardwareId;
     try {
-      _hardwareId = await const MethodChannel('beetype/device')
+      _hardwareId = await const MethodChannel('beeptype/device')
           .invokeMethod<String>('getHardwareId');
     } catch (_) {
       _hardwareId = null;
@@ -549,7 +549,7 @@ class TextSender {
     return outcome;
   }
 
-  /// 扫码配对（QR 格式 beetype://<ip>:<port>?code=<code>）
+  /// 扫码配对（QR 格式 beeptype://<ip>:<port>?code=<code>）
   Future<({bool ok, String? error})> pairFromQr(String qrData) async {
     final Uri uri;
     try {
@@ -557,8 +557,8 @@ class TextSender {
     } catch (_) {
       return (ok: false, error: '二维码格式不正确');
     }
-    if (uri.scheme != 'beetype' || uri.host.isEmpty) {
-      return (ok: false, error: '不是 BeeType 的二维码');
+    if (uri.scheme != 'beeptype' || uri.host.isEmpty) {
+      return (ok: false, error: '不是 BeepType 的二维码');
     }
     final code = uri.queryParameters['code'];
     if (code == null || code.isEmpty) {

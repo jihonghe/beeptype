@@ -372,10 +372,10 @@ pub fn run() {
             let auto_send_config = config.auto_send;
             let auto_hide_config = config.auto_hide;
             let ip = lan_ip().unwrap_or_else(|| "127.0.0.1".to_string());
-            info!("BeeType starting on {}:{} (device {})", ip, port, config.device_name);
+            info!("BeepType starting on {}:{} (device {})", ip, port, config.device_name);
 
             // 开机自启：以配置为准同步系统实际状态
-            // （Linux 下为 ~/.config/autostart/beetype.desktop）
+            // （Linux 下为 ~/.config/autostart/BeepType.desktop，按 productName 命名）
             let autolaunch = app.autolaunch();
             if autostart_on {
                 match autolaunch.enable() {
@@ -445,7 +445,7 @@ pub fn run() {
 
             let _tray = TrayIconBuilder::new()
                 .menu(&menu)
-                .tooltip("BeeType")
+                .tooltip("BeepType")
                 .icon(
                     tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))
                         .expect("bundled app icon must parse"),
@@ -466,7 +466,7 @@ pub fn run() {
                             let _ = app
                                 .notification()
                                 .builder()
-                                .title("BeeType")
+                                .title("BeepType")
                                 .body(&format!("重启失败：{e}"))
                                 .show();
                         }
@@ -519,5 +519,5 @@ pub fn run() {
             set_window_height
         ])
         .run(tauri::generate_context!())
-        .expect("error while running BeeType application");
+        .expect("error while running BeepType application");
 }

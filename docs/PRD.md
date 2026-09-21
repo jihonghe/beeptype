@@ -1,4 +1,4 @@
-# BeeType 产品需求文档（PRD）
+# BeepType 产品需求文档（PRD）
 
 > **版本**：v0.2（与实现对齐）
 > **日期**：2026-09-20
@@ -24,7 +24,7 @@ PC 端语音输入是一个已被验证的真实需求。Windows 和 macOS 有�
 | **VoicePad AI** | Win/Mac | Android/iOS | 本地 Whisper | WiFi + USB | 买断 | ❌ |
 | **Voicy** | 全平台 | Android/iOS | 云端 ASR | 账号 | $6.79/月起 | ❌ |
 | **Invoke** | Win/Mac/Linux (Python) | 无 | 本地 Whisper GPU | 无（本机） | 免费 | ✅ |
-| **BeeType（本品）** | Win/Mac/Linux (Tauri) | Android/iOS (Flutter) | 复用手机输入法 | 局域网 TCP + QR | 免费 | 计划开源 |
+| **BeepType（本品）** | Win/Mac/Linux (Tauri) | Android/iOS (Flutter) | 复用手机输入法 | 局域网 TCP + QR | 免费 | 计划开源 |
 
 ### 1.3 逐产品分析
 
@@ -82,7 +82,7 @@ PC 端语音输入是一个已被验证的真实需求。Windows 和 macOS 有�
 
 ### 1.4 差异化定位
 
-| 维度 | 竞品主流方案 | BeeType（本品） |
+| 维度 | 竞品主流方案 | BeepType（本品） |
 |---|---|---|
 | 语音引擎 | 自建（Whisper/云端 ASR） | **复用用户手机输入法** |
 | 连接方式 | 云同步 / 浏览器 WebSocket | **局域网 TCP 直连** |
@@ -113,9 +113,9 @@ PC 端语音输入是一个已被验证的真实需求。Windows 和 macOS 有�
 
 ### 2.1 产品定义
 
-**BeeType** 是一款跨设备语音输入工具。它让用户在手机上用自己已安装的输入法（豆包、讯飞、微信等）进行语音转文字，识别完成的文字通过局域网即时同步到 PC 的系统剪贴板，用户在 PC 上按 Ctrl+V 即可粘贴。
+**BeepType** 是一款跨设备语音输入工具。它让用户在手机上用自己已安装的输入法（豆包、讯飞、微信等）进行语音转文字，识别完成的文字通过局域网即时同步到 PC 的系统剪贴板，用户在 PC 上按 Ctrl+V 即可粘贴。
 
-一句话描述：**手机说话，电脑粘贴。**
+一句话描述：**手机说话，电脑落字。**（完整说法：把你说的话，变成电脑里的字。）
 
 ### 2.2 产品边界
 
@@ -219,7 +219,7 @@ PC 端语音输入是一个已被验证的真实需求。Windows 和 macOS 有�
 
 #### 场景 1：Deepseek 网页端对话（画像 A）
 
-> 陈先生在 Deepin 桌面上用浏览器打开 Deepseek 网页端，想输入一段长提问。他拿起手机打开 BeeType APP，手机自动弹出豆包输入法。他按住输入法的麦克风说"帮我分析一下 Rust 和 Go 在异步编程模型上的本质区别"，松手后文字立即出现在手机输入框中，并同步到 PC 的光标处（默认开启自动粘贴；若关闭则手动 Ctrl+V）。整个过程 <3 秒。
+> 陈先生在 Deepin 桌面上用浏览器打开 Deepseek 网页端，想输入一段长提问。他拿起手机打开 BeepType APP，手机自动弹出豆包输入法。他按住输入法的麦克风说"帮我分析一下 Rust 和 Go 在异步编程模型上的本质区别"，松手后文字立即出现在手机输入框中，并同步到 PC 的光标处（默认开启自动粘贴；若关闭则手动 Ctrl+V）。整个过程 <3 秒。
 
 #### 场景 2：代码注释 / 文档编写（画像 A）
 
@@ -227,7 +227,7 @@ PC 端语音输入是一个已被验证的真实需求。Windows 和 macOS 有�
 
 #### 场景 3：腾讯文档 / 飞书协作用（画像 B）
 
-> 李女士在 Mac 上用浏览器打开腾讯文档写周报，打字打到手酸。她打开手机 BeeType，用微信输入法的语音功能说完周报内容，文字自动粘贴进文档光标处（macOS 下自动发送 Cmd+V）。比发到微信文件传输助手再复制快得多。
+> 李女士在 Mac 上用浏览器打开腾讯文档写周报，打字打到手酸。她打开手机 BeepType，用微信输入法的语音功能说完周报内容，文字自动粘贴进文档光标处（macOS 下自动发送 Cmd+V）。比发到微信文件传输助手再复制快得多。
 
 #### 场景 4：多语言混合输入（画像 B）
 
@@ -301,7 +301,7 @@ PC 端语音输入是一个已被验证的真实需求。Windows 和 macOS 有�
 **入口**：PC 端主窗口（启动即可见，托盘「打开主窗口」/托盘图标左键亦可唤起）
 **输出**：手机扫码后建立会话；若本次绑定常用设备，双方落盘长期凭证
 
-**QR 码内容**：`beetype://<ip>:<port>?code=<配对码>`
+**QR 码内容**：`beeptype://<ip>:<port>?code=<配对码>`
 
 **配对握手流程**：
 1. 手机扫描 QR 码，解析出 `ip`、`port`、`code`
@@ -401,7 +401,7 @@ PC 端语音输入是一个已被验证的真实需求。Windows 和 macOS 有�
 2. 文本为空 → 回 `ack{ok:false, code:"empty_text"}`，不动剪贴板
 3. 写入剪贴板（Tauri clipboard-manager → arboard）
 4. 写入失败 → 弹系统通知「剪贴板写入失败，请重试」，回 `ack{ok:false, code:"clipboard_error"}`
-5. 自动粘贴：开关生效 + 会话支持按键注入 + BeeType 自己的窗口没有焦点 → 模拟快捷键粘贴（见 FR-10）
+5. 自动粘贴：开关生效 + 会话支持按键注入 + BeepType 自己的窗口没有焦点 → 模拟快捷键粘贴（见 FR-10）
 6. 自动发送：粘贴成功后若开启则模拟 Enter
 7. 回 `ack{ok:true, pasted:<是否真的粘贴了>, srv_recv_ms:...}`
 
@@ -431,7 +431,7 @@ PC 端语音输入是一个已被验证的真实需求。Windows 和 macOS 有�
 └─────────────────────────┘
 ```
 
-- 托盘图标左键单击同样唤起主窗口；tooltip 固定为「BeeType」
+- 托盘图标左键单击同样唤起主窗口；tooltip 固定为「BeepType」
 - 状态行刻意保持可点击态（GTK 会把禁用菜单项整体渲染成灰色，连状态 emoji 一起变灰），点击不产生动作
 - 每个入口每次点击都是**重新进入**：落到该入口对应的页面，滚动位置从顶部开始，不沿用上次的停留位置
 
@@ -451,7 +451,7 @@ PC 端语音输入是一个已被验证的真实需求。Windows 和 macOS 有�
 **描述**：PC 端支持开机自动启动，默认关闭。
 
 **实现**：Tauri autostart 插件
-- 设置页开关控制；启动时以配置为准同步系统实际状态（Linux 写 `~/.config/autostart/beetype.desktop`）
+- 设置页开关控制；启动时以配置为准同步系统实际状态（Linux 写 `~/.config/autostart/beeptype.desktop`）
 - 启动后主窗口直接可见（不是静默托盘启动）；点叉关闭即隐藏到托盘
 
 ---
@@ -460,7 +460,7 @@ PC 端语音输入是一个已被验证的真实需求。Windows 和 macOS 有�
 
 **描述**：两端各自持久化本机身份与对端凭证，重启后自动恢复关系；临时关系不落盘。
 
-**PC 端存储**：`~/.config/beetype/config.json`（macOS / Windows 为对应平台配置目录），文件 0600、目录 0700，原子写入
+**PC 端存储**：`~/.config/beeptype/config.json`（macOS / Windows 为对应平台配置目录），文件 0600、目录 0700，原子写入
 
 ```json
 {
@@ -541,7 +541,7 @@ PC 端语音输入是一个已被验证的真实需求。Windows 和 macOS 有�
 - **按序注入**：粘贴快捷键与回车复用同一条注入连接，顺序不依赖墙钟时间
 - **回车前复核焦点**：注入前记下焦点窗口，发回车前再查一次；窗口变了就**不发回车**（文字已粘贴，用户自己按回车即可），只记日志、不在手机端打扰用户
 - **回车余量是安全余量，不是性能参数**：基准 250ms + 每 200 字符 1ms（上限 +500ms）。目标应用可能是异步插入（Chromium/Electron 系），快了没有收益、漏了就是消息没出去；因此取值刻意宽松，**不按机器、不按应用做特调**
-- BeeType 自己的窗口处于焦点时**跳过**粘贴，避免文字糊进配对窗口
+- BeepType 自己的窗口处于焦点时**跳过**粘贴，避免文字糊进配对窗口
 - 粘贴失败静默降级为「仅剪贴板」，文字不丢
 - Linux Wayland 会话判定为不支持（回退纯剪贴板手动 Ctrl+V），设置页显示「当前桌面会话不支持全局按键模拟」
 
@@ -763,13 +763,13 @@ PC 端语音输入是一个已被验证的真实需求。Windows 和 macOS 有�
 ```
  PC 端                                        手机端
    │                                            │
-   │  用户安装并打开 BeeType                    │
+   │  用户安装并打开 BeepType                    │
    │  → 主窗口直接可见，主页显示二维码           │
    │  → 托盘状态行「⚪ 等待配对」                │
-   │                                            │  用户安装并打开 BeeType APP
+   │                                            │  用户安装并打开 BeepType APP
    │                                            │  → 无绑定记录 → 扫码引导页
    │                                            │  点「扫码连接电脑」
-   │  <──────────── 扫码 beetype://ip:port?code=… ────│
+   │  <──────────── 扫码 beeptype://ip:port?code=… ────│
    │                                            │
    │                                            │  解析出 ip:port:code
    │                                            │  → 发起 TCP 连接（5s 超时）
@@ -791,7 +791,7 @@ PC 端语音输入是一个已被验证的真实需求。Windows 和 macOS 有�
 ```
 
 **步骤计数**：
-1. PC 端打开 BeeType（启动即显示二维码；关窗后可用托盘「打开主窗口」再唤起）
+1. PC 端打开 BeepType（启动即显示二维码；关窗后可用托盘「打开主窗口」再唤起）
 2. 手机端点「扫码连接电脑」并扫码
 3. 自动握手，连接成功
 
@@ -980,7 +980,7 @@ PC 端语音输入是一个已被验证的真实需求。Windows 和 macOS 有�
 │  逻辑层                      │   行协议        │  paste.rs     按键模拟        │
 │   tcp / text_sender          │                 │  discovery.rs UDP 发现        │
 │   storage / discovery        │   UDP 发现      │  config.rs    身份与凭证      │
-│  平台通道 beetype/device      │ ←─────────────→ │  lib.rs       托盘/窗口/命令  │
+│  平台通道 beeptype/device      │ ←─────────────→ │  lib.rs       托盘/窗口/命令  │
 └──────────────────────────────┘                 └──────────────────────────────┘
 ```
 
@@ -1057,7 +1057,7 @@ fn handle_text(id, text):
     2. text.trim().is_empty() → ack{ok:false, code:"empty_text"}（不动剪贴板）
     3. clipboard.write_text(text)          # Tauri 插件 → arboard，覆盖式
        失败 → 系统通知 + ack{ok:false, code:"clipboard_error"}
-    4. 自动粘贴：开关生效 && 平台支持 && BeeType 窗口未聚焦 → enigo 模拟快捷键
+    4. 自动粘贴：开关生效 && 平台支持 && BeepType 窗口未聚焦 → enigo 模拟快捷键
     5. 自动发送：粘贴成功后 && auto_send 生效 → 模拟 Enter
     6. ack{ok:true, pasted:<bool>, srv_recv_ms}
 ```
@@ -1080,7 +1080,7 @@ app/
 │       ├── text_sender.dart       # 编排：自动连接、配对、接管、断开、降级
 │       ├── storage_service.dart   # client_id、已绑定电脑列表、设备名
 │       └── discovery_service.dart # UDP 广播发现
-├── android/app/src/main/kotlin/com/beetype/app/MainActivity.kt  # 设备名 + ANDROID_ID
+├── android/app/src/main/kotlin/com/beeptype/app/MainActivity.kt  # 设备名 + ANDROID_ID
 ├── ios/Runner/AppDelegate.swift                                 # 设备名 + Keychain UUID
 └── test/widget_test.dart          # TcpMessage 编解码单测
 ```
@@ -1167,7 +1167,7 @@ JSON 行协议：每条消息一行 UTF-8 JSON，以 `\n` 结尾，单行上限 
 配对码（一次性）
   生成：PC 启动时 regenerate_code() → 32 字节 /dev/urandom → 64 位 hex
         → 存 SHA-256(code) 与 5 分钟过期时间
-        → 明文只出现在二维码里（beetype://ip:port?code=...）
+        → 明文只出现在二维码里（beeptype://ip:port?code=...）
   续期：窗口轮询时若已过期或剩余 <2 分钟且当前未连接 → 自动换新
   校验：收到 hello{code} → 先查过期 → 再比对 SHA-256
         → 失败即拒（不限流：靠一次性配对码与 32 字节随机串）
@@ -1191,7 +1191,7 @@ token（长期凭证）
 | macOS | `tauri build` | `.dmg` |
 | Windows | `tauri build` | `.msi` |
 
-> 构建入口是 Tauri CLI（`cargo install tauri-cli` 或 `npm i -g @tauri-apps/cli`），仓库里没有 npm 工程；开发期可直接 `cargo build` + 运行 `target/debug/beetype`。
+> 构建入口是 Tauri CLI（`cargo install tauri-cli` 或 `npm i -g @tauri-apps/cli`），仓库里没有 npm 工程；开发期可直接 `cargo build` + 运行 `target/debug/beeptype`。
 
 #### 7.6.2 手机端
 
@@ -1233,7 +1233,7 @@ token（长期凭证）
 | AC-40 | 自动发送的焦点复核 | 开启自动发送，发一条文字后在这段等待（≥250ms）内切到另一个窗口 | 文字粘贴在原窗口但**不发回车**；PC 日志出现 `Auto-send skipped: focus window changed during paste` |
 | AC-41 | 剪贴板写入校验 | 在装有剪贴板管理器的机器（Klipper / GPaste / CopyQ）上发送文字 | 剪贴板最终内容与手机发来的文字逐字符一致；日志无 `Clipboard read-back failed`，必要时出现 `Clipboard held by someone else … rewriting` |
 | AC-42 | 临时接入的断线续连 | 手机扫码接入后，杀掉手机 APP 再重开 | 窗口期内自动连回，零操作；**界面不做任何身份标注**（身份词已全部退出界面），窗口过期时才提示「连接已过期，请重新扫码」 |
-| AC-43 | 续连窗口过期 | 把窗口调到最短（或设 `BEETYPE_RESUME_TTL_SECS=20`），让临时会话静默超过窗口后重开 APP | 提示「临时会话已过期，请重新扫码」，回到扫码引导页 |
+| AC-43 | 续连窗口过期 | 把窗口调到最短（或设 `BEEPTYPE_RESUME_TTL_SECS=20`），让临时会话静默超过窗口后重开 APP | 提示「临时会话已过期，请重新扫码」，回到扫码引导页 |
 | AC-44 | 主人作废续连 | 临时手机在线时，在 PC 托盘点「断开当前手机」，随后手机重开 APP | 连不回来（凭证已作废），需重新扫码 |
 | AC-45 | 关闭续连 | 设置里把该档位设为「关闭」，扫码临时接入后杀 APP 重开 | 不自动续连，直接回到扫码引导页 |
 | AC-46 | 把当前手机绑定为常用手机 | 手机临时接入在线时，在 PC 设置 →「手机绑定」点「绑定这台手机」 | 杀 APP 重开自动连回；PC 端托盘与状态卡只显示手机名（不标注身份） |

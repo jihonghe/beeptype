@@ -7,7 +7,7 @@
 //! 没设的窗口都显示通用图标。
 //!
 //! 做法：连上 X server，从 `_NET_CLIENT_LIST` 里找 `_NET_WM_PID` 等于本进程、
-//! 且 `WM_CLASS` 含 "beetype" 的那个窗口，把 128×128 图标按 `_NET_WM_ICON` 的
+//! 且 `WM_CLASS` 含 "beeptype" 的那个窗口，把 128×128 图标按 `_NET_WM_ICON` 的
 //! 格式（[宽, 高, ARGB...] 32 位 cardinal）一次性写上去。
 //!
 //! 边界：
@@ -96,7 +96,7 @@ fn try_set_icon() -> Result<bool, String> {
             .and_then(|c| c.reply().ok())
             .map(|r| String::from_utf8_lossy(&r.value).to_lowercase())
             .unwrap_or_default();
-        if !classes.contains("beetype") {
+        if !classes.contains("beeptype") {
             continue;
         }
 

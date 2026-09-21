@@ -1,7 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:beetype/services/lan_check.dart';
-import 'package:beetype/services/retry_policy.dart';
-import 'package:beetype/services/tcp_service.dart';
+import 'package:beeptype/services/lan_check.dart';
+import 'package:beeptype/services/retry_policy.dart';
+import 'package:beeptype/services/tcp_service.dart';
 
 /// 「不在同一个局域网」判断的护栏。
 ///

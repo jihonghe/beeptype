@@ -13,7 +13,7 @@ use tauri::menu::MenuItem;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_notification::NotificationExt;
 
-/// 鉴权失败冷却配置
+/// 连接超时参数
 /// 读超时（秒）：心跳 5s 一次；踢人走 shutdown(Read) 唤醒，不受此粒度限制
 const READ_TIMEOUT_SECS: u64 = 5;
 /// 连接级心跳超时（秒）：连续 3 次心跳无响应即收尸
@@ -509,7 +509,7 @@ impl<R: Runtime> ServerState<R> {
     ///
     /// 配对码寿命只有 5 分钟，而 PC 往往长期运行、窗口按需唤起——
     /// 若不续期，窗口展示的二维码在启动 5 分钟后必然成为死码，
-    /// 扫码只会收到 bad_code，连续失败还会触发冷却。已连接时绝不换码。
+    /// 扫码只会收到「二维码已失效」，得重新回电脑前看码。已连接时绝不换码。
     pub fn ensure_code_fresh(&self) {
         if self.session_summary().0 {
             return;
@@ -1094,7 +1094,7 @@ impl<R: Runtime> ServerState<R> {
                 .app_handle
                 .notification()
                 .builder()
-                .title("BeeType")
+                .title("BeepType")
                 .body("剪贴板写入失败，请重试")
                 .show();
             return Some(Message::Ack {
@@ -1109,7 +1109,7 @@ impl<R: Runtime> ServerState<R> {
         // 自动粘贴到光标处：
         // 1. 设置页开关已开启；
         // 2. 当前平台支持全局按键模拟（X11/Windows/macOS；Wayland 回退纯剪贴板）；
-        // 3. BeeType 自己的窗口没有焦点，避免文字糊进配对/状态窗口。
+        // 3. BeepType 自己的窗口没有焦点，避免文字糊进配对/状态窗口。
         let mut pasted = false;
         let enabled = self.auto_paste.load(Ordering::Relaxed);
         let own_window_focused = self
@@ -1143,7 +1143,7 @@ impl<R: Runtime> ServerState<R> {
                 Err(e) => warn!("Auto-paste failed (text stays in clipboard): {}", e),
             }
         } else if enabled && own_window_focused {
-            info!("Skip auto-paste: BeeType window is focused");
+            info!("Skip auto-paste: BeepType window is focused");
         }
 
         Some(Message::Ack {
@@ -1355,7 +1355,7 @@ fn relaunch_command(exe: &Path) -> (String, Vec<std::ffi::OsString>) {
             vec![
                 "/C".into(),
                 format!(
-                    "timeout /t {RESTART_DELAY_SECS} /nobreak >nul & start \"\" \"%BEETYPE_RESTART_EXE%\""
+                    "timeout /t {RESTART_DELAY_SECS} /nobreak >nul & start \"\" \"%BEEPTYPE_RESTART_EXE%\""
                 )
                 .into(),
             ],
@@ -1372,7 +1372,7 @@ fn spawn_relaunch(exe: &Path) -> Result<(), String> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     #[cfg(windows)]
-    cmd.env("BEETYPE_RESTART_EXE", exe);
+    cmd.env("BEEPTYPE_RESTART_EXE", exe);
     #[cfg(unix)]
     unsafe {
         // 脱离当前会话，避免父进程（或终端）退出时把它一起带走
@@ -1396,9 +1396,9 @@ pub fn lan_ip() -> Option<String> {
 }
 
 /// 生成 QR 码内容字符串
-/// 格式：beetype://<ip>:<port>?code=<code>
+/// 格式：beeptype://<ip>:<port>?code=<code>
 pub fn qr_content(ip: &str, port: u16, code: &str) -> String {
-    format!("beetype://{}:{}?code={}", ip, port, code)
+    format!("beeptype://{}:{}?code={}", ip, port, code)
 }
 
 #[cfg(test)]
@@ -1408,7 +1408,7 @@ mod tests {
     #[test]
     fn test_qr_content() {
         let qr = qr_content("192.168.1.100", 8765, "123456");
-        assert_eq!(qr, "beetype://192.168.1.100:8765?code=123456");
+        assert_eq!(qr, "beeptype://192.168.1.100:8765?code=123456");
     }
 
     #[test]
@@ -1495,7 +1495,7 @@ mod tests {
     /// 且可执行文件路径作为**独立参数**传入、不拼进脚本字符串（路径含空格/引号也安全）
     #[test]
     fn test_relaunch_command_shape() {
-        let exe = Path::new("/usr/bin/beetype");
+        let exe = Path::new("/usr/bin/beeptype");
         let (program, args) = relaunch_command(exe);
 
         #[cfg(unix)]
@@ -1507,17 +1507,17 @@ mod tests {
             assert!(script.starts_with("sleep "), "应先等旧进程退出再启动");
             assert!(script.contains("$0"), "路径应通过参数传入");
             assert!(
-                !script.contains("/usr/bin/beetype"),
+                !script.contains("/usr/bin/beeptype"),
                 "路径不能拼进脚本文本"
             );
-            assert_eq!(args[2].to_string_lossy(), "/usr/bin/beetype");
+            assert_eq!(args[2].to_string_lossy(), "/usr/bin/beeptype");
         }
         #[cfg(windows)]
         {
             assert_eq!(program, "cmd");
             let script = args.last().map(|a| a.to_string_lossy().into_owned()).unwrap_or_default();
             assert!(script.contains("timeout /t"), "应先等旧进程退出再启动");
-            assert!(script.contains("%BEETYPE_RESTART_EXE%"), "路径应经环境变量传入");
+            assert!(script.contains("%BEEPTYPE_RESTART_EXE%"), "路径应经环境变量传入");
         }
     }
 

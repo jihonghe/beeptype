@@ -881,7 +881,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               label: const Text('扫码连接电脑'),
             ),
             const SizedBox(height: 12),
-            Text('在电脑端打开 BeeType，用本机扫描其二维码',
+            Text('在电脑端打开 BeepType，用本机扫描其二维码',
                 style:
                     TextStyle(fontSize: 12, color: scheme.onSurfaceVariant)),
           ],
@@ -898,7 +898,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('BeeType'),
+        title: const Text('BeepType'),
         actions: [
           IconButton(
             icon: const Icon(Icons.qr_code_scanner_rounded),

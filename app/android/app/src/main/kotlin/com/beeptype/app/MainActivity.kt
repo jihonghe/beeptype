@@ -1,4 +1,4 @@
-package com.beetype.app
+package com.beeptype.app
 
 import android.os.Build
 import android.provider.Settings
@@ -9,7 +9,7 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "beetype/device")
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "beeptype/device")
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "getDeviceName" -> result.success(deviceName())
