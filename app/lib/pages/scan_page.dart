@@ -16,6 +16,37 @@ class _ScanPageState extends State<ScanPage> {
   String _message = '扫描 PC 端显示的二维码';
   Color _messageColor = Colors.white;
 
+  /// 上一次配对失败（用于显示「重新扫描」入口）
+  bool _failed = false;
+
+  /// 扫描器控制器：**必须常驻**。
+  ///
+  /// 原先它在 build() 里现造、且 `_scanning` 为 false 时连控件一起移除——
+  /// 一次配对失败就等于把相机拆掉再重建，插件常常回不到可用状态，用户只能
+  /// 退出页面重新进（"不能持续扫描"的真身）。去重改由 [_lastAttemptedRaw]
+  /// 自己管，这样「重新扫描」才真的能让同一张码再试一次。
+  late final MobileScannerController _controller = MobileScannerController(
+    detectionSpeed: DetectionSpeed.normal,
+    facing: CameraFacing.back,
+  );
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  /// 原地重扫：清掉"同一张码只试一次"的去重，并把提示复位
+  void _retryScan() {
+    setState(() {
+      _lastAttemptedRaw = null;
+      _failed = false;
+      _scanning = true;
+      _message = '扫描 PC 端显示的二维码';
+      _messageColor = Colors.white;
+    });
+  }
+
   /// 上一次已发起配对的二维码原文。
   ///
   /// 配对失败后扫描会立即恢复，而二维码往往还停在取景框里，不加去重会在
@@ -35,15 +66,8 @@ class _ScanPageState extends State<ScanPage> {
       ),
       body: Stack(
         children: [
-          // 扫描器
-          if (_scanning)
-            MobileScanner(
-              controller: MobileScannerController(
-                detectionSpeed: DetectionSpeed.noDuplicates,
-                facing: CameraFacing.back,
-              ),
-              onDetect: _onDetect,
-            ),
+          // 扫描器：常驻不拆装（拆一次就得重新初始化相机，失败后往往回不来）
+          MobileScanner(controller: _controller, onDetect: _onDetect),
 
           // 扫描框
           Center(
@@ -62,10 +86,22 @@ class _ScanPageState extends State<ScanPage> {
             bottom: 80,
             left: 0,
             right: 0,
-            child: Text(
-              _message,
-              textAlign: TextAlign.center,
-              style: TextStyle(color: _messageColor, fontSize: 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  _message,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: _messageColor, fontSize: 16),
+                ),
+                if (_failed) ...[
+                  const SizedBox(height: 12),
+                  TextButton(
+                    onPressed: _retryScan,
+                    child: const Text('重新扫描'),
+                  ),
+                ],
+              ],
             ),
           ),
         ],
@@ -113,10 +149,10 @@ class _ScanPageState extends State<ScanPage> {
         }
       } else {
         setState(() {
-          _message = '${result.error ?? '配对失败，请重试'}\n'
-              '请重新打开电脑端配对窗口获取新二维码，再对准扫描';
+          _message = result.error ?? '配对失败，请重试';
           _messageColor = Colors.red;
           _scanning = true;
+          _failed = true;
         });
       }
     } catch (e) {
@@ -124,6 +160,7 @@ class _ScanPageState extends State<ScanPage> {
         _message = '连接失败：$e';
         _messageColor = Colors.red;
         _scanning = true;
+        _failed = true;
       });
     }
   }

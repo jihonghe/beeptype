@@ -574,7 +574,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 height: 14,
                 child: Center(
                   child: _StatusDot(
-                    color: connected ? Colors.green.shade600 : Colors.grey.shade400,
+                    // 连接中/重试中：用**亮绿色**呼吸——我们预期它就是要连上，
+                    // 让点看起来像是在"努力接通"，而不是像已经断开
+                    color: busy
+                        ? Colors.green.shade500
+                        : (connected
+                            ? Colors.green.shade600
+                            : Colors.grey.shade400),
                     breathing: busy,
                   ),
                 ),
@@ -830,8 +836,11 @@ class _StatusDot extends StatelessWidget {
       decoration: BoxDecoration(color: color, shape: BoxShape.circle),
     );
     if (!breathing) return dot;
-    // 系统开了"减少动态效果"就不做喘息：退化为常亮（宁可少一个提示，也不硬闪）
-    if (MediaQuery.maybeDisableAnimationsOf(context) ?? false) return dot;
+    // 系统开了"减少动态效果"就不做喘息。此时**不能画成实心绿**——那会被读成
+    // "已连接"；退化为半透明绿：静止、但与实心绿（已连接）和灰（断开）都区分得开
+    if (MediaQuery.maybeDisableAnimationsOf(context) ?? false) {
+      return Opacity(opacity: 0.55, child: dot);
+    }
     return _BreathingDot(child: dot);
   }
 }
