@@ -221,8 +221,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           weWereTalking: widget.sender.tcp.peerClosedWhileTalking,
           netJustChanged: _netChangedRecently,
         );
+        // 必须确实还握着一条有效的临时记录才处理：清记录这个动作本身会再抛一次
+        // "断开"事件，缺这个前提就会自激循环、疯狂弹提示（用户实测踩到过）
         if (receiverSide &&
             !_sessionEndedHandled &&
+            widget.sender.hasTransientSession &&
             widget.sender.lastAuthMode == AuthMode.resume) {
           unawaited(_abandonTransientWithNotice());
           break;
@@ -268,6 +271,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   /// 临时接入的"接收方出问题"出口：停掉重试、清记录、回扫码引导页，并说明一句
   Future<void> _abandonTransientWithNotice() async {
+    if (!widget.sender.hasTransientSession) return; // 已经没什么可作废的了
     _reconnectTimer?.cancel();
     _transientExpiryTimer?.cancel();
     _reconnectAttempt = 0;
@@ -508,7 +512,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
+  /// 上一次弹提示的内容与时刻：同一条消息短时间内不重复弹。
+  /// 弹提示的路径一旦被循环触发就会刷屏（历史上真出过），这里兜一层底。
+  String? _lastSnackText;
+  int _lastSnackMs = 0;
+
   void _showSnack(String message) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_lastSnackText == message && now - _lastSnackMs < 2000) return;
+    _lastSnackText = message;
+    _lastSnackMs = now;
     if (!mounted) return;
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()

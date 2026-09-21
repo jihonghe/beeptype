@@ -389,11 +389,15 @@ class TcpService {
 
   /// 硬断开（无 bye；异常清理用）
   Future<void> disconnect() async {
+    // 本来就是断的就不必再抛一次状态：重复抛会让"断开"驱动的界面逻辑自激
+    final wasConnected = _isConnected || _socket != null;
     _localClose = true;
     _connectSeq++; // 作废任何在飞的 connect
     await _teardown(announce: false);
     _isPaired = false;
-    _statusController.add(ConnectionStatus.disconnected);
+    if (wasConnected) {
+      _statusController.add(ConnectionStatus.disconnected);
+    }
   }
 
   /// 释放底层资源；announce=false 表示不广播 disconnected（由调用方决定状态）
