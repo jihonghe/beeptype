@@ -82,12 +82,11 @@ class _ScanPageState extends State<ScanPage> {
     final raw = barcodes.first.rawValue;
     if (raw == null) return;
 
-    // 检查 QR 格式
+    // 不是我们的二维码格式：这一帧没读懂而已（二维码在电脑端每约 3 分钟自动换新，
+    // 扫描瞬间也可能糊），静默忽略、继续扫——下一帧通常就对了。
+    // 把它当失败报成红字只会吓到用户，而且它本来就不影响最终结果。
     if (!raw.startsWith('beetype://')) {
-      setState(() {
-        _message = '无效的二维码，请扫描 BeeType 二维码';
-        _messageColor = Colors.red;
-      });
+      debugPrint('VL_SCAN 忽略一次未读懂的内容（${raw.length} 字节）');
       return;
     }
 

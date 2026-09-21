@@ -176,6 +176,53 @@ void main() {
     });
   });
 
+  group('对端关闭连接算谁的问题（锁屏被收尸 / 自己换网络都不能赖电脑）', () {
+    test('我们当时还在正常通信、网络也没刚变过 → 算电脑侧', () {
+      expect(
+        peerCloseIsReceiverSide(
+          peerClosed: true,
+          weWereTalking: true,
+          netJustChanged: false,
+        ),
+        isTrue,
+      );
+    });
+
+    test('我们自己静默了（锁屏/后台被挂起，PC 收尸）→ 不算电脑侧', () {
+      expect(
+        peerCloseIsReceiverSide(
+          peerClosed: true,
+          weWereTalking: false,
+          netJustChanged: false,
+        ),
+        isFalse,
+        reason: '是我们自己没发心跳，锅在手机侧，记录要留着等窗口期内续连',
+      );
+    });
+
+    test('手机自己刚换过网络（比如开热点）→ 不算电脑侧', () {
+      expect(
+        peerCloseIsReceiverSide(
+          peerClosed: true,
+          weWereTalking: true,
+          netJustChanged: true,
+        ),
+        isFalse,
+      );
+    });
+
+    test('压根不是对端关闭（静默超时）→ 不算电脑侧', () {
+      expect(
+        peerCloseIsReceiverSide(
+          peerClosed: false,
+          weWereTalking: false,
+          netJustChanged: false,
+        ),
+        isFalse,
+      );
+    });
+  });
+
   group('临时接入：这次断开要不要丢掉续连记录（谁出问题，谁负责）', () {
     test('电脑上的程序退出/重启（收到 FIN）→ 丢，立刻回扫码页', () {
       expect(
@@ -269,7 +316,13 @@ void main() {
     });
   });
 
-  group('心跳里的权威身份（pong.session）', () {
+  group('心跳里的权威信息（pong.session / resume_expires_in）', () {
+    test('临时接入的窗口时长会被带回来（手机据此刷新本地到期时间）', () {
+      const info = HeartbeatInfo(session: 'transient', resumeExpiresIn: 300);
+      expect(info.session, 'transient');
+      expect(info.resumeExpiresIn, 300);
+    });
+
     test('pong 不带身份时解出的 session 为空（老电脑 / 不持席）', () {
       final msg = TcpMessage.decode('{"type":"pong"}\n');
       expect(msg, isNotNull);

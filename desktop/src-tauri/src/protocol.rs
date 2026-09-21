@@ -99,6 +99,11 @@ pub enum Message {
     Pong {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
+        /// 临时接入的窗口剩余时长（秒）。手机本地记的到期时间只会在"配对/续连成功"
+        /// 时刷新，而 PC 的窗口是每次心跳都在滑动的——不定时同步的话，手机会在
+        /// 窗口还没到时就自以为过期，一断网就把记录丢掉、把用户赶去重新扫码。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume_expires_in: Option<u64>,
     },
 
     /// 手机端 → PC：常用设备请求接管被占用的电脑
@@ -163,7 +168,19 @@ impl Message {
     pub fn pong(session: Option<&str>) -> Self {
         Message::Pong {
             session: session.map(|s| s.to_string()),
+            resume_expires_in: None,
         }
+    }
+
+    /// 心跳回包带上临时接入的窗口剩余时长（仅临时席位有值）
+    pub fn with_resume_ttl(mut self, secs: Option<u64>) -> Self {
+        if let Message::Pong {
+            resume_expires_in, ..
+        } = &mut self
+        {
+            *resume_expires_in = secs;
+        }
+        self
     }
 
     pub fn encode(&self) -> Result<String, serde_json::Error> {

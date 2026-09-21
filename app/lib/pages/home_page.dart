@@ -60,6 +60,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// （手机端是事件驱动的，没有这一步会停在输入卡上直到用户碰它）
   Timer? _transientExpiryTimer;
 
+  /// 最近一次网络变化（换 Wi-Fi / 切回原网络 / 开关移动数据）的时刻：
+  /// 用来判断"对端关闭连接"是不是我们自己换网络造成的
+  DateTime? _lastNetChangeAt;
+
+  /// 手机自己的网络刚刚（15 秒内）变化过
+  bool get _netChangedRecently {
+    final t = _lastNetChangeAt;
+    return t != null && DateTime.now().difference(t) < const Duration(seconds: 15);
+  }
+
   /// 是否"在忙"：正在连接，或快速重试那一轮还没结束（有排程中的重试）
   bool get _busy =>
       _connecting ||
@@ -90,6 +100,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
     // 网络一变（换 Wi-Fi / 切回原网络 / 开关数据）立刻重试，不干等退避周期
     _netSub = Connectivity().onConnectivityChanged.listen((_) {
+      _lastNetChangeAt = DateTime.now();
       if (!mounted || _connecting) return;
       if (_status == ConnectionStatus.paired) return;
       if (!_canAutoConnect()) return;
@@ -197,9 +208,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         break;
       case ConnectionStatus.disconnected:
         _peerClosed = widget.sender.tcp.lastDisconnectWasPeer;
-        // 临时接入 + 对端关闭了连接（PC 程序退出/重启）：这是"接收方自身出问题"，
-        // 按定好的原则不给第二次机会——立刻清记录回扫码引导页，不干等窗口期
-        if (_peerClosed &&
+        // 临时接入 + "确定是电脑侧关闭了连接" → 立刻清记录回扫码引导页（不干等窗口期）。
+        // 两道护栏缺一不可：① 关闭时我们自己还在正常通信（不是被系统挂起静默到
+        // 被 PC 收尸）；② 手机网络没有刚刚变化过（不是我们自己换网络导致的连接结束）
+        final receiverSide = peerCloseIsReceiverSide(
+          peerClosed: _peerClosed,
+          weWereTalking: widget.sender.tcp.peerClosedWhileTalking,
+          netJustChanged: _netChangedRecently,
+        );
+        if (receiverSide &&
             !_sessionEndedHandled &&
             widget.sender.lastAuthMode == AuthMode.resume) {
           unawaited(_abandonTransientWithNotice());

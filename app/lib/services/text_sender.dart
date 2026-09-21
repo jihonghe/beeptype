@@ -84,14 +84,17 @@ class TextSender {
     // 这样"降级来的临时会话"和扫码临时设备一样能断线续连
     _downgradeSub = _tcp.downgradeGrantStream.listen(_onDowngradeGrant);
     _promotedSub = _tcp.promotedStream.listen(_onPromoted);
-    // 心跳里的权威身份：身份推送万一丢了（任何原因），一次心跳内自愈
-    _identitySub = _tcp.authoritativeIdentityStream.listen(_onAuthoritativeIdentity);
+    // 心跳里的权威信息：身份自愈 + 同步临时窗口（PC 是权威方）
+    _identitySub = _tcp.heartbeatStream.listen(_onHeartbeat);
     _initialized = true;
   }
 
   StreamSubscription<ResumeGrant>? _downgradeSub;
   StreamSubscription<PromotedGrant>? _promotedSub;
-  StreamSubscription<String>? _identitySub;
+  StreamSubscription<HeartbeatInfo>? _identitySub;
+
+  /// 上一次把窗口时长写回本地的时刻（节流：心跳 2 秒一次，不必每次都写盘）
+  int? _lastTtlSyncMs;
 
   /// 会话身份发生变化（例如被电脑设为常用设备）时通知界面刷新
   final _sessionUpdatedController = StreamController<void>.broadcast();
@@ -150,21 +153,21 @@ class TextSender {
     debugPrint('VL_TCP 降级续连凭证已落盘（${grant.expiresInSec}s 窗口）');
   }
 
-  /// 电脑在心跳里回报的权威身份与本地认知不一致时纠正过来。
+  /// 心跳里带回的 PC 侧权威信息：纠正身份 + 同步临时窗口。
   ///
-  /// 只处理"能确定"的方向：电脑说我是临时设备 → 我确实已不是常用设备
-  /// （删除本地凭证 + 会话标记为临时，与收到降级推送完全一致）。
-  /// 反方向（电脑说我是常用设备）只更新界面标签——长期凭证只在推送里给过一次，
-  /// 拿不到凭证明白写成常用设备反而是撒谎；实机上这条路径几乎不可达
-  /// （推送发不出去就等于连接已断，重连握手会给出真相）。
-  void _onAuthoritativeIdentity(String authoritative) {
+  /// 窗口同步必须做：手机本地记的到期时间只在"配对/续连成功"时刷新，而 PC 那边的
+  /// 窗口是每次心跳都在往后滑的——不同步的话，连接正常用了超过窗口时长之后，
+  /// 手机就会自以为过期，一断网就把还能用的记录丢掉、把用户赶去重新扫码。
+  void _onHeartbeat(HeartbeatInfo info) {
     final s = session;
     if (s == null || !s.ok) return;
-    if (authoritative == 'transient' && s.isPrimary) {
-      debugPrint('VL_TCP 心跳纠正身份：常用设备 → 临时设备');
+
+    // 身份自愈：电脑说我是临时接入，而我以为是常用设备 → 按降级处理（删本地凭证）
+    if (info.session == 'transient' && s.isPrimary) {
+      debugPrint('VL_TCP 心跳纠正身份：常用设备 → 临时接入');
       unawaited(downgradeToTemp().then((_) => _sessionUpdatedController.add(null)));
-    } else if (authoritative == 'primary' && !s.isPrimary) {
-      debugPrint('VL_TCP 心跳纠正身份：临时设备 → 常用设备');
+    } else if (info.session == 'primary' && !s.isPrimary) {
+      debugPrint('VL_TCP 心跳纠正身份：临时接入 → 常用设备');
       session = HelloOutcome(
         ok: s.ok,
         status: s.status,
@@ -175,6 +178,16 @@ class TextSender {
         capabilities: s.capabilities,
       );
       _sessionUpdatedController.add(null);
+    }
+
+    // 窗口同步（节流 30 秒写一次）
+    final ttl = info.resumeExpiresIn;
+    if (ttl != null && !(session?.isPrimary ?? true)) {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      if (_lastTtlSyncMs == null || now - _lastTtlSyncMs! > 30000) {
+        _lastTtlSyncMs = now;
+        unawaited(_storage.touchTransientSession(expiresInSec: ttl));
+      }
     }
   }
 

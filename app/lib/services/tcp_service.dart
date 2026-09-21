@@ -130,6 +130,17 @@ class HelloOutcome {
       HelloOutcome(ok: false, status: 'network_fail');
 }
 
+/// 心跳（pong）回报的 PC 侧权威信息
+class HeartbeatInfo {
+  /// PC 认定的身份："primary" 常用设备 / "transient" 临时设备；null = 不给声明
+  final String? session;
+
+  /// 临时接入的窗口剩余时长（秒）；null = 该连接不是临时席位
+  final int? resumeExpiresIn;
+
+  const HeartbeatInfo({this.session, this.resumeExpiresIn});
+}
+
 /// 判活是否超时：前台、有基准时刻、且静默超过窗口 → 已死。
 ///
 /// 抽成纯函数是为了能单测：这条判定错一个方向就是"健康连接被误断"或"假死连接一直绿灯"。
@@ -168,10 +179,9 @@ class TcpService {
   final _promotedController = StreamController<PromotedGrant>.broadcast();
   Stream<PromotedGrant> get promotedStream => _promotedController.stream;
 
-  /// 心跳（pong）里回报的**权威身份**："primary" 常用设备 / "transient" 临时设备。
-  /// 身份推送万一丢了，手机靠它在一个心跳周期（约 5 秒）内自愈。
-  final _identityController = StreamController<String>.broadcast();
-  Stream<String> get authoritativeIdentityStream => _identityController.stream;
+  /// 心跳（pong）里回报的权威信息（见 [HeartbeatInfo]）。
+  final _heartbeatController = StreamController<HeartbeatInfo>.broadcast();
+  Stream<HeartbeatInfo> get heartbeatStream => _heartbeatController.stream;
 
   String? _lastIp;
   int? _lastPort;
@@ -517,14 +527,16 @@ class TcpService {
         break;
 
       case 'pong':
-        // 心跳顺带回报权威身份；没带（不持席/未认证）就什么都不做，绝不瞎猜
-        final authoritative = d['session'] as String?;
-        final isIdentityClaim =
-            authoritative == 'primary' || authoritative == 'transient';
-        if (isIdentityClaim && authoritative != null) {
-          _identityController.add(authoritative);
+        // 心跳顺带回报权威信息；两样都没带（不持席/未认证）就什么都不做，绝不瞎猜
+        final claim = d['session'] as String?;
+        final session =
+            (claim == 'primary' || claim == 'transient') ? claim : null;
+        final ttl = (d['resume_expires_in'] as num?)?.toInt();
+        if (session != null || ttl != null) {
+          _heartbeatController.add(
+            HeartbeatInfo(session: session, resumeExpiresIn: ttl),
+          );
         }
-        // 没带身份（不持席/未认证）时什么都不做，绝不瞎猜
         break;
     }
   }
@@ -583,6 +595,21 @@ class TcpService {
   /// 最近一次断开是否由对端关闭造成
   bool get lastDisconnectWasPeer => _peerClosed;
 
+  /// 这次"对端关闭连接"发生时，我们自己还在正常通信吗？
+  ///
+  /// 锁屏/切后台时系统会挂起本进程的定时器——我们不再发心跳，PC 端 15 秒收不到心跳
+  /// 就会主动关掉这条连接。那种 FIN 的责任在**手机侧**（是我们自己没说话），
+  /// 不能当成"电脑退出了"，否则临时接入会把还能续连的记录白白丢掉。
+  bool get peerClosedWhileTalking {
+    if (!_peerClosed) return false;
+    final last = _lastInboundAt;
+    if (last == null) return false;
+    // 15 秒 = PC 端的心跳超时（HEARTBEAT_TIMEOUT_SECS）
+    return DateTime.now().difference(last) <= _silenceLimit;
+  }
+
+  static const Duration _silenceLimit = Duration(seconds: 15);
+
   /// 前后台切换：切回前台时重置判活基准，避免拿休眠期间的空档误判
   void setForeground(bool value) {
     _foreground = value;
@@ -625,7 +652,7 @@ class TcpService {
     _statusController.close();
     _sessionEndedController.close();
     _downgradeGrantController.close();
-    _identityController.close();
+    _heartbeatController.close();
     _promotedController.close();
   }
 }

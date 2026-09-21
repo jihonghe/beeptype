@@ -661,10 +661,12 @@ impl<R: Runtime> ServerState<R> {
                 // 心跳顺带回报权威身份：手机据此自愈（推送万一丢了，5 秒内也能纠正）。
                 // 只有真正持席的连接才给身份声明——等待接管的连接还没拿到席位，
                 // 未认证连接更是无从谈起，一律不给（手机收到空身份就忽略）
-                let session = if self.is_session_holder(ctx) {
+                let holder = self.is_session_holder(ctx);
+                let is_primary = ctx.identity.load(Ordering::SeqCst);
+                let session = if holder {
                     if ctx.waiting_takeover {
                         None
-                    } else if ctx.identity.load(Ordering::SeqCst) {
+                    } else if is_primary {
                         Some("primary".to_string())
                     } else {
                         Some("transient".to_string())
@@ -672,7 +674,14 @@ impl<R: Runtime> ServerState<R> {
                 } else {
                     None
                 };
-                Some(Message::pong(session.as_deref()))
+                // 临时接入再顺带同步一次窗口剩余时长：手机本地记的到期时间不会滑动，
+                // 不同步它就会在窗口还没到时自以为过期（一断网就把记录丢掉）
+                let ttl = if holder && !is_primary && !ctx.waiting_takeover {
+                    Some(self.resume_ttl().as_secs())
+                } else {
+                    None
+                };
+                Some(Message::pong(session.as_deref()).with_resume_ttl(ttl))
             }
 
             Message::PromotedAck => {
@@ -1866,6 +1875,69 @@ mod integration_tests {
             build_response(&state, req("cid-t", &proof).as_bytes()).is_none(),
             "作废后的临时凭证必须隐身"
         );
+    }
+
+    /// 接管的完整协议链路：临时手机占着席位时，已绑定手机凭长期凭证握手会进入
+    /// "等待接管"（回 occupied 但连接保持），发 `takeover` 后拿到席位，临时方
+    /// 收到 `session_ended{owner_takeover}`。
+    ///
+    /// 对应手机界面上的"点两下连接"：第一下发现被占用（自动重试随即停止），
+    /// 第二下才是接管——协议层只认这一条路径，临时方无法篡位。
+    #[test]
+    fn test_takeover_lets_bound_phone_kick_transient_occupant() {
+        let (state, code) = test_state();
+
+        // 1) 先绑一部手机（拿长期凭证），然后让它断开，把席位空出来
+        state.set_remember_next(true);
+        let (mut bound, mut bound_reader) = connect_as_phone(spawn_server(state.clone()));
+        send_hello(
+            &mut bound,
+            serde_json::json!({"type":"hello","code":code,"client_id":"cid-bound","device_name":"绑定手机"}),
+        );
+        let ack = read_until(&mut bound_reader, "hello_ack");
+        assert_eq!(ack["session"], "primary");
+        let token = ack["token"].as_str().expect("绑定应下发 token").to_string();
+        drop(bound);
+        drop(bound_reader);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        // 2) 临时手机扫码占住席位
+        let (mut transient, mut transient_reader) = connect_as_phone(spawn_server(state.clone()));
+        send_hello(
+            &mut transient,
+            serde_json::json!({"type":"hello","code":state.get_code(),"client_id":"cid-guest","device_name":"临时手机"}),
+        );
+        assert_eq!(
+            read_until(&mut transient_reader, "hello_ack")["session"],
+            "transient"
+        );
+
+        // 3) 绑定手机凭凭证回来：席位被占 → 回 occupied 且连接保持（等待接管）
+        let (mut back, mut back_reader) = connect_as_phone(spawn_server(state.clone()));
+        send_hello(
+            &mut back,
+            serde_json::json!({"type":"hello","token":token,"client_id":"cid-bound","device_name":"绑定手机"}),
+        );
+        let occupied = read_until(&mut back_reader, "hello_ack");
+        assert_eq!(occupied["ok"], false);
+        assert_eq!(occupied["status"], "occupied", "席位被占应回 occupied");
+        assert!(state.session.lock().unwrap().is_some(), "被占的连接应保持");
+
+        // 4) 发 takeover → 拿到席位；临时方收到 owner_takeover 后连接结束
+        back.write_all(b"{\"type\":\"takeover\"}\n").expect("takeover");
+        let ack_takeover = read_until(&mut back_reader, "takeover_ack");
+        assert_eq!(ack_takeover["ok"], true, "绑定手机应接管成功");
+
+        let ended = read_until(&mut transient_reader, "session_ended");
+        assert_eq!(
+            ended["reason"], "owner_takeover",
+            "临时方应收到主人接管的通知"
+        );
+
+        // 5) 接管后席位归绑定手机，托盘/状态同步
+        let (_, name, is_primary) = state.session_summary();
+        assert_eq!(name.as_deref(), Some("绑定手机"));
+        assert!(is_primary, "接管后应是常用设备席位");
     }
 
     /// 没有连接时转正应报错（界面据此提示）

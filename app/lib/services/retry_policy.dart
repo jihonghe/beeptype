@@ -24,6 +24,20 @@ bool retryAllowed(int attempt) => attempt < retryDelaysMs.length;
 /// 一轮快速重试的总时长（毫秒），仅用于文档与测试断言
 int get retryEpisodeMs => retryDelaysMs.fold(0, (a, b) => a + b);
 
+/// 这次"对端关闭连接"该不该算在**电脑侧**（临时接入据此决定要不要丢记录）。
+///
+/// 只有同时满足两条才算电脑侧：
+/// - [weWereTalking]：关闭发生时我们自己还在正常通信（不是被系统挂起、静默到被 PC 收尸）；
+/// - [netJustChanged] == false：手机自己的网络没有刚刚变化过（不是我们自己换网络导致的连接结束）。
+///
+/// 任一不满足，锅就在手机自己这边——临时记录要保留，给它在窗口期内续连的机会。
+bool peerCloseIsReceiverSide({
+  required bool peerClosed,
+  required bool weWereTalking,
+  required bool netJustChanged,
+}) =>
+    peerClosed && weWereTalking && !netJustChanged;
+
 /// 临时接入在断开之后要不要**丢掉**续连记录（丢掉 = 回扫码引导页，重新扫码）。
 ///
 /// 判定依据是"**谁出了问题**"（用户定的原则）：
