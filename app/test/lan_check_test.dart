@@ -303,22 +303,24 @@ void main() {
   });
 
   group('重试节奏（快速试一阵就停手）', () {
-    test('一轮约 1 分钟就停：不再有"永远每 10 秒一次"', () {
-      expect(retryEpisodeMs, greaterThan(60000));
-      expect(retryEpisodeMs, lessThan(70000));
+    test('一轮约 30 秒就停：不再有"永远每 10 秒一次"', () {
+      expect(retryEpisodeMs, greaterThanOrEqualTo(30000));
+      expect(retryEpisodeMs, lessThan(32000));
       expect(retryAllowed(0), isTrue);
       expect(retryAllowed(retryDelaysMs.length - 1), isTrue);
       expect(retryAllowed(retryDelaysMs.length), isFalse);
       expect(retryAllowed(99), isFalse, reason: '试满就该停手，交给用户点重新连接');
     });
 
-    test('先快后慢：第 0 次 1 秒、第 4 次起 10 秒', () {
+    test('先快后慢：1/2/4/6/8/9 秒，7 次尝试共 30 秒', () {
       expect(retryDelayMs(0), 1000);
       expect(retryDelayMs(1), 2000);
       expect(retryDelayMs(2), 4000);
-      expect(retryDelayMs(3), 8000);
-      expect(retryDelayMs(4), 10000);
-      expect(retryDelayMs(100), 10000);
+      expect(retryDelayMs(3), 6000);
+      expect(retryDelayMs(4), 8000);
+      expect(retryDelayMs(5), 9000);
+      expect(retryDelayMs(100), 9000);
+      expect(retryDelaysMs.length, 6, reason: '6 个间隔 → 首次触发 + 6 次重试 = 7 次尝试');
     });
   });
 
