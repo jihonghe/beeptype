@@ -176,6 +176,22 @@ void main() {
     });
   });
 
+  group('被电脑拒绝时的说法（不能谎称"被解绑"）', () {
+    test('绑定手机被拒 = 真被解绑', () {
+      expect(
+        credentialRejectedMessage(bound: true),
+        '电脑已解除与你的绑定，请重新扫码',
+      );
+    });
+
+    test('临时接入被拒 = 电脑忘了它（PC 服务重启）或窗口过期', () {
+      expect(
+        credentialRejectedMessage(bound: false),
+        '连接已失效，请重新扫码',
+      );
+    });
+  });
+
   group('重试节奏（快速试一阵就停手）', () {
     test('一轮约 1 分钟就停：不再有"永远每 10 秒一次"', () {
       expect(retryEpisodeMs, greaterThan(60000));

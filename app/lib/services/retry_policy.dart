@@ -24,6 +24,16 @@ bool retryAllowed(int attempt) => attempt < retryDelaysMs.length;
 /// 一轮快速重试的总时长（毫秒），仅用于文档与测试断言
 int get retryEpisodeMs => retryDelaysMs.fold(0, (a, b) => a + b);
 
+/// 电脑拒绝本机凭证时的那句话（纯逻辑，便于单测）。
+///
+/// 两种情况必须分开说：
+/// - **绑定手机**被拒 = 真被解绑了 → 「电脑已解除与你的绑定，请重新扫码」；
+/// - **临时接入**被拒 = 电脑把这次临时连接忘了（PC 服务重启/退出，接收方自身
+///   出问题就不给机会）或窗口真过期 → 「连接已失效，请重新扫码」，
+///   不能谎称"被解除绑定"（那会让用户以为是自己被踢了）。
+String credentialRejectedMessage({required bool bound}) =>
+    bound ? '电脑已解除与你的绑定，请重新扫码' : '连接已失效，请重新扫码';
+
 /// 胶囊右侧的按钮
 enum PillAction {
   /// 不显示按钮（正在连接/重试中——避免用户重复触发；或还没绑定过电脑）

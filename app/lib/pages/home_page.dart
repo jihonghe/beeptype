@@ -268,23 +268,27 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     } catch (_) {}
     if (!mounted) return;
 
-    // 临时会话的续连窗口过期（或被 PC 作废）时给出明确出口，而不是静默回到引导页
-    final expiredName = widget.sender.consumeTransientExpiredNotice();
-    if (expiredName != null) {
-      _showSnack('连接已过期，请重新扫码');
-    }
-
-    // 电脑**明确拒绝**本机凭证（典型：电脑端解除了与这台设备的绑定）：
-    // 凭证已失效 → 删除并回扫码页，并且要说明原因（否则用户莫名其妙）
+    // 电脑**明确拒绝**本机凭证：按凭证类型说真话——
+    // 绑定手机被拒 = 真被解绑了；临时接入被拒 = 电脑把这次临时连接忘了
+    // （PC 服务重启/退出：接收方自身出问题就不给机会）或窗口真过期。
     if (outcome != null && outcome.isUnauthorized) {
+      final bound = widget.sender.lastAuthMode == AuthMode.token;
       final id = widget.sender.storage.primaryDevice?.deviceId;
       await widget.sender.forgetDevice(id);
+      // 同一次失败只弹一句：临时路径也会记一个"已失效"标记，这里顺手消费掉
+      widget.sender.consumeTransientExpiredNotice();
       _connecting = false;
       if (mounted) {
-        _showSnack('电脑已解除与你的绑定，请重新扫码');
+        _showSnack(credentialRejectedMessage(bound: bound));
         setState(() {});
       }
       return;
+    }
+
+    // 临时会话在本地就已过期（窗口到期）：给出明确出口，而不是静默回到引导页
+    final expiredName = widget.sender.consumeTransientExpiredNotice();
+    if (expiredName != null) {
+      _showSnack('连接已失效，请重新扫码');
     }
 
     // 连不上：枚举一次本机网络，同时回答两个问题——
