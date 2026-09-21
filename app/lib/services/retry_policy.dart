@@ -65,8 +65,11 @@ String credentialRejectedMessage({required bool bound}) =>
 
 /// 胶囊右侧的按钮
 enum PillAction {
-  /// 不显示按钮（正在连接/重试中——避免用户重复触发；或还没绑定过电脑）
+  /// 不显示按钮（还没绑定过电脑；正文就是扫码引导页）
   none,
+
+  /// 停止：重试中给的动作——立刻停手，不是"再连一次"（避免重复触发）
+  stop,
 
   /// 连接（连不上、主动断开、电脑被占用且本机是绑定手机时点它即接管）
   connect,
@@ -75,15 +78,28 @@ enum PillAction {
   disconnect,
 }
 
+/// 剩余秒数：给一个截止时刻，算还剩几秒（向上取整，最小 0）。
+///
+/// 重试中把它显示在胶囊里（「连接中 · 18 秒」），让用户**看得见**还要等多久——
+/// 愿意等就等，不想等可以点「停止」。
+int retrySecondsLeft({required int deadlineMs, required int nowMs}) {
+  final left = deadlineMs - nowMs;
+  if (left <= 0) return 0;
+  return (left + 999) ~/ 1000;
+}
+
 /// 胶囊里那个词：**只有"在忙"时才有**，其余状态一律不说话。
 ///
 /// 用户需要知道的例外（连不上、被占用）放在打字区——状态归胶囊、该做什么归打字区。
-String? pillWord({required bool busy}) => busy ? '连接中' : null;
+String? pillWord({required bool busy, int? secondsLeft}) {
+  if (!busy) return null;
+  return secondsLeft == null ? '连接中' : '连接中 · $secondsLeft 秒';
+}
 
 /// 胶囊右侧显示哪个按钮（纯逻辑，便于单测）。
 ///
 /// - 已连接 → 断开
-/// - 正在连接/重试中 → 不显示（否则用户会重复点击）
+/// - 正在连接/重试中 → **停止**（让用户随时能打断，而不是给一个"再连一次"的按钮）
 /// - 其余可操作状态（连不上、主动断开）→ 连接
 /// - 还没绑定过电脑 → 不显示（正文就是扫码引导页）
 PillAction pillAction({
@@ -92,6 +108,6 @@ PillAction pillAction({
   required bool hasTarget,
 }) {
   if (connected) return PillAction.disconnect;
-  if (busy) return PillAction.none;
+  if (busy) return PillAction.stop;
   return hasTarget ? PillAction.connect : PillAction.none;
 }

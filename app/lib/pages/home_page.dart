@@ -70,9 +70,55 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return t != null && DateTime.now().difference(t) < const Duration(seconds: 15);
   }
 
+  /// 本轮快速重试的截止时刻（毫秒）：用来在胶囊里显示倒计时
+  int? _retryDeadlineMs;
+
+  /// 倒计时的每秒刷新器（只在重试中跑）
+  Timer? _countdownTimer;
+
   /// 连接尝试的代号：进扫码页会自增，作废还挂在半空中的旧尝试——
   /// 否则它超时后会把刚配对好的界面按回"连接中"（用户实测过）
   int _attemptGen = 0;
+
+  /// 一轮重试还没开始（没有在跑的倒计时）——用于"首次尝试时起倒计时"
+  bool get _reconnectDeadlineMissing => _countdownTimer == null;
+
+  /// 开始一轮快速重试的倒计时（首次尝试时调用）
+  void _startRetryCountdown() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _retryDeadlineMs = now + retryEpisodeMs;
+    _countdownTimer?.cancel();
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      final left = retrySecondsLeft(
+        deadlineMs: _retryDeadlineMs ?? 0,
+        nowMs: DateTime.now().millisecondsSinceEpoch,
+      );
+      if (left <= 0) {
+        _stopRetryCountdown();
+      }
+      setState(() {});
+    });
+  }
+
+  /// 结束一轮重试的倒计时（连上、停手、试满都走这里）
+  void _stopRetryCountdown() {
+    _countdownTimer?.cancel();
+    _countdownTimer = null;
+    _retryDeadlineMs = null;
+  }
+
+  /// 用户点「停止」：立刻停手、本进程不再自动重试；**记录不动**
+  /// （临时连接的窗口照样有效，重启 APP 后也会自动再试）
+  void _stopRetrying() {
+    _reconnectTimer?.cancel();
+    _attemptGen++; // 作废在飞的那次尝试
+    widget.sender.abortConnectAttempts();
+    widget.sender.manualDisconnected = true;
+    _connecting = false;
+    _stopRetryCountdown();
+    setState(() {});
+  }
 
   /// 是否"在忙"：正在连接，或快速重试那一轮还没结束（有排程中的重试）
   bool get _busy =>
@@ -129,6 +175,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _debounce?.cancel();
     _reconnectTimer?.cancel();
     _transientExpiryTimer?.cancel();
+    _countdownTimer?.cancel();
     _inputController.dispose();
     _focusNode.dispose();
     super.dispose();
@@ -196,6 +243,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _connecting = false;
         _reconnectTimer?.cancel();
         _transientExpiryTimer?.cancel();
+        _stopRetryCountdown();
         _reconnectAttempt = 0;
         _offLan = false; // 连上了：清掉上次失败留下的网络判断，别残留提示
         unawaited(_requestKeyboard());
@@ -315,6 +363,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     // 快速试满一轮就停手：慢速重试的价值极低，不如让用户当场点「连接」，
     // 或等下一次"用户回来了 / 环境变了"的触发
     if (!retryAllowed(_reconnectAttempt)) {
+      _stopRetryCountdown(); // 试满一轮：倒计时收掉，界面变灰点 + 「连接」
       return;
     }
 
@@ -337,6 +386,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final gen = ++_attemptGen; // 本次尝试的代号：中途去扫码就作废
     _connecting = true;
     _sessionEndedHandled = false;
+    if (_reconnectDeadlineMissing) {
+      _startRetryCountdown(); // 新的一轮：从整轮时长开始倒计
+    }
     HelloOutcome? outcome;
     try {
       // 上次已经判明"电脑那个地址不在我任何网段里"→ 跳过无意义的直连，只广播：
@@ -551,7 +603,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final busy = _busy;
     final connected = _status == ConnectionStatus.paired;
     final hasTarget = widget.sender.hasAnyTarget;
-    final word = pillWord(busy: busy);
+    final secondsLeft = _retryDeadlineMs == null
+        ? null
+        : retrySecondsLeft(
+            deadlineMs: _retryDeadlineMs!,
+            nowMs: DateTime.now().millisecondsSinceEpoch,
+          );
+    final word = pillWord(busy: busy, secondsLeft: secondsLeft);
     final action = pillAction(
       connected: connected,
       busy: busy,
@@ -583,6 +641,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           onPressed: _onPillConnect,
           style: pillButtonStyle(null),
           child: const Text('连接'),
+        ),
+      // 停止：重试中给的动作——不想等就立刻停手（不是"再连一次"）
+      PillAction.stop => TextButton(
+          onPressed: _stopRetrying,
+          style: pillButtonStyle(Colors.grey.shade600),
+          child: const Text('停止'),
         ),
     };
 
@@ -631,16 +695,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     ),
                     if (word != null) ...[
                       const SizedBox(width: 8),
-                      Flexible(
-                        child: Text(
-                          word,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: scheme.onSurfaceVariant
-                                .withValues(alpha: 0.6),
-                          ),
+                      // 不参与压缩：名字可以先变短，倒计时必须完整可见
+                      Text(
+                        word,
+                        maxLines: 1,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: scheme.onSurfaceVariant
+                              .withValues(alpha: 0.6),
                         ),
                       ),
                     ],

@@ -177,7 +177,17 @@ void main() {
   group('胶囊的词与按钮（状态归胶囊、该做什么归打字区）', () {
     test('只有"在忙"时才有词，其余状态一律不说话', () {
       expect(pillWord(busy: true), '连接中');
-      expect(pillWord(busy: false), isNull, reason: '用户主动断开也不该出现状态词');
+      expect(pillWord(busy: true, secondsLeft: 18), '连接中 · 18 秒');
+      expect(pillWord(busy: false, secondsLeft: 18), isNull,
+          reason: '用户主动断开也不该出现状态词');
+    });
+
+    test('倒计时剩余秒数（向上取整、到点归零）', () {
+      const now = 1000000;
+      expect(retrySecondsLeft(deadlineMs: now + 30000, nowMs: now), 30);
+      expect(retrySecondsLeft(deadlineMs: now + 1, nowMs: now), 1);
+      expect(retrySecondsLeft(deadlineMs: now, nowMs: now), 0);
+      expect(retrySecondsLeft(deadlineMs: now - 5000, nowMs: now), 0);
     });
 
     test('已连接 → 断开', () {
@@ -187,14 +197,14 @@ void main() {
       );
     });
 
-    test('在忙（连接中/重试中）→ 不显示按钮，避免重复操作', () {
+    test('在忙（连接中/重试中）→ 给「停止」而不是"再连一次"，用户可随时打断', () {
       expect(
         pillAction(connected: false, busy: true, hasTarget: true),
-        PillAction.none,
+        PillAction.stop,
       );
       expect(
         pillAction(connected: false, busy: true, hasTarget: false),
-        PillAction.none,
+        PillAction.stop,
       );
     });
 
