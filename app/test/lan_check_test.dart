@@ -176,6 +176,39 @@ void main() {
     });
   });
 
+  group('临时接入：这次断开要不要丢掉续连记录（谁出问题，谁负责）', () {
+    test('电脑上的程序退出/重启（收到 FIN）→ 丢，立刻回扫码页', () {
+      expect(
+        dropTransientOn(peerClosed: true, retryExhausted: false, offLan: false),
+        isTrue,
+        reason: '接收方自身出问题，不给临时访客第二次机会',
+      );
+    });
+
+    test('还在高频重试中、手机网络也没变 → 保留，先给机会', () {
+      expect(
+        dropTransientOn(peerClosed: false, retryExhausted: false, offLan: false),
+        isFalse,
+      );
+    });
+
+    test('一轮高频重试试满、手机网络没变 → 判定为电脑侧，丢掉', () {
+      expect(
+        dropTransientOn(peerClosed: false, retryExhausted: true, offLan: false),
+        isTrue,
+        reason: '手机没换网络却连不上，说明问题在电脑那边',
+      );
+    });
+
+    test('手机自己换了网络 / 只有移动数据 → 保留（这是手机侧，给机会）', () {
+      expect(
+        dropTransientOn(peerClosed: false, retryExhausted: true, offLan: true),
+        isFalse,
+        reason: '换回同一网络后还能自己连回，不该把记录丢掉',
+      );
+    });
+  });
+
   group('被电脑拒绝时的说法（不能谎称"被解绑"）', () {
     test('绑定手机被拒 = 真被解绑', () {
       expect(

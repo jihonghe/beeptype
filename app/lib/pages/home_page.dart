@@ -49,6 +49,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 最近一次失败"看起来不在同一局域网"（决定打字区要不要提示检查 Wi-Fi）
   bool _offLan = false;
 
+  /// 最近一次断开是否由"对端关闭连接"造成（电脑上程序退出/重启）——只用于判定归属
+  bool _peerClosed = false;
+
+  /// 本次连接是否已经收过 session_ended（被踢/主人接管）：那种情况另有提示，
+  /// 不再按"对端关闭"重复处理一遍
+  bool _sessionEndedHandled = false;
+
+  /// 临时记录到期时的一次性刷新：让界面自己跳回扫码引导页
+  /// （手机端是事件驱动的，没有这一步会停在输入卡上直到用户碰它）
+  Timer? _transientExpiryTimer;
+
   /// 是否"在忙"：正在连接，或快速重试那一轮还没结束（有排程中的重试）
   bool get _busy =>
       _connecting ||
@@ -102,6 +113,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _netSub?.cancel();
     _debounce?.cancel();
     _reconnectTimer?.cancel();
+    _transientExpiryTimer?.cancel();
     _inputController.dispose();
     _focusNode.dispose();
     super.dispose();
@@ -168,6 +180,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       case ConnectionStatus.paired:
         _connecting = false;
         _reconnectTimer?.cancel();
+        _transientExpiryTimer?.cancel();
         _reconnectAttempt = 0;
         unawaited(_requestKeyboard());
         break;
@@ -183,6 +196,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         }
         break;
       case ConnectionStatus.disconnected:
+        _peerClosed = widget.sender.tcp.lastDisconnectWasPeer;
+        // 临时接入 + 对端关闭了连接（PC 程序退出/重启）：这是"接收方自身出问题"，
+        // 按定好的原则不给第二次机会——立刻清记录回扫码引导页，不干等窗口期
+        if (_peerClosed &&
+            !_sessionEndedHandled &&
+            widget.sender.lastAuthMode == AuthMode.resume) {
+          unawaited(_abandonTransientWithNotice());
+          break;
+        }
         // 主动尝试中的连接失败由 _attemptConnect 收尾统一排程；
         // 这里处理"使用中突发断线"（WiFi 抖动、PC 退出、被踢等）。
         if (!_connecting && _canAutoConnect()) {
@@ -196,6 +218,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   /// 服务端主动推送的会话事件（PC 托盘断开、解绑降级、常用设备接管、同身份替换）
   void _onSessionEnded(String reason) {
+    _sessionEndedHandled = true;
     switch (reason) {
       case 'owner_disconnect':
         // 电脑端主动断开 = 明确的用户意图，本进程不再自动重连
@@ -221,6 +244,29 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
+  /// 临时接入的"接收方出问题"出口：停掉重试、清记录、回扫码引导页，并说明一句
+  Future<void> _abandonTransientWithNotice() async {
+    _reconnectTimer?.cancel();
+    _transientExpiryTimer?.cancel();
+    _reconnectAttempt = 0;
+    await widget.sender.abandonTransient();
+    if (!mounted) return;
+    _showSnack('连接已失效，请重新扫码');
+    setState(() {});
+  }
+
+  /// 临时记录快到期时排一次刷新，让界面自己跳回扫码引导页
+  void _scheduleTransientExpiryRefresh() {
+    _transientExpiryTimer?.cancel();
+    final t = widget.sender.storage.transientSession;
+    if (t == null) return;
+    final ms = t.expiresAtMs - DateTime.now().millisecondsSinceEpoch;
+    if (ms <= 0) return;
+    _transientExpiryTimer = Timer(Duration(milliseconds: ms + 200), () {
+      if (mounted) setState(() {});
+    });
+  }
+
   /// 排程一次退避自动重连（前后台一致）。
   ///
   /// [net] 为本机网络快照：**只有移动数据时不重试**——本产品只在同一局域网下能工作，
@@ -242,7 +288,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     // 快速试满一轮就停手：慢速重试的价值极低，不如让用户当场点「重新连接」
     if (!retryAllowed(_reconnectAttempt)) {
-      return; // 快速试满一轮就停手，交给用户点「连接」或环境变化触发
+      // 试满一轮：如果这是临时接入、且手机自己的网络没变（说明不是手机换了网络，
+      // 而是电脑那边不可达），同样按"接收方出问题"处理——清记录回扫码页，
+      // 不让用户对着"未连接"的输入卡干等窗口期
+      if (widget.sender.lastAuthMode == AuthMode.resume && !_offLan) {
+        unawaited(_abandonTransientWithNotice());
+      }
+      return;
     }
 
     final delayMs = retryDelayMs(_reconnectAttempt);
@@ -300,6 +352,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (!mounted) return;
     _offLan = target != null && likelyOffLan(target, net?.ips ?? const []);
     _scheduleReconnect(net);
+    _scheduleTransientExpiryRefresh();
     setState(() {});
   }
 

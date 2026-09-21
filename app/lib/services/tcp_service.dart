@@ -219,11 +219,17 @@ class TcpService {
 
       _isConnected = true;
       _lastInboundAt = DateTime.now();
+      _peerClosed = false;
+      _localClose = false;
 
       _subscription = _socket!.listen(
         _onData,
         onError: (error) => _onError('Stream error: $error'),
-        onDone: () => _onDisconnected(),
+        onDone: () {
+          // 对端关闭（FIN）与本地主动关闭要分开：前者意味着"电脑那边的程序没了"
+          _peerClosed = !_localClose;
+          _onDisconnected();
+        },
       );
 
       // 吸收 IOSink.done 通道重复上报的写入错误
@@ -314,6 +320,7 @@ class TcpService {
   /// 主动告别：发 bye 等 bye_ack（兜底 1.5s），再关闭连接
   Future<void> bye() async {
     if (!_isConnected) return;
+    _localClose = true;
     final completer = Completer<void>();
     _byeCompleter = completer;
     _send(TcpMessage('bye', {}));
@@ -362,6 +369,7 @@ class TcpService {
 
   /// 硬断开（无 bye；异常清理用）
   Future<void> disconnect() async {
+    _localClose = true;
     await _teardown(announce: false);
     _isPaired = false;
     _statusController.add(ConnectionStatus.disconnected);
@@ -561,6 +569,19 @@ class TcpService {
   /// 是否在前台：只在前后台判定，且切回前台重置基准——后台/Doze 期间定时器被系统
   /// 延迟，拿休眠前的时刻判定会把健康连接误判成已死
   bool _foreground = true;
+
+  /// 这次断开是不是**对端关闭了连接**（收到 FIN/RST，典型：电脑上退出程序、重启应用）。
+  ///
+  /// 与"静默超时"区分开：它是个**确定信号**，用于判定"是谁的问题"——
+  /// 临时接入碰上它就直接回扫码引导页（接收方自身出问题不给机会），
+  /// 而静默超时还要先看手机自己的网络有没有变。
+  bool _peerClosed = false;
+
+  /// 本次是不是我们自己主动关的（主动断开/说再见），用来把"对端关闭"区分出来
+  bool _localClose = false;
+
+  /// 最近一次断开是否由对端关闭造成
+  bool get lastDisconnectWasPeer => _peerClosed;
 
   /// 前后台切换：切回前台时重置判活基准，避免拿休眠期间的空档误判
   void setForeground(bool value) {

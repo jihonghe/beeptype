@@ -24,6 +24,29 @@ bool retryAllowed(int attempt) => attempt < retryDelaysMs.length;
 /// 一轮快速重试的总时长（毫秒），仅用于文档与测试断言
 int get retryEpisodeMs => retryDelaysMs.fold(0, (a, b) => a + b);
 
+/// 临时接入在断开之后要不要**丢掉**续连记录（丢掉 = 回扫码引导页，重新扫码）。
+///
+/// 判定依据是"**谁出了问题**"（用户定的原则）：
+/// - 接收方（PC 服务）自身出问题 → 不给临时访客第二次机会；
+/// - 发送方（这台手机）自身出问题 → 给它机会，窗口期内自己连回。
+///
+/// 三个入参对应三种信号：
+/// - [peerClosed]：收到 FIN，电脑上的程序退出/重启了——**确定**是 PC 侧；
+/// - [retryExhausted]：一轮高频重试已经试满（约 1 分钟）却仍没连上；
+/// - [offLan]：手机当前网络里已经没有电脑那个地址（换了 Wi-Fi / 只有移动数据）
+///   ——这属于手机侧自己的网络变了，不能怪电脑。
+///
+/// 静默断开（没有 FIN）不立刻丢：因为"电脑网络变了""路由器抖了一下""电脑睡了"
+/// 在手机上看起来完全一样，先给一轮高频重试的机会，试满再看是哪个方向。
+bool dropTransientOn({
+  required bool peerClosed,
+  required bool retryExhausted,
+  required bool offLan,
+}) {
+  if (peerClosed) return true; // PC 程序退出/重启：确定，立刻回扫码页
+  return retryExhausted && !offLan; // 试满一轮、且手机网络没变 → 判定为 PC 侧
+}
+
 /// 电脑拒绝本机凭证时的那句话（纯逻辑，便于单测）。
 ///
 /// 两种情况必须分开说：
