@@ -76,6 +76,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 倒计时的每秒刷新器（一轮进行中且已开始重试时才跑）
   Timer? _countdownTimer;
 
+  /// 是否正在探活（回到前台时先问一句"对面还在吗"）
+  bool _probing = false;
+
   /// 连接尝试的代号：进扫码页会自增，作废还挂在半空中的旧尝试——
   /// 否则它超时后会把刚配对好的界面按回"连接中"（用户实测过）
   int _attemptGen = 0;
@@ -212,21 +215,37 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   AppLifecycleState? _lastLifecycleState;
 
-  void _onResumed() {
+  Future<void> _onResumed() async {
     // 用户可能在系统设置里改了设备名：顺手同步（毫秒级），下次连接 PC 即显示新名
     unawaited(widget.sender.refreshDeviceName());
+
     if (_status == ConnectionStatus.paired) {
-      // 连接还活着：无条件重新聚焦+唤起键盘
-      unawaited(_requestKeyboard());
+      // 界面上写着"已连接"不代表真的还连着：判活只在前后台做，后台期间不判定，
+      // 所以"在后台时对端走了"这件事本地根本不知道。回到前台先**主动探一下**：
+      // 活着就只唤起键盘（省掉一次无谓的重连）；没回应就当作断开，走重连。
+      if (_probing) return;
+      _probing = true;
+      final alive = await widget.sender.tcp.verifyAlive();
+      _probing = false;
+      if (!mounted) return;
+      if (alive) {
+        unawaited(_requestKeyboard());
+        return;
+      }
+      debugPrint('VL_CONN 回到前台探活失败：连接其实已经断了，开始重连');
+      // 让它按"真的断开"处理：状态跳变会触发一轮重连（与平时断线同一条路径）
+      unawaited(widget.sender.tcp.disconnect());
       return;
     }
+
     if (!_canAutoConnect()) return;
     if (_connecting ||
         _status == ConnectionStatus.connecting ||
         _status == ConnectionStatus.pairing) {
       return;
     }
-    _beginRetryEpisode(); // 回到前台 = 明确的触发
+    // 已是断开态（含"一轮重试刚结束"）：回到前台立刻再开一轮、马上试一次
+    _beginRetryEpisode();
     _attemptConnect();
   }
 

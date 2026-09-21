@@ -510,6 +510,7 @@ app/lib/
   - **只在前后台判定**，且切回前台重置判活基准：后台/Doze 期间定时器被系统延迟，拿休眠前的时刻判定会把健康连接误判成已死。判定本身抽成纯函数 `livenessExpired()`，有单测。
 - **断开来源只用于判定归属，不出现在界面上**：`lastDisconnectWasPeer`（收到 FIN）**不是**无条件等于"电脑退出了"——锁屏/切后台时本进程定时器被挂起，我们不发心跳，PC 端 15 秒超时也会关连接，那条 FIN 的责任在手机侧。因此判定要过两道护栏（`peerClosedWhileTalking` + 网络是否刚变过，见 §4.7 的 `peerCloseIsReceiverSide()`）。界面上一律同一个表现（灰点 + 「连接」）。
 - 状态机：`disconnected → connecting → (pairing) → paired`，另有 `occupied`（已认证但席位被占，连接保持）与 `failed`。
+- **主动探活 `verifyAlive()`**：发一个 ping，等**任何**服务端消息回来（默认 1.2 秒）。用在"回到前台"——判活只在前后台做，后台期间连接断了本地并不知道，界面可能一直挂着"已连接"；探一下才知道该不该重连。活着就只唤起键盘（省掉一次无谓重连），死了就按正常断线走一轮重连。
 - `session_ended` 与 `session_downgraded` 分别以 reason 字符串（含 `downgraded`）推给 UI 层。
 
 ### 4.4 text_sender.dart — 编排层

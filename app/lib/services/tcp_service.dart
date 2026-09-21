@@ -444,11 +444,17 @@ class TcpService {
   void _send(TcpMessage msg) {
     final socket = _socket;
     if (socket == null) return;
-    socket.write(msg.encode());
+    try {
+      socket.write(msg.encode());
+    } catch (_) {
+      // 对端已消失时 write 可能直接抛：交给 socket 的 onError/onDone 去处理连接状态
+    }
   }
 
   void _onData(List<int> data) {
     _lastInboundAt = DateTime.now(); // 任何服务端消息都算活着的证据
+    final probe = _probeCompleter;
+    if (probe != null && !probe.isCompleted) probe.complete(true);
     _buffer.write(utf8.decode(data));
 
     final content = _buffer.toString();
@@ -610,6 +616,28 @@ class TcpService {
   /// 最近一次断开是否由对端关闭造成
   bool get lastDisconnectWasPeer => _peerClosed;
 
+  /// 主动探活：发一个 ping，等**任何**服务端消息回来。
+  ///
+  /// 用在"回到前台"：那时本地状态可能还挂在"已连接"，而连接其实早就断了——
+  /// 判活只在前后台做，后台期间不判定，所以后台时断掉的连接不会被发现。
+  /// 不探一下，界面就会一直显示已连接、也不去重连（用户实测：切回来不重连，
+  /// 而且时好时坏——那"好"的几次其实是被系统杀掉后冷启动走了另一条路）。
+  Future<bool> verifyAlive({
+    Duration timeout = const Duration(milliseconds: 1200),
+  }) async {
+    if (!_isConnected || _socket == null) return false;
+    final completer = Completer<bool>();
+    _probeCompleter = completer;
+    try {
+      _send(TcpMessage('ping', {}));
+      return await completer.future.timeout(timeout);
+    } catch (_) {
+      return false;
+    } finally {
+      _probeCompleter = null;
+    }
+  }
+
   /// 当前是否真的处于已配对状态（界面在扫码返回后用它同步一次，
   /// 免得被任何残留事件把绿色按回"连接中"）
   bool get isPairedNow => _isPaired;
@@ -628,6 +656,9 @@ class TcpService {
   }
 
   static const Duration _silenceLimit = Duration(seconds: 15);
+
+  /// 探活等待器：收到**任何**服务端消息就完成（见 verifyAlive）
+  Completer<bool>? _probeCompleter;
 
   /// 连接序号：每发起一次 connect 自增，`disconnect()` 也自增。
   ///
