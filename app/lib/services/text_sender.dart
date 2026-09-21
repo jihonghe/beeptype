@@ -203,6 +203,20 @@ class TextSender {
   /// 只在连上后才记，判断"是不是不在同一网络"必须用尝试过的那个地址）
   String? _lastAttemptTargetIp;
 
+  /// 每次"连接尝试"的代号。
+  ///
+  /// 进扫码页会自增它，把还挂在半空中的旧尝试**作废**：旧尝试的直连超时事件
+  /// 会把刚配对好的界面按回"连接中"，更糟的是它会继续走自己的"广播补连"分支、
+  /// 拆掉刚建立的连接（用户实测：扫码配对成功却一直停在"连接中"，第二次才正常）。
+  int _connectGen = 0;
+
+  /// 作废当前所有在飞的连接尝试（进扫码页前调用）
+  void abortConnectAttempts() {
+    _connectGen++;
+  }
+
+  bool _superseded(int gen) => gen != _connectGen;
+
   /// 本次尝试用的凭证类型。
   ///
   /// 手机端只有一个判断依赖它：**被占用**时——用绑定凭证连的（本机就是这台电脑的
@@ -244,12 +258,16 @@ class TextSender {
       return _resumeTransientIfAny();
     }
     lastAuthMode = AuthMode.token;
+    final gen = _connectGen;
 
     HelloOutcome? outcome;
     final hid = await hardwareId;
     _lastAttemptTargetIp = dev.ip;
+    debugPrint('VL_CONN 尝试直连 ${dev.ip}:${dev.port}');
     try {
       await _tcp.connect(dev.ip, dev.port, timeout: _directConnectTimeout);
+      // 已被作废（例如用户正在扫码配对）：连上了也别插话，更不能发 hello
+      if (_superseded(gen)) return HelloOutcome.networkFail();
       outcome = await _tcp.hello(
         token: dev.token,
         clientId: _storage.clientId,
@@ -260,6 +278,8 @@ class TextSender {
     } catch (_) {
       outcome = null; // TCP 建连失败
     }
+    if (_superseded(gen)) return HelloOutcome.networkFail();
+    debugPrint('VL_CONN 直连结果：${outcome?.status ?? '网络层失败'}');
 
     // 成功 / 占用 / 凭证被拒：结论已明确，无需换 IP 再试
     if (outcome != null &&
@@ -288,6 +308,9 @@ class TextSender {
     } catch (_) {
       found = const [];
     }
+    if (_superseded(gen)) return HelloOutcome.networkFail();
+    debugPrint('VL_CONN 广播找到 ${found.length} 台：'
+        '${found.map((d) => '${d.ip}:${d.port}').join(',')}');
     final cand = found.isEmpty ? null : found.first;
     if (cand == null || cand.ip == dev.ip) {
       // 常用记录网络层不可达、广播也没人应：还留着一条**同一台电脑**的有效临时
@@ -304,10 +327,14 @@ class TextSender {
       return outcome ?? HelloOutcome.networkFail();
     }
 
+    // 作废检查放在最前：绝不能让旧尝试拆掉刚由扫码配对建立的连接
+    if (_superseded(gen)) return HelloOutcome.networkFail();
     await _tcp.disconnect();
     _lastAttemptTargetIp = cand.ip;
+    debugPrint('VL_CONN 用新地址补连 ${cand.ip}:${cand.port}');
     try {
       await _tcp.connect(cand.ip, cand.port, timeout: _directConnectTimeout);
+      if (_superseded(gen)) return HelloOutcome.networkFail();
       outcome = await _tcp.hello(
         token: dev.token,
         clientId: _storage.clientId,
@@ -318,6 +345,7 @@ class TextSender {
     } catch (_) {
       return HelloOutcome.networkFail();
     }
+    debugPrint('VL_CONN 补连结果：${outcome.status ?? '网络层失败'}');
     if (outcome.ok) {
       unawaited(_persistPrimary(dev, outcome, connectedIp: cand.ip));
     } else if (outcome.isOccupied) {
@@ -352,8 +380,10 @@ class TextSender {
       return HelloOutcome.networkFail();
     }
 
+    final gen = _connectGen;
     final hid = await hardwareId;
     _lastAttemptTargetIp = t.ip;
+    debugPrint('VL_CONN 尝试直连 ${t.ip}:${t.port}（临时续连）');
     try {
       await _tcp.connect(t.ip, t.port, timeout: _directConnectTimeout);
     } catch (_) {
@@ -368,7 +398,9 @@ class TextSender {
           )
           .catchError((Object _) => <DiscoveredDevice>[]);
       if (found.isEmpty) return HelloOutcome.networkFail();
+      if (_superseded(gen)) return HelloOutcome.networkFail();
       _lastAttemptTargetIp = found.first.ip;
+      debugPrint('VL_CONN 用新地址补连 ${found.first.ip}:${found.first.port}（临时续连）');
       try {
         await _tcp.connect(found.first.ip, found.first.port,
             timeout: _directConnectTimeout);
@@ -376,6 +408,7 @@ class TextSender {
         return HelloOutcome.networkFail();
       }
     }
+    if (_superseded(gen)) return HelloOutcome.networkFail();
 
     final outcome = await _tcp.hello(
       resume: t.token,

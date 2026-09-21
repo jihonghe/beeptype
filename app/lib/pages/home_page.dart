@@ -70,6 +70,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return t != null && DateTime.now().difference(t) < const Duration(seconds: 15);
   }
 
+  /// 连接尝试的代号：进扫码页会自增，作废还挂在半空中的旧尝试——
+  /// 否则它超时后会把刚配对好的界面按回"连接中"（用户实测过）
+  int _attemptGen = 0;
+
   /// 是否"在忙"：正在连接，或快速重试那一轮还没结束（有排程中的重试）
   bool get _busy =>
       _connecting ||
@@ -330,7 +334,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return;
     }
 
+    final gen = ++_attemptGen; // 本次尝试的代号：中途去扫码就作废
     _connecting = true;
+    _sessionEndedHandled = false;
     HelloOutcome? outcome;
     try {
       outcome = await widget.sender.autoConnect();
@@ -360,11 +366,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _showSnack('连接已失效，请重新扫码');
     }
 
+    // 已被作废（例如用户中途去扫码了）：什么都不做，绝不碰界面状态或重连排程
+    if (gen != _attemptGen) return;
+
     // 连不上：枚举一次本机网络，同时回答两个问题——
     // ① 是不是根本不在同一个局域网（能判断才提示，判断不了就沉默）；
     // ② 还有没有局域网可试（只有移动数据就不必再折腾了）
     final net = await localNetSnapshot();
     final target = widget.sender.lastAttemptTargetIp;
+    if (gen != _attemptGen) return;
     _connecting = false;
     if (!mounted) return;
     _offLan = target != null && likelyOffLan(target, net?.ips ?? const []);
@@ -812,10 +822,31 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _navigateToScan() async {
-    final result = await Navigator.of(context).pushNamed('/scan');
-    if (result == true && mounted) {
-      setState(() {});
+    // 进扫码页前先把后台重试彻底停掉并作废在飞的尝试：旧尝试的直连超时事件
+    // 会把刚配对好的界面按回"连接中"，甚至继续走它自己的"广播补连"、
+    // 把新连接拆掉重连（用户实测：配对成功却一直停在"连接中"，第二次才正常）
+    _reconnectTimer?.cancel();
+    _transientExpiryTimer?.cancel();
+    _attemptGen++;
+    widget.sender.abortConnectAttempts();
+    _connecting = false;
+    setState(() {});
+    // 先取好 Navigator，避免 await 之后再碰 context
+    final navigator = Navigator.of(context);
+    await SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
+
+    final result = await navigator.pushNamed('/scan');
+    if (!mounted) return;
+    if (result == true) {
+      // 配对成功：一切重试状态清零，并以 TCP 层的真实状态为准同步一次界面
+      _reconnectTimer?.cancel();
+      _reconnectAttempt = 0;
+      _connecting = false;
+      if (widget.sender.tcp.isPairedNow) {
+        _status = ConnectionStatus.paired;
+      }
     }
+    setState(() {});
   }
 }
 

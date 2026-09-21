@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 import 'package:network_info_plus/network_info_plus.dart';
 
 import 'lan_check.dart';
@@ -129,6 +130,9 @@ class DiscoveryService {
     for (final bcast in net.broadcastTargets()) {
       targets.add(InternetAddress(bcast));
     }
+    debugPrint('VL_DISC 本机网卡：'
+        '${net.entries.map((e) => '${e.name}=${e.ip}').join(', ')}'
+        ' → 广播目标：${targets.map((t) => t.address).join(', ')}');
     // 补充一路：个别机型上网卡枚举受限，但 WiFi IP 能拿到
     try {
       final wifiIp = await NetworkInfo().getWifiIP().timeout(

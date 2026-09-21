@@ -595,6 +595,10 @@ class TcpService {
   /// 最近一次断开是否由对端关闭造成
   bool get lastDisconnectWasPeer => _peerClosed;
 
+  /// 当前是否真的处于已配对状态（界面在扫码返回后用它同步一次，
+  /// 免得被任何残留事件把绿色按回"连接中"）
+  bool get isPairedNow => _isPaired;
+
   /// 这次"对端关闭连接"发生时，我们自己还在正常通信吗？
   ///
   /// 锁屏/切后台时系统会挂起本进程的定时器——我们不再发心跳，PC 端 15 秒收不到心跳
