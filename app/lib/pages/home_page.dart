@@ -49,15 +49,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 最近一次失败"看起来不在同一局域网"（决定打字区要不要提示检查 Wi-Fi）
   bool _offLan = false;
 
-  /// 已停止自动重试（快速试满一轮，或根本不在局域网上）——零定时器零广播，
-  /// 直到切回前台 / 网络变化 / 用户点「重新连接」才会重新开始
-  bool _retryStopped = false;
-
-  /// 这次断开是不是"对端关闭连接"造成的（电脑上退出了程序）——只影响文案
-  bool _peerClosed = false;
-
-  /// 当前占用态是不是"扫码"撞上的：只有凭凭证回来的常用设备才配显示接管按钮
-  bool _occupiedViaScan = false;
+  /// 是否"在忙"：正在连接，或快速重试那一轮还没结束（有排程中的重试）
+  bool get _busy =>
+      _connecting ||
+      _status == ConnectionStatus.connecting ||
+      _status == ConnectionStatus.pairing ||
+      (_reconnectTimer?.isActive ?? false);
 
   StreamSubscription<List<ConnectivityResult>>? _netSub;
 
@@ -165,10 +162,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _onStatus(ConnectionStatus status) {
     if (!mounted) return;
-    if (status == ConnectionStatus.disconnected) {
-      // 读一次断开来源（重连会重置它）：区分"电脑端退出"与普通连不上
-      _peerClosed = widget.sender.tcp.lastDisconnectWasPeer;
-    }
     setState(() => _status = status);
 
     switch (status) {
@@ -179,9 +172,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         unawaited(_requestKeyboard());
         break;
       case ConnectionStatus.occupied:
+        // 电脑正被别人用：**立即停止自动重连**，把"要不要接管"留给用户手动决定。
         _connecting = false;
         _reconnectTimer?.cancel();
         _reconnectAttempt = 0;
+        if (widget.sender.lastAuthMode != AuthMode.token) {
+          // 扫码/临时凭证连的：属于正常的连接竞争，不必解释——清掉临时记录
+          // 回扫码引导页（此刻电脑窗口上也没有二维码，用户一看就知道正忙）
+          unawaited(widget.sender.abandonTransient());
+        }
         break;
       case ConnectionStatus.disconnected:
         // 主动尝试中的连接失败由 _attemptConnect 收尾统一排程；
@@ -213,7 +212,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         break;
       case 'owner_takeover':
         // 自己是临时方：该机的常用设备接管，中性提示
-        _showSnack('这台电脑的常用设备已接管');
+        _showSnack('这台电脑的主人已连接');
         break;
       case 'replaced':
       default:
@@ -239,18 +238,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     // 只有移动数据（枚举不到任何局域网网卡）→ 停手，不做无意义的尝试
     if (net != null && !net.hasLan) {
-      _retryStopped = true;
-      return;
+      return; // 只有移动数据：本产品只在同一局域网下能工作，不做无意义的重试
     }
     // 快速试满一轮就停手：慢速重试的价值极低，不如让用户当场点「重新连接」
     if (!retryAllowed(_reconnectAttempt)) {
-      _retryStopped = true;
-      return;
+      return; // 快速试满一轮就停手，交给用户点「连接」或环境变化触发
     }
 
     final delayMs = retryDelayMs(_reconnectAttempt);
     _reconnectAttempt++;
-    _retryStopped = false;
     _reconnectTimer =
         Timer(Duration(milliseconds: delayMs), _attemptConnect);
   }
@@ -266,8 +262,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
 
     _connecting = true;
-    _occupiedViaScan = false; // 自动连接走的是凭证路径，接管按钮才有效
-    _retryStopped = false; // 重新开始一轮快速重试
     HelloOutcome? outcome;
     try {
       outcome = await widget.sender.autoConnect();
@@ -277,7 +271,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     // 临时会话的续连窗口过期（或被 PC 作废）时给出明确出口，而不是静默回到引导页
     final expiredName = widget.sender.consumeTransientExpiredNotice();
     if (expiredName != null) {
-      _showSnack('临时会话已过期，请重新扫码');
+      _showSnack('连接已过期，请重新扫码');
     }
 
     // 电脑**明确拒绝**本机凭证（典型：电脑端解除了与这台设备的绑定）：
@@ -444,17 +438,24 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 设备名永远垂直居中；状态只用点颜色与右侧标签表达，不增删行。
   Widget _buildStatusPill(ColorScheme scheme) {
     final session = widget.sender.session;
-    // 设备名在连接/断开各状态下保持原位，断开不换标题，只用灰点表达
+    // 设备名在连接/断开各状态下保持原位，断开不换标题，只换颜色
     final knownName = session?.deviceName ??
         widget.sender.storage.primaryDevice?.name ??
         widget.sender.storage.transientSession?.name;
 
-    Widget leading;
-    late String title;
-    String? tag;
-    // 中性提示标签压暗到约 60%：它是辅助说明，不与设备名同级
-    Color tagColor = scheme.onSurfaceVariant.withValues(alpha: 0.6);
-    Widget? trailing;
+    // 在忙 = 正在连接或正在重试（有排程中的重试）：点呼吸、词显示"连接中"
+    final busy = _busy;
+    final connected = _status == ConnectionStatus.paired;
+    final hasTarget = widget.sender.hasAnyTarget;
+    final word = pillWord(busy: busy);
+    final action = pillAction(
+      connected: connected,
+      busy: busy,
+      hasTarget: hasTarget,
+    );
+
+    // 未绑定过任何电脑：正文就是扫码引导页，胶囊只说"未连接电脑"
+    final unbound = !connected && !hasTarget;
 
     // 胶囊内文字按钮：收缩触控热区到视觉尺寸，高度不超过定高胶囊
     ButtonStyle pillButtonStyle(Color? color) => TextButton.styleFrom(
@@ -465,56 +466,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           visualDensity: VisualDensity.compact,
         );
 
-    switch (_status) {
-      case ConnectionStatus.paired:
-        final isPrimary = session?.isPrimary == true;
-        leading = _StatusDot(Colors.green.shade600);
-        title = knownName ?? '电脑';
-        // 常用设备是默认态，不标注；临时设备在名字右侧给灰字小标签
-        if (!isPrimary) tag = '临时设备';
-        // "断开"是低频操作：明确置灰，不与主色行动争抢
-        trailing = TextButton(
+    final Widget button = switch (action) {
+      PillAction.none => const SizedBox.shrink(),
+      // "断开"是低频操作：明确置灰，不与主色行动争抢
+      PillAction.disconnect => TextButton(
           onPressed: _manualDisconnect,
           style: pillButtonStyle(Colors.grey.shade600),
           child: const Text('断开'),
-        );
-      case ConnectionStatus.occupied:
-        leading = _StatusDot(Colors.orange.shade700);
-        title = knownName ?? '电脑';
-        tag = '另一台手机正在使用';
-        // 警示态保留橙色但略压，不喧宾夺主
-        tagColor = Colors.orange.shade800.withValues(alpha: 0.85);
-      case ConnectionStatus.connecting:
-      case ConnectionStatus.pairing:
-      case ConnectionStatus.connected:
-        leading = const SizedBox(
-          width: 14,
-          height: 14,
-          child: CircularProgressIndicator(strokeWidth: 2),
-        );
-        title = knownName ?? '电脑';
-        tag = '正在连接…';
-      case ConnectionStatus.disconnected:
-      case ConnectionStatus.failed:
-        leading = _StatusDot(Colors.grey.shade400);
-        if (!widget.sender.hasDevices) {
-          // 未绑定（含临时/降级会话断开后）：回到引导态，正文即扫码入口
-          title = '未连接电脑';
-        } else {
-          title = knownName ?? '电脑';
-          final manual = widget.sender.manualDisconnected;
-          tag = disconnectedTag(
-            manualDisconnected: manual,
-            retryStopped: _retryStopped,
-            peerClosed: _peerClosed,
-          );
-          trailing = TextButton(
-            onPressed: _manualConnect,
-            style: pillButtonStyle(null),
-            child: Text(manual || _retryStopped ? '重新连接' : '立即重试'),
-          );
-        }
-    }
+        ),
+      // 连接：连不上、主动断开、电脑被占用（绑定手机点它即接管）都用它
+      PillAction.connect => TextButton(
+          onPressed: _onPillConnect,
+          style: pillButtonStyle(null),
+          child: const Text('连接'),
+        ),
+    };
 
     return Card(
       margin: EdgeInsets.zero,
@@ -528,46 +494,66 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           padding: const EdgeInsets.only(left: 14, right: 6),
           child: Row(
             children: [
-              // leading 统一 14 盒：10px 圆点居中其中，与 14px 转圈等宽
+              // leading 统一 14 盒：10px 圆点居中其中与按钮对齐
               SizedBox(
                 width: 14,
                 height: 14,
-                child: Center(child: leading),
+                child: Center(
+                  child: _StatusDot(
+                    color: connected ? Colors.green.shade600 : Colors.grey.shade400,
+                    breathing: busy,
+                  ),
+                ),
               ),
               const SizedBox(width: 12),
-              // 设备名+标签整体占满中间剩余空间，操作按钮因此永远贴右
+              // 设备名 + 词占满中间剩余空间，操作按钮因此永远贴右
               Expanded(
                 child: Row(
                   children: [
                     Flexible(
                       child: Text(
-                        title,
+                        unbound ? '未连接电脑' : (knownName ?? '电脑'),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
                             fontSize: 15, fontWeight: FontWeight.w600),
                       ),
                     ),
-                    if (tag != null) ...[
+                    if (word != null) ...[
                       const SizedBox(width: 8),
                       Flexible(
                         child: Text(
-                          tag,
+                          word,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: TextStyle(fontSize: 12, color: tagColor),
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: scheme.onSurfaceVariant
+                                .withValues(alpha: 0.6),
+                          ),
                         ),
                       ),
                     ],
                   ],
                 ),
               ),
-              if (trailing != null) trailing,
+              button,
             ],
           ),
         ),
       ),
     );
+  }
+
+  /// 胶囊右侧「连接」按钮：被占用且本机是这台电脑的绑定手机时 = 接管；其余 = 立即连接
+  void _onPillConnect() {
+    final takeover = _status == ConnectionStatus.occupied &&
+        widget.sender.lastAuthMode == AuthMode.token;
+    if (takeover) {
+      unawaited(_takeover());
+    } else {
+      _manualConnect();
+    }
   }
 
   /// 主体输入卡：已连接可输入，其余状态同卡原位禁用，骨架不跳变。
@@ -578,7 +564,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (enabled) {
       hintText = '长按键盘语音键即可语音输入文字';
     } else if (_offLan) {
+      // 能判断"不在同一个网络"：这是最可操作的一条提示
       hintText = '请确认手机和电脑连着同一个 Wi-Fi';
+    } else if (_status == ConnectionStatus.occupied &&
+        widget.sender.lastAuthMode == AuthMode.token) {
+      // 电脑正被另一台手机使用，而本机是这台电脑的绑定手机：点「连接」即接管
+      hintText = '另一台手机正在使用这台电脑；点「连接」即可立即接管';
     } else {
       hintText = '连接成功后即可语音输入文字';
     }
@@ -654,64 +645,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
-  /// occupied：电脑正被另一台手机占用，接管操作只在此处显式提供。
-  Widget _buildOccupiedView(ColorScheme scheme) {
-    return Center(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.symmetric(vertical: 24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 104,
-              height: 104,
-              decoration: BoxDecoration(
-                color: Colors.orange.shade50,
-                shape: BoxShape.circle,
-              ),
-              child: Icon(Icons.devices_other_rounded,
-                  size: 48, color: Colors.orange.shade700),
-            ),
-            const SizedBox(height: 24),
-            Text('电脑使用中',
-                style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.w700,
-                    color: Colors.orange.shade800)),
-            const SizedBox(height: 8),
-            Text('另一台手机正在使用这台电脑',
-                style: TextStyle(
-                    fontSize: 14, color: scheme.onSurfaceVariant)),
-            const SizedBox(height: 28),
-            // 接管只对"凭长期凭证回来的常用设备"有效（电脑端只放行这种连接）。
-            // 扫码撞上占用的人点了必然失败，所以干脆不给按钮，只留上面那句说明。
-            if (!_occupiedViaScan) ...[
-              FilledButton.icon(
-                onPressed: _takeover,
-                style: FilledButton.styleFrom(
-                  backgroundColor: Colors.orange.shade700,
-                  minimumSize: const Size.fromHeight(48),
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14)),
-                ),
-                icon: const Icon(Icons.login_rounded),
-                label: const Text('接管电脑'),
-              ),
-              const SizedBox(height: 12),
-              Text('接管后对方将收到提示；不操作则保持等待',
-                  style: TextStyle(
-                      fontSize: 12, color: scheme.onSurfaceVariant)),
-            ] else
-              Text('请在电脑上点「断开」腾出席位后再扫码',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                      fontSize: 12, color: scheme.onSurfaceVariant)),
-          ],
-        ),
-      ),
-    );
-  }
-
   /// 未绑定任何电脑（含临时/降级会话断开后）的引导页：唯一动作是扫码绑定
   Widget _buildOnboardingView(ColorScheme scheme) {
     return Center(
@@ -763,11 +696,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final paired = _status == ConnectionStatus.paired;
-    final occupied = _status == ConnectionStatus.occupied;
     final hasTarget = widget.sender.hasAnyTarget;
-    final busy = _status == ConnectionStatus.connecting ||
-        _status == ConnectionStatus.pairing ||
-        _status == ConnectionStatus.connected;
 
     return Scaffold(
       appBar: AppBar(
@@ -789,13 +718,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               _buildStatusPill(scheme),
               const SizedBox(height: 14),
               Expanded(
-                child: occupied
-                    ? _buildOccupiedView(scheme)
-                    : paired
-                        ? _buildEditorCard(scheme, enabled: true)
-                        : (!hasTarget && !busy)
-                            ? _buildOnboardingView(scheme)
-                            : _buildEditorCard(scheme, enabled: false),
+                child: paired
+                    ? _buildEditorCard(scheme, enabled: true)
+                    : (!hasTarget && _status != ConnectionStatus.occupied)
+                        ? _buildOnboardingView(scheme)
+                        : _buildEditorCard(scheme, enabled: false),
               ),
             ],
           ),
@@ -805,8 +732,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _navigateToScan() async {
-    // 记下来源：扫码撞上"电脑使用中"时不该给接管按钮（那按钮点了必然失败）
-    _occupiedViaScan = true;
     final result = await Navigator.of(context).pushNamed('/scan');
     if (result == true && mounted) {
       setState(() {});
@@ -818,14 +743,52 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 class _StatusDot extends StatelessWidget {
   final Color color;
 
-  const _StatusDot(this.color);
+  /// 是否呼吸（正在连接/重试中）：柔和的淡入淡出，而不是硬闪
+  final bool breathing;
+
+  const _StatusDot({required this.color, this.breathing = false});
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    final dot = Container(
       width: 10,
       height: 10,
       decoration: BoxDecoration(color: color, shape: BoxShape.circle),
     );
+    if (!breathing) return dot;
+    // 系统开了"减少动态效果"就不做喘息：退化为常亮（宁可少一个提示，也不硬闪）
+    if (MediaQuery.maybeDisableAnimationsOf(context) ?? false) return dot;
+    return _BreathingDot(child: dot);
+  }
+}
+
+/// 呼吸式提示：透明度 0.35↔1.0、约 1.2 秒一个来回、缓入缓出
+class _BreathingDot extends StatefulWidget {
+  final Widget child;
+  const _BreathingDot({required this.child});
+
+  @override
+  State<_BreathingDot> createState() => _BreathingDotState();
+}
+
+class _BreathingDotState extends State<_BreathingDot>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1200),
+  )..repeat(reverse: true);
+
+  late final Animation<double> _opacity = Tween<double>(begin: 1.0, end: 0.35)
+      .animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut));
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(opacity: _opacity, child: widget.child);
   }
 }

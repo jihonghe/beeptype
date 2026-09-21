@@ -219,17 +219,11 @@ class TcpService {
 
       _isConnected = true;
       _lastInboundAt = DateTime.now();
-      _peerClosed = false;
-      _localClose = false;
 
       _subscription = _socket!.listen(
         _onData,
         onError: (error) => _onError('Stream error: $error'),
-        onDone: () {
-          // 对端关闭（FIN）与本地主动关闭要分开：前者意味着"电脑上的程序退出了"
-          _peerClosed = !_localClose;
-          _onDisconnected();
-        },
+        onDone: () => _onDisconnected(),
       );
 
       // 吸收 IOSink.done 通道重复上报的写入错误
@@ -320,7 +314,6 @@ class TcpService {
   /// 主动告别：发 bye 等 bye_ack（兜底 1.5s），再关闭连接
   Future<void> bye() async {
     if (!_isConnected) return;
-    _localClose = true;
     final completer = Completer<void>();
     _byeCompleter = completer;
     _send(TcpMessage('bye', {}));
@@ -369,7 +362,6 @@ class TcpService {
 
   /// 硬断开（无 bye；异常清理用）
   Future<void> disconnect() async {
-    _localClose = true;
     await _teardown(announce: false);
     _isPaired = false;
     _statusController.add(ConnectionStatus.disconnected);
@@ -550,14 +542,18 @@ class TcpService {
   ///
   /// PC 端连接级读超时为 15s（3 个间隔的容错），切后台 Timer 被 Doze
   /// 延迟时也有足够余量；恢复后首个 ping 立即探活。
-  static const Duration _heartbeatInterval = Duration(seconds: 5);
+  /// 心跳间隔：2 秒。判活窗口是它的 3 倍，容忍连续 3 次丢失。
+  static const Duration heartbeatInterval = Duration(seconds: 2);
 
   /// 判活超时：心跳发出后这么久没收到**任何**服务端消息，就判定连接已死。
   ///
   /// 为什么必须有：对端只是断网（关 Wi-Fi、拔网线、路由器重启）时，TCP 不会报错
   /// ——没有 FIN 也没有 RST，手机上这条连接看起来一切正常。旧实现的心跳是"只发不问"，
   /// 于是界面一直显示"已连接"（绿灯），既不重连也感知不到，直到用户重开 APP。
-  static const Duration livenessTimeout = Duration(seconds: 15);
+  ///
+  /// 6 秒 = 3 次心跳：既够灵敏（最慢 8 秒内从"已连接到"断开"，观感上不迟钝），
+  /// 又留了 3 次丢包余量（TCP 本身会重传，真要 6 秒一声不响多半是链路真断了）。
+  static const Duration livenessTimeout = Duration(seconds: 6);
 
   /// 最近一次收到服务端消息的时刻（判活基准）
   DateTime? _lastInboundAt;
@@ -565,16 +561,6 @@ class TcpService {
   /// 是否在前台：只在前后台判定，且切回前台重置基准——后台/Doze 期间定时器被系统
   /// 延迟，拿休眠前的时刻判定会把健康连接误判成已死
   bool _foreground = true;
-
-  /// 这次断开是不是**对端关闭**造成的（收到 FIN/RST，典型：电脑上退出了程序）。
-  /// 只用于界面文案（"电脑端已退出" vs "连接失败"），不影响重试行为。
-  bool _peerClosed = false;
-
-  /// 本次连接是不是我们自己主动关的（主动断开/说再见）：用来把"对端关闭"区分出来
-  bool _localClose = false;
-
-  /// 最近一次断开是否由对端关闭造成
-  bool get lastDisconnectWasPeer => _peerClosed;
 
   /// 前后台切换：切回前台时重置判活基准，避免拿休眠期间的空档误判
   void setForeground(bool value) {
@@ -584,7 +570,7 @@ class TcpService {
 
   void _startHeartbeat() {
     _heartbeatTimer?.cancel();
-    _heartbeatTimer = Timer.periodic(_heartbeatInterval, (_) {
+    _heartbeatTimer = Timer.periodic(heartbeatInterval, (_) {
       if (!_isConnected) return;
       // 先判活：连"任何"服务端消息都收不到这么久，说明连接已经假死
       if (livenessExpired(

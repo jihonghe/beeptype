@@ -7,6 +7,21 @@ import 'tcp_service.dart';
 import 'storage_service.dart';
 import 'discovery_service.dart';
 
+/// 一次连接尝试用的凭证类型
+enum AuthMode {
+  /// 还没尝试过
+  none,
+
+  /// 长期凭证（本机是这台电脑的绑定手机）
+  token,
+
+  /// 窗口期内的临时续连凭证
+  resume,
+
+  /// 扫码配对
+  code,
+}
+
 /// 文字发送服务：协调存储、UDP 发现、TCP 连接与配对。
 class TextSender {
   final TcpService _tcp = TcpService();
@@ -175,6 +190,23 @@ class TextSender {
   /// 只在连上后才记，判断"是不是不在同一网络"必须用尝试过的那个地址）
   String? _lastAttemptTargetIp;
 
+  /// 本次尝试用的凭证类型。
+  ///
+  /// 手机端只有一个判断依赖它：**被占用**时——用绑定凭证连的（本机就是这台电脑的
+  /// 绑定手机）才提示"点「连接」即可立即接管"；扫码/临时凭证连的属于正常竞争，
+  /// 不给提示、直接回扫码引导页。
+  AuthMode lastAuthMode = AuthMode.none;
+
+  /// 放弃当前临时会话：清掉续连记录并断开。
+  /// 用在"临时接入撞上电脑被占用"——席位是别人的，留着重连记录没有意义，
+  /// 界面回到扫码引导页（要不要再连，交给用户手动决定）。
+  Future<void> abandonTransient() async {
+    await _storage.clearTransientSession();
+    await _tcp.disconnect();
+    session = null;
+    _sessionUpdatedController.add(null);
+  }
+
   /// 上一次实际尝试过的目标地址（界面判断"是否不在同一网络"用）
   String? get lastAttemptTargetIp => _lastAttemptTargetIp;
 
@@ -195,9 +227,10 @@ class TextSender {
     manualDisconnected = false;
     final dev = _storage.primaryDevice;
     if (dev == null) {
-      // 没有常用凭证：看看有没有"窗口期内"的临时会话可以续连
+      // 没有长期凭证：看看有没有"窗口期内"的临时会话可以续连
       return _resumeTransientIfAny();
     }
+    lastAuthMode = AuthMode.token;
 
     HelloOutcome? outcome;
     final hid = await hardwareId;
@@ -295,6 +328,7 @@ class TextSender {
   Future<HelloOutcome> _resumeTransient(String? onlyDeviceId) async {
     final t = _storage.transientSession;
     if (t == null) return HelloOutcome.networkFail();
+    lastAuthMode = AuthMode.resume;
     if (onlyDeviceId != null && t.deviceId != onlyDeviceId) {
       return HelloOutcome.networkFail();
     }
@@ -360,6 +394,7 @@ class TextSender {
     int port,
     String code,
   ) async {
+    lastAuthMode = AuthMode.code;
     await _tcp.disconnect();
     try {
       await _tcp.connect(ip, port);

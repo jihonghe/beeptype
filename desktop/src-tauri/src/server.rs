@@ -392,7 +392,7 @@ impl<R: Runtime> ServerState<R> {
                 }
                 Some(a) => (
                     ConnState::Connected,
-                    format!("🟢 {} · 临时设备", a.name),
+                    format!("🟢 {}", a.name),
                     true,
                 ),
             }
@@ -972,7 +972,7 @@ impl<R: Runtime> ServerState<R> {
             let session = self.session.lock().unwrap();
             let a = session.as_ref().ok_or("当前没有手机连接")?;
             if a.identity.load(Ordering::SeqCst) {
-                return Err("当前连接已经是常用设备".to_string());
+                return Err("这台手机已经绑定过了".to_string());
             }
             (
                 a.client_id.clone(),
@@ -986,7 +986,7 @@ impl<R: Runtime> ServerState<R> {
         let token = {
             let mut config = self.config.lock().unwrap();
             if config.has_primary() {
-                return Err("已经绑定了常用设备，请先解除绑定".to_string());
+                return Err("已经绑定了手机，请先解除绑定".to_string());
             }
             config.bind_primary(&client_id, &name, &ip, hardware_id.as_deref())
         };

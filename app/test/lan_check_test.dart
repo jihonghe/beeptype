@@ -86,12 +86,12 @@ void main() {
 
   group('判活超时（发现"假死"的连接）', () {
     final now = DateTime(2026, 9, 21, 12, 0, 0);
-    const timeout = Duration(seconds: 15);
+    const timeout = Duration(seconds: 6);
 
-    test('前台静默超过窗口 → 判定已断（对端断网时 TCP 不会报错，只能这样发现）', () {
+    test('前台静默超过窗口（6 秒）→ 判定已断（对端断网时 TCP 不会报错，只能这样发现）', () {
       expect(
         livenessExpired(
-          lastInboundAt: now.subtract(const Duration(seconds: 16)),
+          lastInboundAt: now.subtract(const Duration(seconds: 7)),
           now: now,
           foreground: true,
           timeout: timeout,
@@ -103,7 +103,7 @@ void main() {
     test('窗口内还有回应 → 不算断', () {
       expect(
         livenessExpired(
-          lastInboundAt: now.subtract(const Duration(seconds: 14)),
+          lastInboundAt: now.subtract(const Duration(seconds: 5)),
           now: now,
           foreground: true,
           timeout: timeout,
@@ -137,56 +137,41 @@ void main() {
     });
   });
 
-  group('断线状态词（用户在 APP 上主动断开不该显示"已停止重试"）', () {
-    test('用户主动断开 → 重新连接', () {
+  group('胶囊的词与按钮（状态归胶囊、该做什么归打字区）', () {
+    test('只有"在忙"时才有词，其余状态一律不说话', () {
+      expect(pillWord(busy: true), '连接中');
+      expect(pillWord(busy: false), isNull, reason: '用户主动断开也不该出现状态词');
+    });
+
+    test('已连接 → 断开', () {
       expect(
-        disconnectedTag(
-          manualDisconnected: true,
-          retryStopped: true,
-          peerClosed: true,
-        ),
-        '重新连接',
+        pillAction(connected: true, busy: false, hasTarget: true),
+        PillAction.disconnect,
       );
     });
 
-    test('自动重试试满 → 已停止重试', () {
+    test('在忙（连接中/重试中）→ 不显示按钮，避免重复操作', () {
       expect(
-        disconnectedTag(
-          manualDisconnected: false,
-          retryStopped: true,
-          peerClosed: false,
-        ),
-        '已停止重试',
+        pillAction(connected: false, busy: true, hasTarget: true),
+        PillAction.none,
+      );
+      expect(
+        pillAction(connected: false, busy: true, hasTarget: false),
+        PillAction.none,
       );
     });
 
-    test('电脑端退出程序 → 电脑端已退出（重试中/已停止两种说法）', () {
+    test('连不上 / 主动断开 / 被占用（绑定手机）→ 连接', () {
       expect(
-        disconnectedTag(
-          manualDisconnected: false,
-          retryStopped: false,
-          peerClosed: true,
-        ),
-        '电脑端已退出，重试中…',
-      );
-      expect(
-        disconnectedTag(
-          manualDisconnected: false,
-          retryStopped: true,
-          peerClosed: true,
-        ),
-        '电脑端已退出',
+        pillAction(connected: false, busy: false, hasTarget: true),
+        PillAction.connect,
       );
     });
 
-    test('网络不通（对端没关闭连接）→ 连接失败，重试中…', () {
+    test('没绑定过电脑 → 不显示按钮（正文就是扫码引导页）', () {
       expect(
-        disconnectedTag(
-          manualDisconnected: false,
-          retryStopped: false,
-          peerClosed: false,
-        ),
-        '连接失败，重试中…',
+        pillAction(connected: false, busy: false, hasTarget: false),
+        PillAction.none,
       );
     });
   });
