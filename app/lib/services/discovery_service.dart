@@ -47,10 +47,16 @@ class DiscoveryService {
   ///
   /// [port] 为约定端口（默认 8765，与 PC TCP 同号）。
   /// 总预算约 (rounds-1)*300ms + 500ms ≈ 1.1s。
+  /// [expectDeviceId]：只接受这台设备的应答。
+  ///
+  /// 应答方虽然必须"认得这张凭证"才可能应答（证明它握有同一个 token 哈希），但
+  /// **陌生设备可以盲答**（不判断、见广播就回自己的地址）——那会把手机引到一个
+  /// 错的地址，甚至把凭证送给它。所以手机要核对 `device_id` 是不是记忆里那台电脑。
   Future<List<DiscoveredDevice>> discover({
     required String clientId,
     required String token,
     int port = 8765,
+    String? expectDeviceId,
   }) async {
     final proof = sha256.convert(utf8.encode(token)).toString();
     final payload = utf8.encode(jsonEncode({
@@ -80,7 +86,14 @@ class DiscoveryService {
       final dg = socket.receive();
       if (dg == null) return;
       final dev = _parseResponse(dg.data, dg.address.address);
-      if (dev != null && !found.containsKey(dev.deviceId)) {
+      if (dev == null) return;
+      if (expectDeviceId != null &&
+          expectDeviceId.isNotEmpty &&
+          dev.deviceId != expectDeviceId) {
+        debugPrint('VL_DISC 忽略一台陌生设备的应答（device_id 不匹配）');
+        return;
+      }
+      if (!found.containsKey(dev.deviceId)) {
         found[dev.deviceId] = dev;
       }
     }, onError: (Object _) {

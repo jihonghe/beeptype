@@ -308,14 +308,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (net != null && !net.hasLan) {
       return; // 只有移动数据：本产品只在同一局域网下能工作，不做无意义的重试
     }
-    // 快速试满一轮就停手：慢速重试的价值极低，不如让用户当场点「重新连接」
+    // 快速试满一轮就停手：慢速重试的价值极低，不如让用户当场点「连接」，
+    // 或等下一次"用户回来了 / 环境变了"的触发
     if (!retryAllowed(_reconnectAttempt)) {
-      // 试满一轮：如果这是临时接入、且手机自己的网络没变（说明不是手机换了网络，
-      // 而是电脑那边不可达），同样按"接收方出问题"处理——清记录回扫码页，
-      // 不让用户对着"未连接"的输入卡干等窗口期
-      if (widget.sender.lastAuthMode == AuthMode.resume && !_offLan) {
-        unawaited(_abandonTransientWithNotice());
-      }
       return;
     }
 
@@ -340,7 +335,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _sessionEndedHandled = false;
     HelloOutcome? outcome;
     try {
-      outcome = await widget.sender.autoConnect();
+      // 上次已经判明"电脑那个地址不在我任何网段里"→ 跳过无意义的直连，只广播：
+      // 电脑可能已经搬到我这个网络（地址也变了），广播能找到它；找不到就停下等触发
+      outcome = await widget.sender.autoConnect(discoveryOnly: _offLan);
     } catch (_) {}
     if (!mounted) return;
 
@@ -350,6 +347,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (outcome != null && outcome.isUnauthorized) {
       final bound = widget.sender.lastAuthMode == AuthMode.token;
       final id = widget.sender.storage.primaryDevice?.deviceId;
+      // 拒绝我们的可能不是"我们那台电脑"（旧地址被别的设备占了）。那种情况
+      // 绝不能删绑定——否则一台陌生产品就能让好手机丢掉绑定。
+      if (!rejectionFromOurPc(responderId: outcome.deviceId, expectedId: id)) {
+        debugPrint('VL_CONN 凭证被拒，但拒绝方不是记忆里那台电脑，保留绑定');
+        _connecting = false;
+        if (mounted) setState(() {});
+        return;
+      }
       await widget.sender.forgetDevice(id);
       // 同一次失败只弹一句：临时路径也会记一个"已失效"标记，这里顺手消费掉
       widget.sender.consumeTransientExpiredNotice();
@@ -656,9 +661,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (enabled) {
       hintText = '长按键盘语音键即可语音输入文字';
     } else if (_offLan) {
-      // 能判断"不在同一个网络"：这是最可操作的一条提示。
-      // 说"同一个网络"而不是"同一个 Wi-Fi"——热点共享等场景下手机自己不在 Wi-Fi 上
-      hintText = '请确认手机和电脑在同一个网络';
+      // 能判断"不在同一个网络"：这是最可操作的一条提示
+      hintText = '请确认手机和电脑连着同一个 Wi-Fi';
     } else if (_status == ConnectionStatus.occupied &&
         widget.sender.lastAuthMode == AuthMode.token) {
       // 电脑正被另一台手机使用，而本机是这台电脑的绑定手机：点「连接」即接管

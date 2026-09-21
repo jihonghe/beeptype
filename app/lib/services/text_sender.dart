@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import 'lan_check.dart';
+import 'retry_policy.dart';
 import 'package:flutter/services.dart';
 import 'tcp_service.dart';
 import 'storage_service.dart';
@@ -248,46 +249,56 @@ class TextSender {
   /// 缓存 IP 直连与 UDP 发现并行：直连立即发起；直连网络层失败时，
   /// 用发现结果（proof 门控，应答必为该电脑）对新 IP 补连一次，
   /// 典型 DHCP 换 IP 场景约 3s 内完成。
-  Future<HelloOutcome> autoConnect() async {
+  /// [discoveryOnly]：跳过直连、只做一次广播找。用于"已知电脑那个地址不在本机
+  /// 任何网段里"的情形——直连必然徒劳，但电脑可能已经搬到我所在的网络（地址也变了），
+  /// 广播能找到它。
+  Future<HelloOutcome> autoConnect({bool discoveryOnly = false}) async {
     manualDisconnected = false;
     final dev = _storage.primaryDevice;
     if (dev == null) {
       // 没有长期凭证：看看有没有"窗口期内"的临时会话可以续连
-      return _resumeTransientIfAny();
+      return _resumeTransient(null, discoveryOnly: discoveryOnly);
     }
     lastAuthMode = AuthMode.token;
     final gen = _connectGen;
 
     HelloOutcome? outcome;
     final hid = await hardwareId;
-    _lastAttemptTargetIp = dev.ip;
-    debugPrint('VL_CONN 尝试直连 ${dev.ip}:${dev.port}');
-    try {
-      await _tcp.connect(dev.ip, dev.port, timeout: _directConnectTimeout);
-      // 已被作废（例如用户正在扫码配对）：连上了也别插话，更不能发 hello
-      if (_superseded(gen)) return HelloOutcome.networkFail();
-      outcome = await _tcp.hello(
-        token: dev.token,
-        clientId: _storage.clientId,
-        deviceName: _storage.getDeviceName(),
-        hardwareId: hid,
-        timeout: _helloTimeout,
-      );
-    } catch (_) {
-      outcome = null; // TCP 建连失败
-    }
-    if (_superseded(gen)) return HelloOutcome.networkFail();
-    debugPrint('VL_CONN 直连结果：${outcome?.status ?? '网络层失败'}');
-
-    // 成功 / 占用 / 凭证被拒：结论已明确，无需换 IP 再试
-    if (outcome != null &&
-        (outcome.ok || outcome.isOccupied || outcome.isUnauthorized)) {
-      if (outcome.ok) {
-        unawaited(_persistPrimary(dev, outcome, connectedIp: dev.ip));
-      } else if (outcome.isOccupied) {
-        session = outcome;
+    if (!discoveryOnly) {
+      _lastAttemptTargetIp = dev.ip;
+      debugPrint('VL_CONN 尝试直连 ${dev.ip}:${dev.port}');
+      try {
+        await _tcp.connect(dev.ip, dev.port, timeout: _directConnectTimeout);
+        // 已被作废（例如用户正在扫码配对）：连上了也别插话，更不能发 hello
+        if (_superseded(gen)) return HelloOutcome.networkFail();
+        outcome = await _tcp.hello(
+          token: dev.token,
+          clientId: _storage.clientId,
+          deviceName: _storage.getDeviceName(),
+          hardwareId: hid,
+          timeout: _helloTimeout,
+        );
+      } catch (_) {
+        outcome = null; // TCP 建连失败
       }
-      return outcome;
+      if (_superseded(gen)) return HelloOutcome.networkFail();
+      debugPrint('VL_CONN 直连结果：${outcome?.status ?? '网络层失败'}');
+
+      // 成功 / 占用 / 凭证被拒 / 被限流：结论已明确，无需换 IP 再试
+      if (outcome != null &&
+          (outcome.ok ||
+              outcome.isOccupied ||
+              outcome.isUnauthorized ||
+              outcome.isRateLimited)) {
+        if (outcome.ok) {
+          unawaited(_persistPrimary(dev, outcome, connectedIp: dev.ip));
+        } else if (outcome.isOccupied) {
+          session = outcome;
+        }
+        return outcome;
+      }
+    } else {
+      debugPrint('VL_CONN 已知电脑地址不在本机网段：跳过直连，直接广播找');
     }
 
     // 网络层失败：广播找一次（DHCP 换 IP 的主路径）。
@@ -300,6 +311,7 @@ class TextSender {
             clientId: _storage.clientId,
             token: dev.token,
             port: dev.port,
+            expectDeviceId: dev.deviceId,
           )
           .timeout(const Duration(seconds: 2))
           .catchError((Object _) => <DiscoveredDevice>[]);
@@ -358,13 +370,14 @@ class TextSender {
   /// - 网络层连不上 → 返回失败，留着记录等下次重试（可能是电脑睡了/换网了）
   /// - 凭证被拒（窗口过期 / PC 重启 / 主人在电脑上断开了它）→ 删记录 + 提示重新扫码
   /// - 席位被占 → 交给上层显示"电脑使用中"（临时方没有接管入口）
-  Future<HelloOutcome> _resumeTransientIfAny() => _resumeTransient(null);
-
   /// 仅当临时记录属于指定电脑时续连（用于"旧常用记录挡路"的回退路径）
   Future<HelloOutcome> _resumeTransientIfSameDevice(String deviceId) =>
       _resumeTransient(deviceId);
 
-  Future<HelloOutcome> _resumeTransient(String? onlyDeviceId) async {
+  Future<HelloOutcome> _resumeTransient(
+    String? onlyDeviceId, {
+    bool discoveryOnly = false,
+  }) async {
     final t = _storage.transientSession;
     if (t == null) return HelloOutcome.networkFail();
     lastAuthMode = AuthMode.resume;
@@ -380,6 +393,7 @@ class TextSender {
 
     final gen = _connectGen;
     final hid = await hardwareId;
+    if (!discoveryOnly) {
     _lastAttemptTargetIp = t.ip;
     debugPrint('VL_CONN 尝试直连 ${t.ip}:${t.port}（临时续连）');
     try {
@@ -393,6 +407,7 @@ class TextSender {
             clientId: _storage.clientId,
             token: t.token,
             port: t.port,
+            expectDeviceId: t.deviceId,
           )
           .catchError((Object _) => <DiscoveredDevice>[]);
       if (found.isEmpty) return HelloOutcome.networkFail();
@@ -406,6 +421,8 @@ class TextSender {
         return HelloOutcome.networkFail();
       }
     }
+    }
+    // 只广播的模式下没有直连结果：跳过"本地过期"判定里的直连语义，直接等 hello
     if (_superseded(gen)) return HelloOutcome.networkFail();
 
     final outcome = await _tcp.hello(
@@ -423,8 +440,14 @@ class TextSender {
         expiresInSec: outcome.resumeExpiresIn,
       );
     } else if (outcome.isUnauthorized) {
-      await _storage.clearTransientSession();
-      _transientExpiredName = t.name;
+      // 同上：只有"记忆里那台电脑"拒的才算数，否则只是我们连错了地址
+      if (rejectionFromOurPc(
+        responderId: outcome.deviceId,
+        expectedId: t.deviceId,
+      )) {
+        await _storage.clearTransientSession();
+        _transientExpiredName = t.name;
+      }
     }
     return outcome;
   }

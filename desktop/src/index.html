@@ -594,10 +594,13 @@
             // 二维码 3 分钟自动续期也会触发重绘，那种情况不播入场动画
             const enteringWaiting = lastPairKey !== 'waiting:free' &&
                                     lastPairKey !== 'waiting:bound';
-            const codeChanged = lastPairKey !== structure || el.dataset.code !== info.code;
+            // 重绘条件必须带上地址：换网络时码不一定变，但二维码里的 IP 变了，
+            // 只认码的话界面上留着的还是旧地址（手机扫它必然连不上）
+            const qrKey = (info.ip || '') + '?' + info.code;
+            const codeChanged = lastPairKey !== structure || el.dataset.qrKey !== qrKey;
             if (!codeChanged) return;
             lastPairKey = structure;
-            el.dataset.code = info.code;
+            el.dataset.qrKey = qrKey;
 
             const rememberRow = info.hasPrimary
                 ? '<p class="bound-note">已绑定一台手机，其他手机可扫码临时使用</p>'

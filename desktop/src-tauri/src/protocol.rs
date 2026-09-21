@@ -300,6 +300,15 @@ impl Message {
     }
 
     /// 构造失败的握手响应
+    /// 拒绝类应答带上本机 device_id：手机据此核对"是不是我那台电脑在拒我"，
+    /// 否则一台凑巧占了旧地址的陌生设备就能让手机把绑定删掉。
+    pub fn with_device_id(mut self, id: &str) -> Self {
+        if let Message::HelloAck { device_id, .. } = &mut self {
+            *device_id = Some(id.to_string());
+        }
+        self
+    }
+
     pub fn hello_ack_err(status: &str, error: &str) -> Self {
         Message::HelloAck {
             ok: false,

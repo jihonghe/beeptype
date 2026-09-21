@@ -38,27 +38,16 @@ bool peerCloseIsReceiverSide({
 }) =>
     peerClosed && weWereTalking && !netJustChanged;
 
-/// 临时接入在断开之后要不要**丢掉**续连记录（丢掉 = 回扫码引导页，重新扫码）。
+/// 这次"凭证被拒"是不是**我们那台电脑**给的？
 ///
-/// 判定依据是"**谁出了问题**"（用户定的原则）：
-/// - 接收方（PC 服务）自身出问题 → 不给临时访客第二次机会；
-/// - 发送方（这台手机）自身出问题 → 给它机会，窗口期内自己连回。
-///
-/// 三个入参对应三种信号：
-/// - [peerClosed]：收到 FIN，电脑上的程序退出/重启了——**确定**是 PC 侧；
-/// - [retryExhausted]：一轮高频重试已经试满（约 1 分钟）却仍没连上；
-/// - [offLan]：手机当前网络里已经没有电脑那个地址（换了 Wi-Fi / 只有移动数据）
-///   ——这属于手机侧自己的网络变了，不能怪电脑。
-///
-/// 静默断开（没有 FIN）不立刻丢：因为"电脑网络变了""路由器抖了一下""电脑睡了"
-/// 在手机上看起来完全一样，先给一轮高频重试的机会，试满再看是哪个方向。
-bool dropTransientOn({
-  required bool peerClosed,
-  required bool retryExhausted,
-  required bool offLan,
-}) {
-  if (peerClosed) return true; // PC 程序退出/重启：确定，立刻回扫码页
-  return retryExhausted && !offLan; // 试满一轮、且手机网络没变 → 判定为 PC 侧
+/// 手机拿存储的地址去连时，那个地址可能已经被**另一台设备**占用（含另一台跑着
+/// BeeType 的电脑）。它会拒绝我们的凭证，但那并不代表"我们被解绑了"——只有
+/// 记忆里那台电脑的拒绝才算数。拿不到对方 device_id（旧版电脑）时按"是"处理，
+/// 保持旧行为。
+bool rejectionFromOurPc({required String? responderId, required String? expectedId}) {
+  if (responderId == null || responderId.isEmpty) return true;
+  if (expectedId == null || expectedId.isEmpty) return true;
+  return responderId == expectedId;
 }
 
 /// 电脑拒绝本机凭证时的那句话（纯逻辑，便于单测）。

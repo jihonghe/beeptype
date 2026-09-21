@@ -729,13 +729,17 @@ impl<R: Runtime> ServerState<R> {
         peer_ip: IpAddr,
         ctx: &mut ConnCtx,
     ) -> Option<Message> {
+        // 本机身份：拒绝类应答都要带上 device_id（手机用来核对拒绝方）
+        let (device_id, pc_name) = self.device_identity();
+
         // 冷却优先
         if self.is_in_cooldown(peer_ip) {
             warn!("IP in cooldown: {}", peer_ip);
             return Some(Message::hello_ack_err(
                 "cooldown",
                 "尝试过于频繁，请 60 秒后再试",
-            ));
+            )
+            .with_device_id(&device_id));
         }
 
         // 记下硬件指纹：设为常用设备时写进记录（"重装后仍认得出"靠它）
@@ -765,7 +769,7 @@ impl<R: Runtime> ServerState<R> {
             let mut session = self.session.lock().unwrap();
             if session.is_some() {
                 // 席位被占（例如常用设备正在用）：按既有规则拒绝，连接不保持
-                return Some(Message::hello_ack_err("occupied", "电脑使用中"));
+                return Some(Message::hello_ack_err("occupied", "电脑使用中").with_device_id(&device_id));
             }
             let (seat, kick, identity) =
                 ActiveSession::new(client_id.clone(), name.clone(), false, ctx);
@@ -801,11 +805,11 @@ impl<R: Runtime> ServerState<R> {
                 return Some(Message::hello_ack_err(
                     "unauthorized",
                     "设备未授权，请在电脑上重新配对",
-                ));
+                )
+                .with_device_id(&device_id));
             }
             self.clear_auth_fails(peer_ip);
 
-            let (device_id, pc_name) = self.device_identity();
             let mut session = self.session.lock().unwrap();
             match arbitrate_primary(session.as_ref(), &client_id) {
                 PrimaryArbitration::Admit => {
@@ -866,7 +870,7 @@ impl<R: Runtime> ServerState<R> {
                     ctx.waiting_takeover = true;
                     ctx.last_active = Instant::now();
                     info!("Primary arrives but seat occupied from {}", peer_ip);
-                    Some(Message::hello_ack_err("occupied", "电脑使用中"))
+                    Some(Message::hello_ack_err("occupied", "电脑使用中").with_device_id(&device_id))
                 }
             }
         } else if let Some(code) = code {
@@ -878,14 +882,14 @@ impl<R: Runtime> ServerState<R> {
             if !code_ok {
                 self.record_auth_fail(peer_ip);
                 warn!("Bad code from {}", peer_ip);
-                return Some(Message::hello_ack_err("bad_code", "配对码错误或已过期"));
+                return Some(Message::hello_ack_err("bad_code", "配对码错误或已过期").with_device_id(&device_id));
             }
             self.clear_auth_fails(peer_ip);
 
             let mut session = self.session.lock().unwrap();
             if session.is_some() {
                 // 码对但席位占用：不认证、不绑定，直接拒绝
-                return Some(Message::hello_ack_err("occupied", "电脑使用中"));
+                return Some(Message::hello_ack_err("occupied", "电脑使用中").with_device_id(&device_id));
             }
 
             // 席位空闲：判定身份。
@@ -967,7 +971,7 @@ impl<R: Runtime> ServerState<R> {
             // 既无码也无 token
             self.record_auth_fail(peer_ip);
             warn!("Empty credentials from {}", peer_ip);
-            Some(Message::hello_ack_err("unauthorized", "握手缺少凭证"))
+            Some(Message::hello_ack_err("unauthorized", "握手缺少凭证").with_device_id(&device_id))
         }
     }
 
@@ -1573,6 +1577,9 @@ mod integration_tests {
         let app = tauri::test::mock_app();
         let mut config = crate::config::Config::default();
         config.device_name = "测试电脑".to_string();
+        // 真实启动流程会补一个 UUID（Config::load 里），测试自己造一个，
+        // 否则"拒绝应答要带 device_id"这类断言无从核对
+        config.device_id = "test-pc-id".to_string();
         let code = config.regenerate_code();
         let state = ServerState::new(
             app.handle().clone(),
@@ -1796,6 +1803,29 @@ mod integration_tests {
             assert_eq!(promoted["type"], "promoted");
             sock.write_all(b"{\"type\":\"promoted_ack\"}\n").expect("ack");
         }
+    }
+
+    /// 拒绝类应答必须带上 device_id：手机据此核对"是不是我那台电脑在拒我"，
+    /// 否则一台凑巧占了旧地址的陌生设备就能让手机把绑定删掉。
+    #[test]
+    fn test_rejection_ack_carries_device_id() {
+        let (state, _code) = test_state();
+        let (mut sock, mut reader) = connect_as_phone(spawn_server(state.clone()));
+
+        // 拿一个编造出来的 token 去连：必然被拒
+        send_hello(
+            &mut sock,
+            serde_json::json!({"type":"hello","token":"00".repeat(32),
+                               "client_id":"cid-x","device_name":"陌生手机"}),
+        );
+        let ack = read_until(&mut reader, "hello_ack");
+        assert_eq!(ack["ok"], false);
+        assert_eq!(ack["status"], "unauthorized");
+        let reported = ack["device_id"].as_str().unwrap_or_default();
+        assert!(
+            !reported.is_empty() && reported == state.device_identity().0,
+            "拒绝应答必须带上本机 device_id（手机要核对拒绝方是谁），实际 ack = {ack}"
+        );
     }
 
     /// 心跳回报权威身份：常用设备 primary、解绑降级后 transient。

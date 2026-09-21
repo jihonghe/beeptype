@@ -213,6 +213,32 @@ void main() {
     });
   });
 
+  group('凭证被拒时：是不是"我那台电脑"在拒我', () {
+    test('拒绝方就是记忆里那台电脑 → 真被解绑，该删绑定', () {
+      expect(
+        rejectionFromOurPc(responderId: 'pc-A', expectedId: 'pc-A'),
+        isTrue,
+      );
+    });
+
+    test('拒绝方是另一台设备（旧地址被别的设备占了）→ 保留绑定', () {
+      expect(
+        rejectionFromOurPc(responderId: 'pc-B', expectedId: 'pc-A'),
+        isFalse,
+        reason: '一台陌生产品不能让我们丢掉绑定',
+      );
+    });
+
+    test('对方没报 device_id（旧版电脑）→ 按旧行为处理', () {
+      expect(rejectionFromOurPc(responderId: null, expectedId: 'pc-A'), isTrue);
+      expect(rejectionFromOurPc(responderId: '', expectedId: 'pc-A'), isTrue);
+    });
+
+    test('自己没存 device_id → 无从核对，按旧行为处理', () {
+      expect(rejectionFromOurPc(responderId: 'pc-B', expectedId: null), isTrue);
+    });
+  });
+
   group('对端关闭连接算谁的问题（锁屏被收尸 / 自己换网络都不能赖电脑）', () {
     test('我们当时还在正常通信、网络也没刚变过 → 算电脑侧', () {
       expect(
@@ -256,39 +282,6 @@ void main() {
           netJustChanged: false,
         ),
         isFalse,
-      );
-    });
-  });
-
-  group('临时接入：这次断开要不要丢掉续连记录（谁出问题，谁负责）', () {
-    test('电脑上的程序退出/重启（收到 FIN）→ 丢，立刻回扫码页', () {
-      expect(
-        dropTransientOn(peerClosed: true, retryExhausted: false, offLan: false),
-        isTrue,
-        reason: '接收方自身出问题，不给临时访客第二次机会',
-      );
-    });
-
-    test('还在高频重试中、手机网络也没变 → 保留，先给机会', () {
-      expect(
-        dropTransientOn(peerClosed: false, retryExhausted: false, offLan: false),
-        isFalse,
-      );
-    });
-
-    test('一轮高频重试试满、手机网络没变 → 判定为电脑侧，丢掉', () {
-      expect(
-        dropTransientOn(peerClosed: false, retryExhausted: true, offLan: false),
-        isTrue,
-        reason: '手机没换网络却连不上，说明问题在电脑那边',
-      );
-    });
-
-    test('手机自己换了网络 / 只有移动数据 → 保留（这是手机侧，给机会）', () {
-      expect(
-        dropTransientOn(peerClosed: false, retryExhausted: true, offLan: true),
-        isFalse,
-        reason: '换回同一网络后还能自己连回，不该把记录丢掉',
       );
     });
   });
