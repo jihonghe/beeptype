@@ -47,6 +47,43 @@ void main() {
     });
   });
 
+  group('判断不了就不判断（同一个 Wi-Fi 下不能谎报"不在同一网络"）', () {
+    test('取不到网卡信息（枚举失败）→ 不提示', () {
+      expect(
+        looksOffLan('192.168.31.7', null),
+        isFalse,
+        reason: '枚举网卡在安卓网络切换时确实会抛；那不等于"手机没有局域网"',
+      );
+    });
+
+    test('目标地址未知 → 不提示', () {
+      expect(
+        looksOffLan(null, const LocalNet([(name: 'wlan0', ip: '192.168.31.20')])),
+        isFalse,
+      );
+    });
+
+    test('确实枚举到了网卡、目标不在任何网段 → 提示成立', () {
+      expect(
+        looksOffLan(
+          '192.168.31.7',
+          const LocalNet([(name: 'wlan0', ip: '192.168.1.20')]),
+        ),
+        isTrue,
+      );
+    });
+
+    test('同一网段 → 不提示', () {
+      expect(
+        looksOffLan(
+          '192.168.31.7',
+          const LocalNet([(name: 'wlan0', ip: '192.168.31.20')]),
+        ),
+        isFalse,
+      );
+    });
+  });
+
   group('本机是否有局域网（决定还要不要重试/广播）', () {
     test('只有移动数据（rmnet）→ 没有局域网：不重试、不广播', () {
       const net = LocalNet([(name: 'rmnet_data0', ip: '10.42.13.88')]);

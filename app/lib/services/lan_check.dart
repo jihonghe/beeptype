@@ -68,6 +68,17 @@ Future<LocalNet?> localNetSnapshot() async {
 
 /// 目标地址是否**看起来**不在本机任何一个局域网网段内。
 ///
+/// 与 [likelyOffLan] 的区别：这里把"取不到网卡信息"（[net] 为 null，枚举抛异常）
+/// 明确当成**判断不了**——返回 false、不给提示。枚举网卡在安卓网络切换/热点共享
+/// 这类时刻确实会抛，若把它当成"没有局域网"，就会在同一个 Wi-Fi 下谎报
+/// "请确认手机和电脑连着同一个 Wi-Fi"（用户实测踩到过）。
+bool looksOffLan(String? targetIp, LocalNet? net) {
+  if (targetIp == null || net == null) return false;
+  return likelyOffLan(targetIp, net.ips);
+}
+
+/// 目标地址是否**看起来**不在本机任何一个局域网网段内。
+///
 /// [localIps] 为本机当前 IPv4 地址；目标地址无法解析时返回 false（判断不了就别说）。
 bool likelyOffLan(String targetIp, Iterable<String> localIps) {
   final target = _prefix24(targetIp);

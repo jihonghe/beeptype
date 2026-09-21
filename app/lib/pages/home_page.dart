@@ -197,6 +197,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _reconnectTimer?.cancel();
         _transientExpiryTimer?.cancel();
         _reconnectAttempt = 0;
+        _offLan = false; // 连上了：清掉上次失败留下的网络判断，别残留提示
         unawaited(_requestKeyboard());
         break;
       case ConnectionStatus.occupied:
@@ -377,7 +378,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (gen != _attemptGen) return;
     _connecting = false;
     if (!mounted) return;
-    _offLan = target != null && likelyOffLan(target, net?.ips ?? const []);
+    // 判断不了（枚举失败）就不提示：同一个 Wi-Fi 下谎报"不在同一网络"更伤
+    _offLan = looksOffLan(target, net);
     _scheduleReconnect(net);
     _scheduleTransientExpiryRefresh();
     setState(() {});
@@ -654,8 +656,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (enabled) {
       hintText = '长按键盘语音键即可语音输入文字';
     } else if (_offLan) {
-      // 能判断"不在同一个网络"：这是最可操作的一条提示
-      hintText = '请确认手机和电脑连着同一个 Wi-Fi';
+      // 能判断"不在同一个网络"：这是最可操作的一条提示。
+      // 说"同一个网络"而不是"同一个 Wi-Fi"——热点共享等场景下手机自己不在 Wi-Fi 上
+      hintText = '请确认手机和电脑在同一个网络';
     } else if (_status == ConnectionStatus.occupied &&
         widget.sender.lastAuthMode == AuthMode.token) {
       // 电脑正被另一台手机使用，而本机是这台电脑的绑定手机：点「连接」即接管

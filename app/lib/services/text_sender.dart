@@ -239,10 +239,8 @@ class TextSender {
 
   /// 目标地址是否看起来不在同一局域网（供失败提示；判断不了就说"否"）
   Future<bool> targetLooksOffLan() async {
-    final ip = _lastAttemptTargetIp;
-    if (ip == null) return false;
     final net = await localNetSnapshot();
-    return likelyOffLan(ip, net?.ips ?? const []);
+    return looksOffLan(_lastAttemptTargetIp, net);
   }
 
   /// 自动连接最近使用的常用电脑。
@@ -510,7 +508,7 @@ class TextSender {
     // 网络层失败且能判断两者不在同一网络 → 直说是网络问题，别让用户去猜电脑
     if (outcome.status == 'network_fail') {
       final net = await localNetSnapshot();
-      final off = likelyOffLan(uri.host, net?.ips ?? const []);
+      final off = looksOffLan(uri.host, net);
       return (
         ok: false,
         error: off ? '连接失败，请确认手机和电脑连着同一个 Wi-Fi' : '连接失败',

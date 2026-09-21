@@ -213,6 +213,7 @@ class TcpService {
   }) async {
     if (_isConnected) return;
 
+    final seq = ++_connectSeq;
     // 防御性清理上一轮残留资源
     _stopHeartbeat();
     await _subscription?.cancel();
@@ -223,7 +224,13 @@ class TcpService {
     _statusController.add(ConnectionStatus.connecting);
 
     try {
-      _socket = await Socket.connect(ip, port, timeout: timeout);
+      final sock = await Socket.connect(ip, port, timeout: timeout);
+      if (seq != _connectSeq) {
+        // 已被更新的连接取代（例如用户扫码配对）：丢掉这条，别覆盖新连接
+        sock.destroy();
+        return;
+      }
+      _socket = sock;
       _lastIp = ip;
       _lastPort = port;
 
@@ -247,7 +254,10 @@ class TcpService {
 
       _startHeartbeat();
     } catch (e) {
-      _statusController.add(ConnectionStatus.disconnected);
+      // 只有仍是"当代"的尝试才允许抛状态；被取代的旧尝试静默失败
+      if (seq == _connectSeq) {
+        _statusController.add(ConnectionStatus.disconnected);
+      }
       rethrow;
     }
   }
@@ -380,6 +390,7 @@ class TcpService {
   /// 硬断开（无 bye；异常清理用）
   Future<void> disconnect() async {
     _localClose = true;
+    _connectSeq++; // 作废任何在飞的 connect
     await _teardown(announce: false);
     _isPaired = false;
     _statusController.add(ConnectionStatus.disconnected);
@@ -613,6 +624,12 @@ class TcpService {
   }
 
   static const Duration _silenceLimit = Duration(seconds: 15);
+
+  /// 连接序号：每发起一次 connect 自增，`disconnect()` 也自增。
+  ///
+  /// 用来作废**被取代的**那次连接：旧尝试的超时不能抛"断开"状态事件（会把刚配对好的
+  /// 界面按回"连接中"），也不能把自己迟到建好的 socket 覆盖上去（会把新连接顶掉）。
+  int _connectSeq = 0;
 
   /// 前后台切换：切回前台时重置判活基准，避免拿休眠期间的空档误判
   void setForeground(bool value) {
