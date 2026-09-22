@@ -176,6 +176,13 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v7
 
+      # 安卓产物在 CI 里是 Gradle 默认名 app-release.apk（不带产品名与版本），
+      # 发布前改名为 BeepType_<version>_arm64.apk，与桌面端产物命名保持一致
+      - name: Rename Android artifact
+        run: |
+          mkdir -p dist
+          cp android-apk/app-release.apk "dist/BeepType_${GITHUB_REF_NAME#v}_arm64.apk"
+
       # 手写发布说明优先：docs/releases/<tag>.md 存在就用它替换自动生成的变更列表；
       # 不存在则回退到 GitHub 自动生成（行为与过去一致）
       - name: Pick release notes
@@ -199,7 +206,7 @@ jobs:
           # 这个作业只可能由 tag 推送触发（手动 dry run 已被上面的 if 跳过）
           draft: false
           files: |
-            android-apk/app-release.apk
+            dist/*.apk
             linux-desktop/**/*.deb
             linux-desktop/**/*.AppImage
             macos-desktop/**/*.dmg

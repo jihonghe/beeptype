@@ -15,6 +15,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # 产品名验收线：仓库里不得再出现改名前的旧名（任何大小写）。
+  # 豁免两类：已发布的历史发布说明（记录当时真实的产品名，永久不动）与锁文件
+  # （第三方包名可能撞名）。规则见 CONTRIBUTING.md「开发与发布流程」。
+  naming:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: 旧名残留检查
+        run: |
+          # 旧名用拼接构造：守卫自身不能出现它的字面量，否则会自我命中
+          OLD="bee"; OLD="${OLD}type"
+          hits=$(git grep -nIi "$OLD" -- . ':!docs/releases' ':!*Cargo.lock' ':!app/pubspec.lock' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::发现旧产品名——现用名是 beeptype（全小写：包名/协议/配置目录）与 BeepType（展示名）"
+            echo "$hits"
+            exit 1
+          fi
+          echo "OK：除历史发布说明与锁文件外，无旧名残留"
+
   desktop:
     runs-on: ubuntu-22.04
     steps:
