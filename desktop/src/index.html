@@ -643,8 +643,26 @@
             if (!ap || !ans) return;
             ap.checked = !!s.autoPaste;
             ans.checked = !!s.autoSend;
-            // 两个开关的 checked/disabled 与说明文字由 applyAutoSwitchState 统一处理
-
+            ap.disabled = !s.autoPasteSupported;
+            // 自动发送依赖自动粘贴：autoPaste 关 → autoSend 也 disabled
+            ans.disabled = !s.autoPaste || !s.autoSendSupported;
+            if (!s.autoPasteSupported) {
+                apNote.textContent = '当前桌面会话不支持全局按键模拟（如 Wayland），自动粘贴不可用';
+                apNote.classList.add('bad');
+            } else {
+                apNote.textContent = '模拟快捷键把剪贴板内容粘贴到当前光标处';
+                apNote.classList.remove('bad');
+            }
+            if (!s.autoSendSupported) {
+                asNote.textContent = '当前会话不支持自动发送';
+                asNote.classList.add('bad');
+            } else if (!s.autoPaste) {
+                asNote.textContent = '请先开启自动粘贴';
+                asNote.classList.add('bad');
+            } else {
+                asNote.textContent = '粘贴完成后自动回车发送到聊天框';
+                asNote.classList.remove('bad');
+            }
         }
 
         async function renderSettings() {
@@ -675,26 +693,6 @@
                 : '临时手机被系统杀掉后，这段时间内重开 App 可自动连回（超时需重新扫码）';
             rt.value = String(s.resumeTtlMin ?? 5);
             rtNote.textContent = rtText();
-            ap.disabled = !s.autoPasteSupported;
-            // 自动发送依赖自动粘贴：autoPaste 关 → autoSend 也 disabled
-            ans.disabled = !s.autoPaste || !s.autoSendSupported;
-            if (!s.autoPasteSupported) {
-                apNote.textContent = '当前桌面会话不支持全局按键模拟（如 Wayland），自动粘贴不可用';
-                apNote.classList.add('bad');
-            } else {
-                apNote.textContent = '模拟快捷键把剪贴板内容粘贴到当前光标处';
-                apNote.classList.remove('bad');
-            }
-            if (!s.autoSendSupported) {
-                asNote.textContent = '当前会话不支持自动发送';
-                asNote.classList.add('bad');
-            } else if (!s.autoPaste) {
-                asNote.textContent = '请先开启自动粘贴';
-                asNote.classList.add('bad');
-            } else {
-                asNote.textContent = '粘贴完成后自动回车发送到聊天框';
-                asNote.classList.remove('bad');
-            }
             ap.onchange = async () => {
                 try {
                     await invoke('set_auto_paste', { value: ap.checked });
