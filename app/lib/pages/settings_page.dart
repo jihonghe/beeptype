@@ -73,6 +73,10 @@ class _SettingsPageState extends State<SettingsPage> {
 
     return Scaffold(
       appBar: AppBar(title: const Text('设置')),
+      // 这页没有输入框，页面高度**不该跟着键盘变**：从打字区点齿轮进来时键盘还开着，
+      // 若跟着键盘缩，首帧就按"屏幕−键盘"这个矮高度排版，键盘一收底部信息块再往下滑
+      // 一下——用户看到的"信息块从中间滑到底部"就是它。高度恒定 ⇒ 首帧就贴底。
+      resizeToAvoidBottomInset: false,
       body: SafeArea(
         // 一套布局，两种状态一致：主内容在上、APP 信息**始终贴页面底部**。
         // 屏幕够高就把内容撑到整屏（好让信息贴底）；内容真超一屏时按自然高度滚动，
@@ -235,7 +239,9 @@ class _SettingsPageState extends State<SettingsPage> {
         Text('手机说话，电脑落字',
             style: TextStyle(fontSize: 14, color: scheme.onSurfaceVariant)),
         const SizedBox(height: 18),
-        if (_version.isNotEmpty) Text('Version: $_version', style: muted),
+        // 版本号是异步读到的（首帧还没读到）：先把这一行占住，
+        // 免得读到之后再长出一行、把上面的内容轻轻往上顶一下
+        Text(_version.isEmpty ? ' ' : 'Version: $_version', style: muted),
         const SizedBox(height: 4),
         Text('© 2026 jihonghe', style: muted),
       ],

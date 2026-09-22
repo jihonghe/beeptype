@@ -101,4 +101,25 @@ void main() {
     expect(find.text('BeepType'), findsOneWidget);
     expect(find.text('© 2026 jihonghe'), findsOneWidget);
   });
+
+  testWidgets('键盘还开着进来时，信息块首帧就贴底；键盘收起也不再滑动', (tester) async {
+    mockVersion('0.7.0');
+    addTearDown(tester.view.reset);
+    // 从打字区点齿轮进设置页时键盘还开着：首帧就带着键盘 inset（900 物理 / 3 dpr = 300 逻辑）
+    tester.view.viewInsets = const FakeViewPadding(bottom: 900);
+
+    await tester.pumpWidget(MaterialApp(home: SettingsPage(sender: TextSender())));
+    await tester.pump();
+    final h = tester.view.physicalSize.height / tester.view.devicePixelRatio;
+    final bottom0 = tester.getBottomRight(find.text('© 2026 jihonghe')).dy;
+    // 回归护栏（用户实测）：Scaffold 若跟着键盘缩，首帧就按"屏幕−键盘"这个矮高度排版，
+    // 信息块落在屏幕中间，键盘一收再往下滑一下 = "信息块从中间滑到底部"。
+    expect(bottom0, greaterThan(h * 0.8), reason: '键盘开着时也必须已经在底部');
+
+    // 键盘收起（进设置页会收起键盘）→ 位置一格都不许动
+    tester.view.viewInsets = FakeViewPadding.zero;
+    await tester.pumpAndSettle();
+    expect(tester.getBottomRight(find.text('© 2026 jihonghe')).dy,
+        moreOrLessEquals(bottom0, epsilon: 0.5), reason: '键盘收起不能让信息块再滑一下');
+  });
 }
