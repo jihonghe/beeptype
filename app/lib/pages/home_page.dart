@@ -154,11 +154,6 @@ class _HomePageState extends State<HomePage>
     WidgetsBinding.instance.addObserver(this);
     _inputController = TextEditingController();
     _focusNode = FocusNode();
-    // 临时诊断：焦点一变就记一条（谁、在哪一刻把焦点弄丢的）
-    _focusNode.addListener(() {
-      debugPrint('VK_FOCUS node hasFocus=${_focusNode.hasFocus} status=$_status '
-          'primary=${FocusManager.instance.primaryFocus}');
-    });
     _inputController.addListener(_onValueChanged);
     _statusSub = widget.sender.tcp.statusStream.listen(_onStatus);
     _sessionEndedSub =
@@ -253,7 +248,7 @@ class _HomePageState extends State<HomePage>
       _probing = false;
       if (!mounted) return;
       if (alive) {
-        unawaited(_requestKeyboard());
+        unawaited(_requestKeyboard(from: 'resume'));
         return;
       }
       debugPrint('VL_CONN 回到前台探活失败：连接其实已经断了，开始重连');
@@ -288,7 +283,7 @@ class _HomePageState extends State<HomePage>
     _endRetryEpisode();
     _transientExpiryTimer?.cancel();
     _offLan = false; // 连上了：清掉上次失败留下的网络判断，别残留提示
-    unawaited(_requestKeyboard());
+    unawaited(_requestKeyboard(from: 'paired'));
   }
 
   void _onStatus(ConnectionStatus status) {
@@ -526,39 +521,28 @@ class _HomePageState extends State<HomePage>
     if (!ok) _showSnack('接管失败，请重试');
   }
 
-  /// 已配对时自动聚焦输入框并强制唤起软键盘。
-  ///
-  /// 冷启动竞态：自动连接在 Activity 窗口完成 IME 注册前就绪时，
-  /// TextInput.show 会被系统取消（ImeTracker: PHASE_CLIENT_ALREADY_HIDDEN，
-  /// HyperOS 实测复现）。因此 show 后验证键盘是否真的弹出（viewInsets），
-  /// 未弹则以 350ms 间隔重试，最多 3 次；切回前台等窗口就绪的场景首次即成功。
-  /// 把焦点与键盘交还给打字区：**聚焦是必须的，弹键盘是尽力而为**。
-  ///
-  /// 注意：判断"键盘已在显示"时**只能跳过 `TextInput.show`，绝不能整个函数返回**——
-  /// 返回瞬间若 IME 还在做关闭动画（平台还没把高度归零），一旦整体退出，就连补一次
-  /// `requestFocus()` 都不会做，光标再也回不来（用户实测：从设置页/扫码页返回后
-  /// "键盘弹了但光标不在"，且时好时坏）。
   /// 把焦点与键盘交还给打字区：**聚焦是必须的，弹键盘是尽力而为**。
   ///
   /// 两个坑（都是真机实测出来的）：
   /// 1. **返回动画期间不能急着聚焦**：那时首页路由还是「被覆盖」状态，Flutter 禁止其
-  ///    子树获得焦点，requestFocus() 会被**静默拒绝**（canRequestFocus=false）。而
+  ///    子树获得焦点，`requestFocus()` 会被**静默拒绝**（canRequestFocus=false）。而
   ///    **手势返回**时 pop 的 future 在动画刚开始就完成（按钮返回要等到动画结束），
-  ///    所以不能拿 future 返回当「已回到前台」——要等 ModalRoute.isCurrent 为真。
-  /// 2. 「键盘已在显示」只能跳过 TextInput.show，绝不能整个返回；否则连补一次
-  ///    requestFocus() 都不做，焦点再也回不来。
+  ///    所以不能拿 future 返回当「已回到前台」——要等 `ModalRoute.isCurrent` 为真，
+  ///    一拍一拍地等，不假定转场时长。
+  /// 2. 「键盘已在显示」只能跳过 `TextInput.show`，绝不能整个函数返回；否则连补一次
+  ///    `requestFocus()` 都不做，焦点再也回不来（用户实测：从设置页/扫码页返回后
+  ///    "键盘弹了但光标不在"，且时好时坏）。
+  ///
+  /// 冷启动竞态：自动连接在 Activity 窗口完成 IME 注册前就绪时，`TextInput.show` 会被
+  /// 系统取消（ImeTracker: PHASE_CLIENT_ALREADY_HIDDEN，HyperOS 实测复现），所以每次
+  /// show 之后都回头验证键盘是否真的弹出（看 viewInsets），没弹出就下一拍再补。
+  ///
+  /// [from] 只用于出问题时定位是哪个入口进来的。
   Future<void> _requestKeyboard({String from = '?'}) async {
-    if (_status != ConnectionStatus.paired) {
-      debugPrint('VK_FOCUS skip[$from]: status=$_status');
-      return;
-    }
+    if (_status != ConnectionStatus.paired) return;
     // 扫码页还在前台：别把键盘盖上去（配对成功会先把那个页面弹掉）
-    if (_scanPageOpen) {
-      debugPrint('VK_FOCUS skip[$from]: scanPageOpen=true');
-      return;
-    }
+    if (_scanPageOpen) return;
     const step = Duration(milliseconds: 150);
-    // 转场时长由平台与手势决定，一拍一拍等，不假定时长
     for (var attempt = 0; attempt < 10; attempt++) {
       if (!mounted || _status != ConnectionStatus.paired) return;
       final route = ModalRoute.of(context);
@@ -570,14 +554,15 @@ class _HomePageState extends State<HomePage>
       final views = WidgetsBinding.instance.platformDispatcher.views;
       final keyboardShown =
           views.isNotEmpty && views.first.viewInsets.bottom > 0;
-      debugPrint('VK_FOCUS try${attempt + 1}[$from] keyboardShown=$keyboardShown '
-          'hasFocus=${_focusNode.hasFocus} canRequest=${_focusNode.canRequestFocus}');
       if (_focusNode.hasFocus && keyboardShown) return; // 焦点与键盘都到位
       if (!keyboardShown) {
         await SystemChannels.textInput.invokeMethod<void>('TextInput.show');
       }
       await Future<void>.delayed(step);
     }
+    // 诊断（只在失败路径上输出一行，正常时不出声）：焦点始终没拿到，
+    // 说明上面两个坑又冒出来了——留这一行免得下次只能干瞪眼
+    debugPrint('VK_FOCUS 未拿到焦点（入口=$from status=$_status）');
   }
 
   /// 子页面（设置页/扫码页/将来任何页面）退场、本页重新回到前台。

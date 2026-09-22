@@ -2,7 +2,7 @@ name: beeptype
 description: 手机说话，电脑落字
 publish_to: 'none'
 # 发布时由 CI 按 git tag 改写；此处保持与最近一次发布一致，便于人工核对
-version: 0.6.0
+version: 0.7.0
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
