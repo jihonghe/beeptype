@@ -251,7 +251,7 @@ class _HomePageState extends State<HomePage>
         unawaited(_requestKeyboard(from: 'resume'));
         return;
       }
-      debugPrint('VL_CONN 回到前台探活失败：连接其实已经断了，开始重连');
+      debugPrint('BT_CONN 回到前台探活失败：连接其实已经断了，开始重连');
       // 让它按"真的断开"处理：状态跳变会触发一轮重连（与平时断线同一条路径）
       unawaited(widget.sender.tcp.disconnect());
       return;
@@ -460,7 +460,7 @@ class _HomePageState extends State<HomePage>
       // 拒绝我们的可能不是"我们那台电脑"（旧地址被别的设备占了）。那种情况
       // 绝不能删绑定——否则一台陌生产品就能让好手机丢掉绑定。
       if (!rejectionFromOurPc(responderId: outcome.deviceId, expectedId: id)) {
-        debugPrint('VL_CONN 凭证被拒，但拒绝方不是记忆里那台电脑，保留绑定');
+        debugPrint('BT_CONN 凭证被拒，但拒绝方不是记忆里那台电脑，保留绑定');
         _connecting = false;
         if (mounted) setState(() {});
         return;
@@ -562,7 +562,7 @@ class _HomePageState extends State<HomePage>
     }
     // 诊断（只在失败路径上输出一行，正常时不出声）：焦点始终没拿到，
     // 说明上面两个坑又冒出来了——留这一行免得下次只能干瞪眼
-    debugPrint('VK_FOCUS 未拿到焦点（入口=$from status=$_status）');
+    debugPrint('BT_FOCUS 未拿到焦点（入口=$from status=$_status）');
   }
 
   /// 子页面（设置页/扫码页/将来任何页面）退场、本页重新回到前台。

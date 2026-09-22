@@ -139,7 +139,7 @@ class TextSender {
     final s = session;
     if (s != null && s.ok && s.isPrimary) return; // 常用连接不需要保活记录
     if (u.disabled) {
-      debugPrint('VL_TCP 保活被关闭：清掉本地续连记录');
+      debugPrint('BT_TCP 保活被关闭：清掉本地续连记录');
       unawaited(_storage.clearTransientSession().then((_) {
         _sessionUpdatedController.add(null);
       }));
@@ -157,7 +157,7 @@ class TextSender {
       expiresAtMs: DateTime.now().millisecondsSinceEpoch +
           u.expiresInSec * 1000,
     )));
-    debugPrint('VL_TCP 保活凭证已按设置落盘（${u.expiresInSec}s）');
+    debugPrint('BT_TCP 保活凭证已按设置落盘（${u.expiresInSec}s）');
   }
 
   /// PC 端在设置页把本机设为常用设备：落盘长期凭证 + 作废临时续连记录 + 刷新界面
@@ -165,7 +165,7 @@ class TextSender {
     final ip = _tcp.lastIp;
     final port = _tcp.lastPort;
     if (ip == null || port == null || g.token.isEmpty || g.deviceId.isEmpty) {
-      debugPrint('VL_TCP promoted 缺少端点信息，忽略');
+      debugPrint('BT_TCP promoted 缺少端点信息，忽略');
       return;
     }
     await _storage.upsertDevice(OutputDevice(
@@ -193,7 +193,7 @@ class TextSender {
       );
     }
     _sessionUpdatedController.add(null);
-    debugPrint('VL_TCP 已被设为常用设备，凭证已落盘');
+    debugPrint('BT_TCP 已被设为常用设备，凭证已落盘');
   }
 
   void _onDowngradeGrant(ResumeGrant grant) {
@@ -210,7 +210,7 @@ class TextSender {
       expiresAtMs:
           DateTime.now().millisecondsSinceEpoch + grant.expiresInSec * 1000,
     )));
-    debugPrint('VL_TCP 降级续连凭证已落盘（${grant.expiresInSec}s 窗口）');
+    debugPrint('BT_TCP 降级续连凭证已落盘（${grant.expiresInSec}s 窗口）');
   }
 
   /// 心跳里带回的 PC 侧权威信息：纠正身份 + 同步临时窗口。
@@ -224,10 +224,10 @@ class TextSender {
 
     // 身份自愈：电脑说我是临时接入，而我以为是常用设备 → 按降级处理（删本地凭证）
     if (info.session == 'transient' && s.isPrimary) {
-      debugPrint('VL_TCP 心跳纠正身份：常用设备 → 临时接入');
+      debugPrint('BT_TCP 心跳纠正身份：常用设备 → 临时接入');
       unawaited(downgradeToTemp().then((_) => _sessionUpdatedController.add(null)));
     } else if (info.session == 'primary' && !s.isPrimary) {
-      debugPrint('VL_TCP 心跳纠正身份：临时接入 → 常用设备');
+      debugPrint('BT_TCP 心跳纠正身份：临时接入 → 常用设备');
       session = HelloOutcome(
         ok: s.ok,
         status: s.status,
@@ -325,7 +325,7 @@ class TextSender {
     final hid = await hardwareId;
     if (!discoveryOnly) {
       _lastAttemptTargetIp = dev.ip;
-      debugPrint('VL_CONN 尝试直连 ${dev.ip}:${dev.port}');
+      debugPrint('BT_CONN 尝试直连 ${dev.ip}:${dev.port}');
       try {
         await _tcp.connect(dev.ip, dev.port, timeout: _directConnectTimeout);
         // 已被作废（例如用户正在扫码配对）：连上了也别插话，更不能发 hello
@@ -341,7 +341,7 @@ class TextSender {
         outcome = null; // TCP 建连失败
       }
       if (_superseded(gen)) return HelloOutcome.networkFail();
-      debugPrint('VL_CONN 直连结果：${outcome?.status ?? '网络层失败'}');
+      debugPrint('BT_CONN 直连结果：${outcome?.status ?? '网络层失败'}');
 
       // 成功 / 占用 / 凭证被拒 / 被限流：结论已明确，无需换 IP 再试
       if (outcome != null &&
@@ -357,7 +357,7 @@ class TextSender {
         return outcome;
       }
     } else {
-      debugPrint('VL_CONN 已知电脑地址不在本机网段：跳过直连，直接广播找');
+      debugPrint('BT_CONN 已知电脑地址不在本机网段：跳过直连，直接广播找');
     }
 
     // 网络层失败：广播找一次（DHCP 换 IP 的主路径）。
@@ -378,7 +378,7 @@ class TextSender {
       found = const [];
     }
     if (_superseded(gen)) return HelloOutcome.networkFail();
-    debugPrint('VL_CONN 广播找到 ${found.length} 台：'
+    debugPrint('BT_CONN 广播找到 ${found.length} 台：'
         '${found.map((d) => '${d.ip}:${d.port}').join(',')}');
     final cand = found.isEmpty ? null : found.first;
     if (cand == null || cand.ip == dev.ip) {
@@ -400,7 +400,7 @@ class TextSender {
     if (_superseded(gen)) return HelloOutcome.networkFail();
     await _tcp.disconnect();
     _lastAttemptTargetIp = cand.ip;
-    debugPrint('VL_CONN 用新地址补连 ${cand.ip}:${cand.port}');
+    debugPrint('BT_CONN 用新地址补连 ${cand.ip}:${cand.port}');
     try {
       await _tcp.connect(cand.ip, cand.port, timeout: _directConnectTimeout);
       if (_superseded(gen)) return HelloOutcome.networkFail();
@@ -414,7 +414,7 @@ class TextSender {
     } catch (_) {
       return HelloOutcome.networkFail();
     }
-    debugPrint('VL_CONN 补连结果：${outcome.status ?? '网络层失败'}');
+    debugPrint('BT_CONN 补连结果：${outcome.status ?? '网络层失败'}');
     if (outcome.ok) {
       unawaited(_persistPrimary(dev, outcome, connectedIp: cand.ip));
     } else if (outcome.isOccupied) {
@@ -454,7 +454,7 @@ class TextSender {
     final hid = await hardwareId;
     if (!discoveryOnly) {
     _lastAttemptTargetIp = t.ip;
-    debugPrint('VL_CONN 尝试直连 ${t.ip}:${t.port}（临时续连）');
+    debugPrint('BT_CONN 尝试直连 ${t.ip}:${t.port}（临时续连）');
     try {
       await _tcp.connect(t.ip, t.port, timeout: _directConnectTimeout);
     } catch (_) {
@@ -472,7 +472,7 @@ class TextSender {
       if (found.isEmpty) return HelloOutcome.networkFail();
       if (_superseded(gen)) return HelloOutcome.networkFail();
       _lastAttemptTargetIp = found.first.ip;
-      debugPrint('VL_CONN 用新地址补连 ${found.first.ip}:${found.first.port}（临时续连）');
+      debugPrint('BT_CONN 用新地址补连 ${found.first.ip}:${found.first.port}（临时续连）');
       try {
         await _tcp.connect(found.first.ip, found.first.port,
             timeout: _directConnectTimeout);

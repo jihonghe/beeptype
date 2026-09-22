@@ -549,7 +549,7 @@ class TcpService {
 
       case 'session_ended':
         final reason = d['reason'] as String? ?? 'unknown';
-        debugPrint('VL_TCP session_ended: $reason');
+        debugPrint('BT_TCP session_ended: $reason');
         _sessionEndedController.add(reason);
         break;
 
@@ -574,7 +574,7 @@ class TcpService {
         // 设置项「临时连接保活」改动：PC 当场同步（带 token 签发/续期，不带则作废）
         final kaToken = d['resume_token'] as String?;
         final kaTtl = (d['resume_expires_in'] as num?)?.toInt() ?? 0;
-        debugPrint('VL_TCP resume_grant token=${kaToken != null} ttl=$kaTtl');
+        debugPrint('BT_TCP resume_grant token=${kaToken != null} ttl=$kaTtl');
         _keepaliveController.add(
           KeepaliveUpdate(token: kaToken, expiresInSec: kaTtl),
         );
@@ -584,7 +584,7 @@ class TcpService {
         // PC 端解绑本机：连接降级为临时（会话保持，不断开），并可能补发续连凭证
         final grantToken = d['resume_token'] as String?;
         final grantExpires = (d['resume_expires_in'] as num?)?.toInt();
-        debugPrint('VL_TCP session_downgraded withGrant=${grantToken != null}');
+        debugPrint('BT_TCP session_downgraded withGrant=${grantToken != null}');
         if (grantToken != null && grantToken.isNotEmpty) {
           _downgradeGrantController.add(
               ResumeGrant(grantToken, grantExpires ?? 300));
@@ -631,7 +631,7 @@ class TcpService {
   }
 
   void _onError(String message) {
-    debugPrint('VL_TCP socket 错误: $message');
+    debugPrint('BT_TCP socket 错误: $message');
     _onDisconnected();
   }
 
@@ -639,7 +639,7 @@ class TcpService {
     // 幂等：onError 与 onDone 可能先后触发
     if (!_isConnected && _socket == null) return;
 
-    debugPrint('VL_TCP 连接断开 isPaired=$_isPaired '
+    debugPrint('BT_TCP 连接断开 isPaired=$_isPaired '
         '等待中的请求=${_textCompleters.length}');
     _isPaired = false;
     unawaited(_teardown(announce: true));
@@ -751,7 +751,7 @@ class TcpService {
         foreground: _foreground,
         timeout: livenessTimeout,
       )) {
-        debugPrint('VL_TCP 判活超时（${livenessTimeout.inSeconds}s 无任何回应），判定连接已断');
+        debugPrint('BT_TCP 判活超时（${livenessTimeout.inSeconds}s 无任何回应），判定连接已断');
         _onError('liveness timeout');
         return;
       }

@@ -168,7 +168,7 @@ class _ScanPageState extends State<ScanPage> {
     // 扫描瞬间也可能糊），静默忽略、继续扫——下一帧通常就对了。
     // 把它当失败报成红字只会吓到用户，而且它本来就不影响最终结果。
     if (!raw.startsWith('beeptype://')) {
-      debugPrint('VL_SCAN 忽略一次未读懂的内容（${raw.length} 字节）');
+      debugPrint('BT_SCAN 忽略一次未读懂的内容（${raw.length} 字节）');
       return;
     }
 

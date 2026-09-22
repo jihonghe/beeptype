@@ -15,7 +15,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # 产品名验收线：仓库里不得再出现改名前的旧名（任何大小写）。
+  # 产品名验收线：仓库里不得再出现改名前的旧名（任何大小写），也不得出现旧品牌时代的
+  # 日志前缀（APP 日志统一 BT_）。
   # 豁免两类：已发布的历史发布说明（记录当时真实的产品名，永久不动）与锁文件
   # （第三方包名可能撞名）。规则见 CONTRIBUTING.md「开发与发布流程」。
   naming:
@@ -33,6 +34,18 @@ jobs:
             exit 1
           fi
           echo "OK：除历史发布说明与锁文件外，无旧名残留"
+
+      - name: 旧日志前缀检查
+        run: |
+          # 旧前缀（VoiceLine 时代）同样用拼接构造，守卫自身不能出现它的字面量
+          OLD="V"; OLD="${OLD}L_"
+          hits=$(git grep -nI "$OLD" -- . ':!docs/releases' ':!*Cargo.lock' ':!app/pubspec.lock' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::发现旧日志前缀——APP 日志统一用 BT_（BT_TCP / BT_CONN / BT_DISC / BT_SCAN / BT_FOCUS）"
+            echo "$hits"
+            exit 1
+          fi
+          echo "OK：日志前缀统一为 BT_"
 
   desktop:
     runs-on: ubuntu-22.04

@@ -92,7 +92,7 @@ class DiscoveryService {
       if (expectDeviceId != null &&
           expectDeviceId.isNotEmpty &&
           dev.deviceId != expectDeviceId) {
-        debugPrint('VL_DISC 忽略一台陌生设备的应答（device_id 不匹配）');
+        debugPrint('BT_DISC 忽略一台陌生设备的应答（device_id 不匹配）');
         return;
       }
       if (!found.containsKey(dev.deviceId)) {
@@ -145,7 +145,7 @@ class DiscoveryService {
     for (final bcast in net.broadcastTargets()) {
       targets.add(InternetAddress(bcast));
     }
-    debugPrint('VL_DISC 本机网卡：'
+    debugPrint('BT_DISC 本机网卡：'
         '${net.entries.map((e) => '${e.name}=${e.ip}').join(', ')}'
         ' → 广播目标：${targets.map((t) => t.address).join(', ')}');
     return targets;
