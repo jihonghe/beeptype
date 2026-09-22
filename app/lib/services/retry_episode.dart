@@ -43,9 +43,6 @@ class RetryEpisode {
   }) : maxAttempts = maxAttempts ??
             (episodeDuration.inMilliseconds ~/ interval.inMilliseconds);
 
-  /// 是否有一轮正在进行
-  bool get active => _active;
-
   /// 本轮截止时刻（毫秒）；还没开始重试时为 null
   int? get deadlineMs => _deadlineMs;
 
@@ -61,6 +58,21 @@ class RetryEpisode {
     _deadlineMs = nowMs + episodeDuration.inMilliseconds;
   }
 
+  /// 这一轮现在是否仍在进行。
+  ///
+  /// **到点即 false**，并顺手把这一轮收干净——**不依赖任何人调用 [shouldSchedule]**。
+  /// 出过一次事故：某条路径（"已连接时从扫码页返回"）开了轮却没人来问，
+  /// 于是倒计时结束后「连接中」一直赖在界面上（用户实测："已连接 + 连接中 · N 秒
+  /// + 断开"同屏）。所以"到点"这件事必须由状态机自己算出来。
+  bool isActive(int nowMs) {
+    if (!_active) return false;
+    if (_deadlineMs != null && nowMs >= _deadlineMs!) {
+      _active = false;
+      return false;
+    }
+    return true;
+  }
+
   /// 结束一轮（到点、用户中断、连上、放弃）：之后不再自动重试，等下一次触发。
   void end() {
     _active = false;
@@ -70,11 +82,7 @@ class RetryEpisode {
 
   /// 现在还要不要排下一次重试？false = 这一轮到此为止。
   bool shouldSchedule(int nowMs) {
-    if (!_active) return false;
-    if (_deadlineMs != null && nowMs >= _deadlineMs!) {
-      _active = false;
-      return false;
-    }
+    if (!isActive(nowMs)) return false;
     if (_attempt >= maxAttempts) {
       _active = false;
       return false;
@@ -93,12 +101,10 @@ class RetryEpisode {
     return delay < remaining ? delay : remaining;
   }
 
-  /// 倒计时显示用的剩余秒数（向上取整）；没在跑时返回 null（不显示倒计时）；
-  /// 已经到点返回 0。
+  /// 倒计时显示用的剩余秒数（向上取整）；**没在跑（含已到点）返回 null**，
+  /// 界面据此不显示倒计时、也不再说「连接中」。
   int? remainingSeconds(int nowMs) {
-    if (!_active || _deadlineMs == null) return null;
-    final left = _deadlineMs! - nowMs;
-    if (left <= 0) return 0;
-    return (left + 999) ~/ 1000;
+    if (!isActive(nowMs)) return null;
+    return (_deadlineMs! - nowMs + 999) ~/ 1000;
   }
 }

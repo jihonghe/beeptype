@@ -112,7 +112,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _countdownTimer?.cancel();
     _countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
-      if (!_retry.active) {
+      if (!_retry.isActive(DateTime.now().millisecondsSinceEpoch)) {
+        // 到点（或已被结束）：停掉 ticker，并让这一轮的界面立刻落回灰点 +「连接」
         _countdownTimer?.cancel();
         _countdownTimer = null;
       }
@@ -128,10 +129,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     setState(() {});
   }
 
-  /// 是否"在忙"：正在连接，或快速重试那一轮还没结束（有排程中的重试）
+  /// 是否"在忙"：正在连接，或快速重试那一轮还没结束（有排程中的重试）。
+  /// "到点"由状态机自己算（`isActive`），不依赖任何一条路径来问一句
   bool get _busy =>
       _connecting ||
-      _retry.active ||
+      _retry.isActive(DateTime.now().millisecondsSinceEpoch) ||
       _status == ConnectionStatus.connecting ||
       _status == ConnectionStatus.pairing;
 
@@ -257,6 +259,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _canAutoConnect() =>
       widget.sender.hasAnyTarget && !widget.sender.manualDisconnected;
 
+  /// 「已连接」的**唯一收尾入口**：结束重试那一轮、清掉临时到期刷新、丢掉上次
+  /// 失败留下的网络判断，并把状态置为已连接。
+  ///
+  /// **不要绕过它直接给 `_status` 赋值**：收尾（`_endRetryEpisode()`）就挂在这里，
+  /// 绕过之后界面会停在"已连接 + 连接中 · N 秒 + 断开"这种自相矛盾的状态
+  /// （用户实测报过：连接状态里冒出倒计时）。
+  void _markPaired() {
+    _status = ConnectionStatus.paired;
+    _endRetryEpisode();
+    _transientExpiryTimer?.cancel();
+    _offLan = false; // 连上了：清掉上次失败留下的网络判断，别残留提示
+    unawaited(_requestKeyboard());
+  }
+
   void _onStatus(ConnectionStatus status) {
     if (!mounted) return;
     final prev = _status;
@@ -264,10 +280,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     switch (status) {
       case ConnectionStatus.paired:
-        _endRetryEpisode();
-        _transientExpiryTimer?.cancel();
-        _offLan = false; // 连上了：清掉上次失败留下的网络判断，别残留提示
-        unawaited(_requestKeyboard());
+        _markPaired();
         break;
       case ConnectionStatus.occupied:
         // 电脑正被别人用：**立即停止自动重连**，把"要不要接管"留给用户手动决定。
@@ -303,7 +316,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         // 这里只处理"**刚断开**"这个事件（状态真的发生跳变时）：
         // 已有的一轮在跑就不动它——否则每次尝试失败都会开新的一轮（历史事故）。
         if (!_scanPageOpen &&
-            !_retry.active &&
+            !_retry.isActive(DateTime.now().millisecondsSinceEpoch) &&
             prev != ConnectionStatus.disconnected &&
             !_connecting &&
             _canAutoConnect()) {
@@ -961,17 +974,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final result = await navigator.pushNamed('/scan');
     if (!mounted) return;
     _scanPageOpen = false;
-    if (result != true && _canAutoConnect()) {
-      // 没配对成功就回来了：把之前那条连接找回来（扫别的电脑失败 / 中途返回）
+    // "没配对成功就回来"时要把之前那条连接找回来（扫别的电脑失败 / 中途返回），
+    // 但**只在确实需要连的时候才开轮**：已连接（或正被占用、正在连接/重试）时
+    // 什么都别做——那条连接根本没断，平白开一轮会让界面变成
+    // "已连接 + 连接中 · N 秒 + 断开"（用户实测：连着的状态里冒出倒计时）
+    final needsReconnect = !_busy &&
+        _status != ConnectionStatus.paired &&
+        _status != ConnectionStatus.occupied;
+    if (result != true && needsReconnect && _canAutoConnect()) {
       _beginRetryEpisode();
       unawaited(_attemptConnect());
     }
     if (result == true) {
       // 配对成功：一切重试状态清零，并以 TCP 层的真实状态为准同步一次界面
-      _endRetryEpisode();
-      if (widget.sender.tcp.isPairedNow) {
-        _status = ConnectionStatus.paired;
-      }
+      if (widget.sender.tcp.isPairedNow) _markPaired();
     }
     setState(() {});
   }
