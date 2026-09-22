@@ -30,7 +30,7 @@ class BeepTypeApp extends StatelessWidget {
       home: HomePage(sender: sender),
       routes: {
         '/scan': (context) => ScanPage(sender: sender),
-        '/settings': (context) => const SettingsPage(),
+        '/settings': (context) => SettingsPage(sender: sender),
       },
     );
   }

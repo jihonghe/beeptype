@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:beeptype/pages/settings_page.dart';
+import 'package:beeptype/services/text_sender.dart';
 
 /// 设置页的护栏：版本号来自原生通道，读不到时不能崩、也不能显示半截内容。
 void main() {
@@ -24,7 +25,7 @@ void main() {
 
   testWidgets('显示名称、slogan、版本号与版权', (tester) async {
     mockVersion('0.5.0');
-    await tester.pumpWidget(const MaterialApp(home: SettingsPage()));
+    await tester.pumpWidget(MaterialApp(home: SettingsPage(sender: TextSender())));
     await tester.pumpAndSettle();
 
     expect(find.text('设置'), findsOneWidget, reason: '页面标题');
@@ -37,7 +38,7 @@ void main() {
 
   testWidgets('版本号读不到时只隐藏那一行，其余照常显示', (tester) async {
     mockVersion(null);
-    await tester.pumpWidget(const MaterialApp(home: SettingsPage()));
+    await tester.pumpWidget(MaterialApp(home: SettingsPage(sender: TextSender())));
     await tester.pumpAndSettle();
 
     expect(find.textContaining('Version:'), findsNothing);

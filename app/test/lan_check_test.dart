@@ -245,6 +245,38 @@ void main() {
         expect(r.autoSend, false);
       });
 
+      test('「电脑端设置」这一块只在常用身份 + 已同步到值时才显示', () {
+        expect(
+          showPcSettings(
+              hasPrefs: true, sessionOk: true, sessionIsPrimary: true),
+          isTrue,
+        );
+        expect(
+          showPcSettings(
+              hasPrefs: true, sessionOk: true, sessionIsPrimary: false),
+          isFalse,
+          reason: '临时连接不显示（电脑端也不接受它的修改）',
+        );
+        expect(
+          showPcSettings(
+              hasPrefs: true, sessionOk: false, sessionIsPrimary: true),
+          isFalse,
+          reason: '被占用等未持席状态不显示',
+        );
+        expect(
+          showPcSettings(
+              hasPrefs: false, sessionOk: true, sessionIsPrimary: true),
+          isFalse,
+          reason: '还没同步到值时不显示（免得闪一下错状态）',
+        );
+        expect(
+          showPcSettings(
+              hasPrefs: true, sessionOk: null, sessionIsPrimary: null),
+          isFalse,
+          reason: '没有会话时',
+        );
+      });
+
       test('粘贴关着时打开发送 → 发送仍然是关（依赖）', () {
         final r = t(paste: false, send: false, setSend: true);
         expect(r.autoPaste, false, reason: '没动的那一项保持原值');

@@ -5,6 +5,18 @@
 /// 猜另一半）。规则与电脑端完全一致：
 ///
 /// **自动粘贴关 → 自动发送同时关**（没东西可粘贴，就没有可发送的）。
+/// 「电脑端设置」这一块该不该显示（纯逻辑，便于单测）。
+///
+/// 只有**当前这条连接是常用设备身份**、且已经从电脑端同步到值时才显示：
+/// 临时访客不显示（电脑端本来也不接受它的修改）；还没同步到值时也不显示，
+/// 免得先闪一下错的状态。
+bool showPcSettings({
+  required bool hasPrefs,
+  required bool? sessionOk,
+  required bool? sessionIsPrimary,
+}) =>
+    hasPrefs && (sessionOk ?? false) && (sessionIsPrimary ?? false);
+
 ({bool autoPaste, bool autoSend}) prefsAfterToggle({
   required bool autoPaste,
   required bool autoSend,
