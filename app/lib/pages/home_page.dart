@@ -548,9 +548,15 @@ class _HomePageState extends State<HomePage>
   /// 2. 「键盘已在显示」只能跳过 TextInput.show，绝不能整个返回；否则连补一次
   ///    requestFocus() 都不做，焦点再也回不来。
   Future<void> _requestKeyboard({String from = '?'}) async {
-    if (_status != ConnectionStatus.paired) return;
+    if (_status != ConnectionStatus.paired) {
+      debugPrint('VK_FOCUS skip[$from]: status=$_status');
+      return;
+    }
     // 扫码页还在前台：别把键盘盖上去（配对成功会先把那个页面弹掉）
-    if (_scanPageOpen) return;
+    if (_scanPageOpen) {
+      debugPrint('VK_FOCUS skip[$from]: scanPageOpen=true');
+      return;
+    }
     const step = Duration(milliseconds: 150);
     // 转场时长由平台与手势决定，一拍一拍等，不假定时长
     for (var attempt = 0; attempt < 10; attempt++) {
@@ -578,6 +584,10 @@ class _HomePageState extends State<HomePage>
   /// **这就是「返回」的正确时机**：按钮返回与手势返回都会走它。
   @override
   void didPopNext() {
+    // 这个事件比 pushNamed 的 future **先到**，所以「扫码页开着」的标记要在这里清掉：
+    // 否则 _requestKeyboard() 会因为它还是 true 而静默返回 ⇒ 扫码页返回后既不聚焦
+    // 也不弹键盘（用户实测；设置页没有这个标记所以不受影响）。
+    _scanPageOpen = false;
     unawaited(_requestKeyboard(from: 'popNext'));
   }
 
