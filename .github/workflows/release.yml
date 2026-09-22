@@ -55,8 +55,8 @@ jobs:
           cat > app/android/key.properties <<EOF
           storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
-          # 别名是签名密钥内部的标识，不随产品改名（改它等于换一把密钥）
-          keyAlias=beetype
+          # 别名与 keystore 均随产品改名（2026-09-22 起用全新密钥，别名 beeptype）
+          keyAlias=beeptype
           storeFile=beeptype-release.jks
           EOF
 

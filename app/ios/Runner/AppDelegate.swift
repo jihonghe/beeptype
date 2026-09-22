@@ -4,7 +4,7 @@ import Security
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
-  /// 缓存 engine 的 binaryMessenger，供 setupBeetypeChannel 用
+  /// 缓存 engine 的 binaryMessenger，供 setupBeepTypeChannel 用
   private var _binaryMessenger: FlutterBinaryMessenger?
 
   override func application(
@@ -15,7 +15,7 @@ import Security
     // 从根控制器拿 messenger（Flutter 传统方式，Implicit Engine 下也工作）
     if let controller = window?.rootViewController as? FlutterViewController {
       _binaryMessenger = controller.binaryMessenger
-      setupBeetypeChannel(messenger: controller.binaryMessenger)
+      setupBeepTypeChannel(messenger: controller.binaryMessenger)
     }
     return ok
   }
@@ -23,10 +23,10 @@ import Security
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
     // Implicit Engine 模式下也要注册我们的通道，用 bridge 的 messenger
-    setupBeetypeChannel(messenger: engineBridge.messenger)
+    setupBeepTypeChannel(messenger: engineBridge.messenger)
   }
 
-  private func setupBeetypeChannel(messenger: FlutterBinaryMessenger) {
+  private func setupBeepTypeChannel(messenger: FlutterBinaryMessenger) {
     let channel = FlutterMethodChannel(
       name: "beeptype/device",
       binaryMessenger: messenger

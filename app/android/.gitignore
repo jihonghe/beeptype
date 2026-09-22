@@ -12,3 +12,6 @@ GeneratedPluginRegistrant.java
 key.properties
 **/*.keystore
 **/*.jks
+
+# Kotlin/Gradle 构建会话目录（由构建产生，不入库）
+.kotlin/
