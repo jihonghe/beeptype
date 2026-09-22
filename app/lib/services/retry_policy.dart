@@ -54,6 +54,29 @@ String? pillWord({required bool busy, int? secondsLeft}) {
   return '连接中 · $secondsLeft 秒';
 }
 
+/// 电脑名后面要不要标「临时」（纯逻辑，便于单测）。
+///
+/// 规则（用户定）：**常用连接是常态、不说话；只有临时连接标两个字**。
+/// - 重连中/连接中：那个位置已经被「连接中 · N 秒」占着，不标身份，避免两个词打架；
+/// - 主动断开（手机点「断开」或电脑端断开）：一个词都不显示；
+/// - 已连接/被占用：以**会话身份**为准（[sessionIsPrimary]，心跳会纠正身份，最权威）；
+/// - 其余状态：以**本地记录**为准（有绑定电脑=常用；只剩临时记录=临时）。
+///
+/// 这条标注同时也承担"通知"的作用：电脑端解绑、或身份被纠正时，胶囊立刻显示
+/// 「临时」，用户当场就能看出绑定关系变了。
+String? transientTag({
+  required bool busy,
+  required bool manuallyDisconnected,
+  required bool? sessionIsPrimary,
+  required bool hasBoundDevice,
+  required bool hasTransientRecord,
+}) {
+  if (busy || manuallyDisconnected) return null;
+  if (sessionIsPrimary != null) return sessionIsPrimary ? null : '临时';
+  if (hasBoundDevice) return null;
+  return hasTransientRecord ? '临时' : null;
+}
+
 /// 胶囊右侧的按钮
 enum PillAction {
   /// 不显示按钮（还没绑定过电脑；正文就是扫码引导页）

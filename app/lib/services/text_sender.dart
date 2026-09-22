@@ -514,6 +514,10 @@ class TextSender {
       clientId: _storage.clientId,
       deviceName: _storage.getDeviceName(),
       hardwareId: hid,
+      // 我本地有没有长期凭证：没有（重装/清过数据）时让电脑端补发 token。
+      // 否则"认出老手机"这条路会恢复席位但不下发凭证 → 我们什么都存不下，
+      // 断线闲置几分钟又被赶回扫码页（用户实测）。
+      hasLocalCredential: _storage.hasDevices,
     );
 
     if (outcome.ok) {

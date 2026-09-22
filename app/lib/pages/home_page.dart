@@ -654,6 +654,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       busy: busy,
       hasTarget: hasTarget,
     );
+    // 临时连接才在电脑名后面标「临时」：常用是常态、不说话（规则见 transientTag）
+    final tag = transientTag(
+      busy: busy,
+      manuallyDisconnected: widget.sender.manualDisconnected,
+      sessionIsPrimary:
+          (session != null && session.ok) ? session.isPrimary : null,
+      hasBoundDevice: widget.sender.storage.hasDevices,
+      hasTransientRecord: widget.sender.hasTransientSession,
+    );
 
     // 未绑定过任何电脑：正文就是扫码引导页，胶囊只说"未连接电脑"
     final unbound = !connected && !hasTarget;
@@ -732,6 +741,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             fontSize: 15, fontWeight: FontWeight.w600),
                       ),
                     ),
+                    if (tag != null) ...[
+                      const SizedBox(width: 6),
+                      Text(
+                        tag,
+                        maxLines: 1,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color:
+                              scheme.onSurfaceVariant.withValues(alpha: 0.6),
+                        ),
+                      ),
+                    ],
                     if (word != null) ...[
                       const SizedBox(width: 8),
                       // 不参与压缩：名字可以先变短，倒计时必须完整可见

@@ -618,6 +618,7 @@ impl<R: Runtime> ServerState<R> {
                 client_id,
                 device_name,
                 hardware_id,
+                has_local_credential,
             } => self.handle_hello(
                 code,
                 token,
@@ -625,6 +626,7 @@ impl<R: Runtime> ServerState<R> {
                 client_id,
                 device_name,
                 hardware_id,
+                has_local_credential,
                 peer_ip,
                 ctx,
             ),
@@ -723,6 +725,7 @@ impl<R: Runtime> ServerState<R> {
         client_id: String,
         device_name: String,
         hardware_id: Option<String>,
+        has_local_credential: Option<bool>,
         peer_ip: IpAddr,
         ctx: &mut ConnCtx,
     ) -> Option<Message> {
@@ -890,7 +893,7 @@ impl<R: Runtime> ServerState<R> {
             //  - 其余：临时设备
             // 无 client_id 的旧客户端不允许占常用设备席位
             let remember = self.remember_next.load(Ordering::Relaxed);
-            let (is_primary, token_out, new_code, returning_primary) = {
+            let (is_primary, token_out, new_code, returning_primary, rebind) = {
                 let mut config = self.config.lock().unwrap();
                 // returning: client_id 匹配 OR hardware_id 匹配
                 // 硬件指纹是关键——手机重装后 client_id 变了，但 hardware_id 不变，
@@ -907,7 +910,16 @@ impl<R: Runtime> ServerState<R> {
                         .is_some_and(|p| p.hardware_id.as_deref() == Some(hid))
                 });
                 let returning = client_match || hw_match;
-                let bind = remember && !config.has_primary() && !client_id.is_empty();
+                // 手机说它本地已经没有长期凭证了（重装 / 清了数据）：只"认出它"是不够的——
+                // 不给它 token，它永远存不下东西，断线后只能靠临时窗口撑着（用户实测：
+                // 重装后再扫码看着连上了，其实什么都没落盘，闲置几分钟就被赶回扫码页）。
+                // 所以这种情况照常补发一个新 token（等于重新绑定一次，顺带刷新记录里的
+                // 硬件指纹）。旧客户端不发这个字段（None）→ 按"有凭证"处理，行为不变。
+                let rebind = returning
+                    && has_local_credential == Some(false)
+                    && !client_id.is_empty();
+                let bind =
+                    (remember && !config.has_primary() && !client_id.is_empty()) || rebind;
                 let token_out = if bind {
                     Some(config.bind_primary(
                         &client_id,
@@ -920,7 +932,7 @@ impl<R: Runtime> ServerState<R> {
                 };
                 // 配对码一次性：用过后立即换新，杜绝重放
                 let new_code = config.regenerate_code();
-                (bind || returning, token_out, new_code, returning)
+                (bind || returning, token_out, new_code, returning, rebind)
             };
             self.set_code(new_code);
 
@@ -945,7 +957,13 @@ impl<R: Runtime> ServerState<R> {
                 "Code pairing OK from {} ({})",
                 peer_ip,
                 if is_primary {
-                    if returning_primary { "returning primary" } else { "primary" }
+                    if rebind {
+                        "rebind (phone had no local credential)"
+                    } else if returning_primary {
+                        "returning primary"
+                    } else {
+                        "primary"
+                    }
                 } else {
                     "transient"
                 }
@@ -1765,7 +1783,92 @@ mod integration_tests {
         assert_eq!(ack2["session"], "primary", "设为常用后凭 token 应拿到常用设备席位");
     }
 
+    /// 手机重装/清过数据后（本地已经没有长期凭证）扫码回来：必须**补发一个新 token**。
+    ///
+    /// 回归护栏：原行为是"认出老手机（client_id 或硬件指纹匹配）就直接恢复席位、
+    /// 不下发 token"，前提是"手机本来就存着凭证"。可重装之后它手里什么都没有，
+    /// 恢复席位也存不下东西——用户实测：扫码看着连上了，闲置几分钟又被赶回扫码页。
+    #[test]
+    fn test_rebind_when_phone_has_no_local_credential() {
+        let (state, code) = test_state();
+        state.set_remember_next(true); // 首次配对：勾了「记住这台手机」
+        let (mut sock, mut reader) = connect_as_phone(spawn_server(state.clone()));
+        send_hello(
+            &mut sock,
+            serde_json::json!({"type":"hello","code":code,"client_id":"cid-old",
+                               "device_name":"小米14","hardware_id":"hw-1"}),
+        );
+        let ack = read_until(&mut reader, "hello_ack");
+        assert_eq!(ack["session"], "primary");
+        let first_token = ack["token"].as_str().unwrap_or_default().to_string();
+        assert_eq!(first_token.len(), 64, "首绑应下发 64 位 token");
+        drop(sock);
+        drop(reader);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        // 模拟重装：新的 client_id、**同一个硬件指纹**，并声明"我本地没有长期凭证"
+        let code2 = state.config.lock().unwrap().regenerate_code();
+        state.set_code(code2.clone());
+        state.set_remember_next(false); // 重装后扫码，用户没勾「记住」
+        let (mut sock2, mut reader2) = connect_as_phone(spawn_server(state.clone()));
+        send_hello(
+            &mut sock2,
+            serde_json::json!({"type":"hello","code":code2,"client_id":"cid-new",
+                               "device_name":"小米14","hardware_id":"hw-1",
+                               "has_local_credential":false}),
+        );
+        let ack2 = read_until(&mut reader2, "hello_ack");
+        assert_eq!(ack2["session"], "primary", "硬件指纹匹配 → 仍认作常用设备");
+        let token2 = ack2["token"].as_str().unwrap_or_default().to_string();
+        assert_eq!(
+            token2.len(),
+            64,
+            "手机本地没有凭证时必须补发新 token，否则它什么都存不下"
+        );
+        assert_ne!(token2, first_token, "补发的是一把新凭证");
+        let cfg = state.config.lock().unwrap();
+        let p = cfg.primary.as_ref().expect("应写入常用设备记录");
+        assert_eq!(p.client_id, "cid-new", "绑定记录应跟着更新为新手机");
+        assert_eq!(p.hardware_id.as_deref(), Some("hw-1"));
+    }
+
+    /// 反例：手机说自己**有**本地凭证时，不下发 token（保持原行为，不白换凭证）。
+    #[test]
+    fn test_returning_with_credential_gets_no_new_token() {
+        let (state, code) = test_state();
+        state.set_remember_next(true);
+        let (mut sock, mut reader) = connect_as_phone(spawn_server(state.clone()));
+        send_hello(
+            &mut sock,
+            serde_json::json!({"type":"hello","code":code,"client_id":"cid-old",
+                               "device_name":"小米14","hardware_id":"hw-1"}),
+        );
+        assert_eq!(read_until(&mut reader, "hello_ack")["session"], "primary");
+        drop(sock);
+        drop(reader);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let code2 = state.config.lock().unwrap().regenerate_code();
+        state.set_code(code2.clone());
+        state.set_remember_next(false);
+        let (mut sock2, mut reader2) = connect_as_phone(spawn_server(state.clone()));
+        send_hello(
+            &mut sock2,
+            serde_json::json!({"type":"hello","code":code2,"client_id":"cid-old",
+                               "device_name":"小米14","hardware_id":"hw-1",
+                               "has_local_credential":true}),
+        );
+        let ack2 = read_until(&mut reader2, "hello_ack");
+        assert_eq!(ack2["session"], "primary");
+        assert!(
+            ack2["token"].is_null(),
+            "手机手里还有凭证：不补发 token（沿用原来那一把）"
+        );
+    }
+
+
     /// 反复"解绑 → 设为常用设备 → 再解绑"：每一次都必须通知到手机。
+    ///
     /// 回归护栏：历史上同一条连接里只有**第一次**解绑发得出去（一个只置位、
     /// 不复位的闩），于是重复解绑时手机端标签永远停在"常用设备"。
     #[test]

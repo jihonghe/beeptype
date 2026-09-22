@@ -217,6 +217,47 @@ void main() {
         PillAction.none,
       );
     });
+
+    group('电脑名后面的身份标注（临时才说话）', () {
+      String? tag({
+        bool busy = false,
+        bool manual = false,
+        bool? sessionPrimary,
+        bool bound = false,
+        bool transient = false,
+      }) =>
+          transientTag(
+            busy: busy,
+            manuallyDisconnected: manual,
+            sessionIsPrimary: sessionPrimary,
+            hasBoundDevice: bound,
+            hasTransientRecord: transient,
+          );
+
+      test('常用连接：不显示任何词（常态不说话）', () {
+        expect(tag(sessionPrimary: true, bound: true), isNull);
+        expect(tag(bound: true), isNull, reason: '断开态但有绑定记录 → 仍是常用');
+      });
+
+      test('临时连接：显示「临时」', () {
+        expect(tag(sessionPrimary: false), '临时', reason: '已连接的临时会话');
+        expect(tag(transient: true), '临时', reason: '只剩临时记录');
+      });
+
+      test('重连中：那个位置被「连接中 · N 秒」占着，不标身份', () {
+        expect(tag(busy: true, sessionPrimary: false), isNull);
+        expect(tag(busy: true, transient: true), isNull);
+      });
+
+      test('主动断开：一个词都不显示（含电脑端断开）', () {
+        expect(tag(manual: true, sessionPrimary: false), isNull);
+        expect(tag(manual: true, transient: true), isNull);
+      });
+
+      test('没绑定过、也没有临时记录：不说身份', () {
+        expect(tag(), isNull);
+      });
+    });
   });
 
   group('凭证被拒时：是不是"我那台电脑"在拒我', () {

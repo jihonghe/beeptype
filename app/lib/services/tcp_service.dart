@@ -291,6 +291,10 @@ class TcpService {
     String? token,
     String? resume,
     String? hardwareId,
+    /// 本地是否还存着长期凭证（只有扫码路径需要说这件事）。
+    /// `false` = 重装/清过数据 → PC 端据此补发新 token，否则我们什么都存不下、
+    /// 断线后只能靠临时窗口撑着。`null` = 不提（旧行为，旧电脑也忽略它）。
+    bool? hasLocalCredential,
     required String clientId,
     required String deviceName,
     Duration timeout = const Duration(seconds: 10),
@@ -307,6 +311,7 @@ class TcpService {
       'client_id': clientId,
       'device_name': deviceName,
       if (hardwareId != null && hardwareId.isNotEmpty) 'hardware_id': hardwareId,
+      if (hasLocalCredential != null) 'has_local_credential': hasLocalCredential,
     }));
     if (code != null) {
       _statusController.add(ConnectionStatus.pairing);

@@ -36,6 +36,14 @@ pub enum Message {
         /// 旧客户端不发此字段，按 None 处理。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hardware_id: Option<String>,
+        /// 手机本地**是否还存着长期凭证**（`false` = 重装/清过数据）。
+        ///
+        /// 只"认出老手机"是不够的：对方手里没凭证时，恢复席位也存不下东西，
+        /// 断线后只能靠临时窗口撑着（用户实测：重装后再扫码，看着连上了，其实
+        /// 什么都没落盘）。所以这种情况要照常补发一个新 token。
+        /// 旧客户端不发此字段（None）→ 按"有凭证"处理，保持旧行为。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        has_local_credential: Option<bool>,
     },
 
     /// PC → 手机端：握手响应。
@@ -221,6 +229,7 @@ impl Message {
             client_id: client_id.to_string(),
             device_name: device_name.to_string(),
             hardware_id: None,
+            has_local_credential: None,
         }
     }
 
@@ -233,6 +242,7 @@ impl Message {
             client_id: client_id.to_string(),
             device_name: device_name.to_string(),
             hardware_id: None,
+            has_local_credential: None,
         }
     }
 
@@ -246,6 +256,7 @@ impl Message {
             client_id: client_id.to_string(),
             device_name: device_name.to_string(),
             hardware_id: None,
+            has_local_credential: None,
         }
     }
 
@@ -397,6 +408,7 @@ mod tests {
                 client_id,
                 device_name,
                 hardware_id,
+                has_local_credential,
             } => {
                 assert_eq!(code.as_deref(), Some("123456"));
                 assert!(token.is_none());
@@ -405,6 +417,8 @@ mod tests {
                 assert_eq!(device_name, "OldPhone");
                 // 旧客户端不发硬件指纹
                 assert!(hardware_id.is_none());
+                // 也不声明"本地有没有长期凭证"→ 按"有"处理，保持旧行为
+                assert!(has_local_credential.is_none());
             }
             _ => panic!("wrong variant"),
         }
