@@ -5,6 +5,7 @@ import 'dart:async';
 import '../services/lan_check.dart';
 import '../services/retry_episode.dart';
 import '../services/retry_policy.dart';
+import '../services/route_observer.dart';
 import '../services/text_sender.dart';
 import '../services/tcp_service.dart';
 
@@ -17,7 +18,8 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
+class _HomePageState extends State<HomePage>
+    with WidgetsBindingObserver, RouteAware {
   /// 语音松手提交后的发送延时（毫秒），当前为 0 = 松手即发。
   ///
   /// 触发原理：微信输入法按住说话期间 composing 始终有效（换气停顿也有效），
@@ -152,6 +154,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _inputController = TextEditingController();
     _focusNode = FocusNode();
+    // 临时诊断：焦点一变就记一条（谁、在哪一刻把焦点弄丢的）
+    _focusNode.addListener(() {
+      debugPrint('VK_FOCUS node hasFocus=${_focusNode.hasFocus} status=$_status '
+          'primary=${FocusManager.instance.primaryFocus}');
+    });
     _inputController.addListener(_onValueChanged);
     _statusSub = widget.sender.tcp.statusStream.listen(_onStatus);
     _sessionEndedSub =
@@ -178,7 +185,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // 可能被调用多次；subscribe 自身幂等
+    final route = ModalRoute.of(context);
+    if (route != null) appRouteObserver.subscribe(this, route);
+  }
+
+  @override
   void dispose() {
+    appRouteObserver.unsubscribe(this);
     WidgetsBinding.instance.removeObserver(this);
     _statusSub.cancel();
     _sessionEndedSub.cancel();
@@ -522,23 +538,47 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 返回瞬间若 IME 还在做关闭动画（平台还没把高度归零），一旦整体退出，就连补一次
   /// `requestFocus()` 都不会做，光标再也回不来（用户实测：从设置页/扫码页返回后
   /// "键盘弹了但光标不在"，且时好时坏）。
-  Future<void> _requestKeyboard() async {
+  /// 把焦点与键盘交还给打字区：**聚焦是必须的，弹键盘是尽力而为**。
+  ///
+  /// 两个坑（都是真机实测出来的）：
+  /// 1. **返回动画期间不能急着聚焦**：那时首页路由还是「被覆盖」状态，Flutter 禁止其
+  ///    子树获得焦点，requestFocus() 会被**静默拒绝**（canRequestFocus=false）。而
+  ///    **手势返回**时 pop 的 future 在动画刚开始就完成（按钮返回要等到动画结束），
+  ///    所以不能拿 future 返回当「已回到前台」——要等 ModalRoute.isCurrent 为真。
+  /// 2. 「键盘已在显示」只能跳过 TextInput.show，绝不能整个返回；否则连补一次
+  ///    requestFocus() 都不做，焦点再也回不来。
+  Future<void> _requestKeyboard({String from = '?'}) async {
     if (_status != ConnectionStatus.paired) return;
     // 扫码页还在前台：别把键盘盖上去（配对成功会先把那个页面弹掉）
     if (_scanPageOpen) return;
-    for (var attempt = 0; attempt < 3; attempt++) {
+    const step = Duration(milliseconds: 150);
+    // 转场时长由平台与手势决定，一拍一拍等，不假定时长
+    for (var attempt = 0; attempt < 10; attempt++) {
+      if (!mounted || _status != ConnectionStatus.paired) return;
+      final route = ModalRoute.of(context);
+      if (route != null && !route.isCurrent) {
+        await Future<void>.delayed(step);
+        continue;
+      }
+      _focusNode.requestFocus();
       final views = WidgetsBinding.instance.platformDispatcher.views;
       final keyboardShown =
           views.isNotEmpty && views.first.viewInsets.bottom > 0;
-      await WidgetsBinding.instance.endOfFrame;
-      if (!mounted || _status != ConnectionStatus.paired) return;
-      // 无论键盘是否已在显示，都先确保焦点回到打字区
-      _focusNode.requestFocus();
-      // 已经在弹了就不重复召唤，避免多余的收起/弹起闪动
-      if (keyboardShown) return;
-      await SystemChannels.textInput.invokeMethod<void>('TextInput.show');
-      await Future<void>.delayed(const Duration(milliseconds: 350));
+      debugPrint('VK_FOCUS try${attempt + 1}[$from] keyboardShown=$keyboardShown '
+          'hasFocus=${_focusNode.hasFocus} canRequest=${_focusNode.canRequestFocus}');
+      if (_focusNode.hasFocus && keyboardShown) return; // 焦点与键盘都到位
+      if (!keyboardShown) {
+        await SystemChannels.textInput.invokeMethod<void>('TextInput.show');
+      }
+      await Future<void>.delayed(step);
     }
+  }
+
+  /// 子页面（设置页/扫码页/将来任何页面）退场、本页重新回到前台。
+  /// **这就是「返回」的正确时机**：按钮返回与手势返回都会走它。
+  @override
+  void didPopNext() {
+    unawaited(_requestKeyboard(from: 'popNext'));
   }
 
   // ----------------------------------------------------------------------
@@ -993,12 +1033,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           IconButton(
             icon: const Icon(Icons.settings_rounded),
             tooltip: '设置',
-            onPressed: () async {
-              await Navigator.of(context).pushNamed('/settings');
-              if (!mounted) return;
-              // 回到打字区就要能直接说话：聚焦 + 弹键盘（同一个函数，已连接才做）
-              unawaited(_requestKeyboard());
-            },
+            // 返回后由 didPopNext 统一交还焦点与键盘（见 _requestKeyboard）
+            onPressed: () => Navigator.of(context).pushNamed('/settings'),
           ),
         ],
       ),
@@ -1058,8 +1094,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (widget.sender.tcp.isPairedNow) _markPaired();
     }
     setState(() {});
-    // 回到打字区就把焦点和键盘交还给它（配对成功那条路 _markPaired 里已经做过一遍）
-    if (_status == ConnectionStatus.paired) unawaited(_requestKeyboard());
+    // 焦点与键盘的交接由 didPopNext 负责（配对成功那条路 _markPaired 里也会做一遍）
   }
 }
 

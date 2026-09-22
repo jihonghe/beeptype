@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'services/route_observer.dart';
 import 'services/text_sender.dart';
 import 'pages/home_page.dart';
 import 'pages/scan_page.dart';
@@ -27,6 +28,8 @@ class BeepTypeApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
         useMaterial3: true,
       ),
+      // 首页靠它拿到「子页面退场、我重新回到前台」的事件（手势返回的时机关键）
+      navigatorObservers: [appRouteObserver],
       home: HomePage(sender: sender),
       routes: {
         '/scan': (context) => ScanPage(sender: sender),
