@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../services/app_info.dart';
 import '../services/text_sender.dart';
@@ -33,6 +34,12 @@ class _SettingsPageState extends State<SettingsPage> {
     super.initState();
     AppInfo.version().then((v) {
       if (mounted && v.isNotEmpty) setState(() => _version = v);
+    });
+    // 收起键盘并释放焦点：首页的输入框还持着焦点，键盘会跟着进设置页，
+    // 把页面内容挤到上半屏（Scaffold 随键盘缩小）。返回首页时由首页重新聚焦。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      FocusManager.instance.primaryFocus?.unfocus();
+      SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
     });
     // 行为开关的值来自电脑端推送；身份变化（常用↔临时）也决定这一块显不显示
     _prefsSub = widget.sender.prefsStream.listen((_) {
@@ -78,6 +85,9 @@ class _SettingsPageState extends State<SettingsPage> {
                 padding: const EdgeInsets.fromLTRB(16, 14, 16, 20),
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  // 铺满宽度：否则 Column 的宽度由"最宽的子项"决定，
+                  // 没有设置区时（最宽子项就是信息块自己）整块会被摆到左边（用户实测）
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     if (_showPcSettings)
                       _pcSettings(scheme)
