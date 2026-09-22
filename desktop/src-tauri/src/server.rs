@@ -611,6 +611,15 @@ impl<R: Runtime> ServerState<R> {
                 }
                 self.auto_paste
                     .store(v && crate::paste::auto_paste_supported(), Ordering::Relaxed);
+                // 联动必须**同时作用于运行标志**：电脑端设置页读的就是它，
+                // 只关配置会出现"勾着但置灰"、再把粘贴打开时又变回开着（用户实测）。
+                // 这里按当前配置重算一遍，幂等且不会漏。
+                self.auto_send.store(
+                    config.auto_send
+                        && crate::paste::auto_send_supported()
+                        && self.auto_paste.load(Ordering::Relaxed),
+                    Ordering::Relaxed,
+                );
             }
             if let Some(v) = auto_send {
                 let paste_on = config.auto_paste;
@@ -1955,6 +1964,38 @@ mod integration_tests {
     }
 
 
+    /// 电脑端设置页改开关：**只带一项时也要联动关掉另一项**——配置与运行标志都要关。
+    ///
+    /// 回归护栏（用户实测）：电脑端两个都打开后关掉「自动粘贴」，「自动发送」只是被置灰、
+    /// 并没有关；再打开「自动粘贴」时，「自动发送」又是开着的。根因是重构时只关了配置、
+    /// 漏了运行标志——而电脑端设置页读的正是运行标志。
+    #[test]
+    fn test_pc_toggle_dependency_applies_to_runtime_flag() {
+        let (state, _code) = test_state();
+        state.apply_prefs(Some(true), Some(true));
+        assert!(state.auto_paste.load(Ordering::Relaxed));
+        assert!(state.auto_send.load(Ordering::Relaxed), "两个都打开");
+
+        // 设置页只改「自动粘贴」（apply_prefs(Some(false), None) 正是那条路径）
+        state.apply_prefs(Some(false), None);
+        {
+            let cfg = state.config.lock().unwrap();
+            assert!(!cfg.auto_paste && !cfg.auto_send, "配置里要联动关");
+        }
+        assert!(
+            !state.auto_send.load(Ordering::Relaxed),
+            "运行标志也必须联动关——设置页读的是它（这条就是用户实测的 bug）"
+        );
+
+        // 再把粘贴打开：发送应保持关，不会自己变回开（与手机端一致）
+        state.apply_prefs(Some(true), None);
+        assert!(state.auto_paste.load(Ordering::Relaxed));
+        assert!(
+            !state.auto_send.load(Ordering::Relaxed),
+            "粘贴重新打开后，发送仍是关"
+        );
+    }
+
     /// 手机端改「自动粘贴 / 自动发送」：常用设备能改且当场落盘并回推；
     /// 临时访客改不动电脑设置，但照样会收到当前值（界面不会停在假状态）。
     #[test]
@@ -2011,6 +2052,16 @@ mod integration_tests {
             let cfg = state.config.lock().unwrap();
             assert!(!cfg.auto_paste && !cfg.auto_send, "要落盘");
         }
+        // 运行标志也必须一起关：电脑端设置页读的是它（只关配置就会出现"勾着但置灰"、
+        // 再把粘贴打开时又变回开着——用户实测的正是这条）
+        assert!(
+            !state.auto_paste.load(Ordering::Relaxed),
+            "运行态：自动粘贴要关"
+        );
+        assert!(
+            !state.auto_send.load(Ordering::Relaxed),
+            "运行态：自动发送必须联动关掉"
+        );
 
         // 防御：万一有客户端发来非法组合（粘贴关却要打开发送），电脑端也必须存成关
         sock.write_all(b"{\"type\":\"set_prefs\",\"auto_paste\":false,\"auto_send\":true}\n")
@@ -2022,6 +2073,10 @@ mod integration_tests {
             let cfg = state.config.lock().unwrap();
             assert!(!cfg.auto_paste && !cfg.auto_send, "非法组合不能落盘");
         }
+        assert!(
+            !state.auto_send.load(Ordering::Relaxed),
+            "运行态也不能被非法组合打开"
+        );
 
         // 临时访客：改不动，但会收到当前值（不静默失败）
         drop(sock);

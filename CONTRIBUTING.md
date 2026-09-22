@@ -82,6 +82,14 @@ cd app && flutter build apk --release --target-platform android-arm64
 # 产物：app/build/app/outputs/flutter-apk/app-release.apk
 ```
 
+**什么时候升版本**（约定）：
+
+- **版本号只在正式发布时决定并占用**：一个"还没发布"的批次里改动再多（含反复修复），也只对应**一个**下一版本号——未发布的代码没有版本，同一批内的修改不各自占号；
+- **新增功能 / 新协议 / 新界面 → 次版本**（如 `0.6.0 → 0.7.0`）；**只有修复与打磨 → 补丁**（如 `0.6.1`）；`0.x` 阶段的破坏性变更也走次版本（SemVer 对 `0.y.z` 的规定）；
+- **测试包用 `<下一版本>-test`**（重复打包加 `-test2`、`-test3`…）：它**不是发布版本**，只用来区分"手里装的是哪一份"，且**不动仓库里的版本字面量**；
+- **版本号从不回收**：同一个号只对应同一份代码；
+- 发布节奏**攒批**：一批改动做完、真机验证通过，才 bump 版本 + 写 `docs/releases/<tag>.md` + 打 tag。
+
 **版本号规则**：**git tag 是唯一来源**。发布时 CI 会把 tag 版本写进 `app/pubspec.yaml` 和 `desktop/src-tauri/tauri.conf.json`（前者决定 Android 包版本，后者决定安装包版本并被烘焙进二进制，设置页「关于」显示的就是它）。仓库里 `pubspec.yaml` / `tauri.conf.json` / `Cargo.toml` 的三个字面量只服务本地开发构建，保持与最近一次发布一致即可，**不要用 `Cargo.toml` 的版本做展示**（CI 不同步它）。
 
 ### 6. 跑起来验证
