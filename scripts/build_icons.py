@@ -25,7 +25,15 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MASTER = os.path.join(ROOT, 'assets/icons/app-icon-1024.png')
 ANDROID_RES = os.path.join(ROOT, 'app/android/app/src/main/res')
 N = 1024
-# Android 自适应图标：108dp 画布，内容安全区 66.7%
+# Android 自适应图标：108dp 画布，其中只有中间 72dp 是可见区（启动器会把这块放大到整个
+# 图标，外侧 18dp 只是视差/遮罩的溢出边）。GLYPH_VISIBLE_RATIO 是图形包围盒占"可见区"
+# 的比例——顶满（1.0）会显得没有留白，主流 APP 大约在 0.6~0.7。
+GLYPH_VISIBLE_RATIO = 0.67
+# 抠图判据用"最亮通道"而不是"与底色的色差"：徽章底色是横向渐变、且带 AI 生成的噪点，
+# 色差判据会把大片底色噪点当成图形留下（实测占裁切框的 82%），留白一放大就是可见的方块痕迹。
+BRIGHT_INK = 100      # ≥ 此亮度才算图形（用于求包围盒）
+BRIGHT_FLOOR = 85     # 亮度下限：低于此值一律透明（清掉底色噪点）
+BRIGHT_RAMP = 45      # 软边过渡宽度
 DENSITIES = {
     'mdpi': (48, 108, 72),
     'hdpi': (72, 162, 108),
@@ -99,29 +107,37 @@ def navy_reference(master):
 
 
 def build_android(master):
-    mid, l, r = navy_reference(master)
+    mid, _, _ = navy_reference(master)
     print('  Android 自适应背景色：#%02X%02X%02X' % mid)
-    # 前景层：把图形从底色里抠出来（逐列参考色，抑制渐变造成的误判）
-    fg = bytearray(N * N * 4)
+    # 图形范围：中央窗口内按亮度求包围盒。窗口 12%~88% 是为了避开徽章圆角与描边——
+    # 它们与白底的抗锯齿混色同样很亮，会把包围盒撑到整幅画面。
+    lo, hi = int(.12 * N), int(.88 * N)
     minx, maxx, miny, maxy = N, 0, N, 0
-    for y in range(N):
-        for x in range(N):
+    for y in range(lo, hi):
+        for x in range(lo, hi):
             o = (y * N + x) * 4
-            rr, gg, bb, aa = master[o:o + 4]
-            if not aa:
-                continue
-            t = x / (N - 1)
-            nv = tuple(round(l[i] + (r[i] - l[i]) * t) for i in range(3))
-            d = max(abs(rr - nv[0]), abs(gg - nv[1]), abs(bb - nv[2]))
-            ga = int(max(0.0, min(1.0, (d - 6) / 30)) * 255)
-            if ga:
-                fg[o:o + 4] = bytes((rr, gg, bb, ga))
-                # 徽章外缘那圈描边与底色差 ~25，不算图形：只在中央窗口内取包围盒
-                if ga > 25 and .12 * N < x < .88 * N and .12 * N < y < .88 * N:
-                    minx, maxx, miny, maxy = min(minx, x), max(maxx, x), min(miny, y), max(maxy, y)
+            if master[o + 3] and max(master[o], master[o + 1], master[o + 2]) >= BRIGHT_INK:
+                minx, maxx, miny, maxy = min(minx, x), max(maxx, x), min(miny, y), max(maxy, y)
     gw, gh = maxx - minx + 1, maxy - miny + 1
     if not (0 < gw < N and 0 < gh < N):
-        sys.exit(f'前景抠图包围盒异常: {gw}x{gh}')
+        sys.exit(f'图形包围盒异常: {gw}x{gh}')
+    print('  图形包围盒 %dx%d' % (gw, gh))
+
+    # 干净抠图：图形范围（外扩 4px 保住软边）内只保留足够亮的像素
+    mx0, my0 = max(0, minx - 4), max(0, miny - 4)
+    mx1, my1 = min(N - 1, maxx + 4), min(N - 1, maxy + 4)
+    cw, ch = mx1 - mx0 + 1, my1 - my0 + 1
+    fg = bytearray(N * N * 4)
+    for y in range(my0, my1 + 1):
+        for x in range(mx0, mx1 + 1):
+            o = (y * N + x) * 4
+            if not master[o + 3]:
+                continue
+            br = max(master[o], master[o + 1], master[o + 2])
+            if br < BRIGHT_FLOOR:
+                continue
+            a = int(max(0.0, min(1.0, (br - BRIGHT_FLOOR) / BRIGHT_RAMP)) * 255)
+            fg[o:o + 4] = bytes((master[o], master[o + 1], master[o + 2], a))
 
     for name, (legacy, canvas, safe) in DENSITIES.items():
         d = os.path.join(ANDROID_RES, f'mipmap-{name}')
@@ -129,9 +145,11 @@ def build_android(master):
         to_png(scale_rgba(master, N, legacy), legacy, os.path.join(d, 'ic_launcher.png'))
         to_png(circle_mask(scale_rgba(master, N, legacy), legacy), legacy,
                os.path.join(d, 'ic_launcher_round.png'))
-        s = min(safe / gw, safe / gh)
-        tw, th = max(1, int(gw * s)), max(1, int(gh * s))
-        glyph = crop_scale_rgba(fg, N, minx, miny, gw, gh, tw, th)
+        # 图形包围盒缩放到"可见区 × GLYPH_VISIBLE_RATIO"，并按图形包围盒居中（不是按裁切框）
+        target = safe * GLYPH_VISIBLE_RATIO
+        s = min(target / gw, target / gh)
+        tw, th = max(1, int(cw * s)), max(1, int(ch * s))
+        glyph = crop_scale_rgba(fg, N, mx0, my0, cw, ch, tw, th)
         layer = bytearray(canvas * canvas * 4)
         ox, oy = (canvas - tw) // 2, (canvas - th) // 2
         for y in range(th):
@@ -149,6 +167,13 @@ def build_android(master):
     if new != src:
         open(colors, 'w', encoding='utf-8').write(new)
         print('  →', os.path.relpath(colors, ROOT), '#%02X%02X%02X' % mid)
+
+
+def build_app_asset():
+    """关于页里显示的品牌图标：同一母版缩一份打进 Flutter 资源（避免图标两处源）"""
+    dst = os.path.join(ROOT, 'app/assets/app_icon.png')
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    to_png(scale_rgba(decode(MASTER, N), N, 256), 256, dst)
 
 
 def build_desktop():
@@ -192,6 +217,8 @@ def main():
     build_desktop()
     print('Android 图标：')
     build_android(decode(MASTER, N))
+    print('应用内图标资源（关于页）：')
+    build_app_asset()
     print('完成。')
 
 

@@ -895,15 +895,29 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final scheme = Theme.of(context).colorScheme;
     final paired = _status == ConnectionStatus.paired;
     final hasTarget = widget.sender.hasAnyTarget;
+    // 未连接且没有可连目标时，正文本身就是扫码引导页（中间有一个大扫码按钮），
+    // 顶栏那个扫码图标在同一屏里是重复的 → 该状态不显示它
+    final showOnboarding =
+        !paired && !hasTarget && _status != ConnectionStatus.occupied;
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('BeepType'),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.qr_code_scanner_rounded),
-            tooltip: '扫码连接电脑',
-            onPressed: _navigateToScan,
+          if (!showOnboarding)
+            IconButton(
+              icon: const Icon(Icons.qr_code_scanner_rounded),
+              tooltip: '扫码连接电脑',
+              onPressed: _navigateToScan,
+            ),
+          PopupMenuButton<String>(
+            tooltip: '更多',
+            onSelected: (value) {
+              if (value == 'about') Navigator.of(context).pushNamed('/about');
+            },
+            itemBuilder: (context) => const [
+              PopupMenuItem<String>(value: 'about', child: Text('关于')),
+            ],
           ),
         ],
       ),
@@ -918,7 +932,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               Expanded(
                 child: paired
                     ? _buildEditorCard(scheme, enabled: true)
-                    : (!hasTarget && _status != ConnectionStatus.occupied)
+                    : showOnboarding
                         ? _buildOnboardingView(scheme)
                         : _buildEditorCard(scheme, enabled: false),
               ),

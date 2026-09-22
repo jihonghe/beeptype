@@ -1,5 +1,6 @@
 package com.beeptype.app
 
+import android.content.pm.PackageManager
 import android.os.Build
 import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
@@ -14,9 +15,26 @@ class MainActivity : FlutterActivity() {
                 when (call.method) {
                     "getDeviceName" -> result.success(deviceName())
                     "getHardwareId" -> result.success(hardwareId())
+                    "getAppVersion" -> result.success(appVersion())
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    /**
+     * 关于页显示的版本号：安装包的 versionName，与 `app/pubspec.yaml` 的 version 一致
+     * （发布时由 CI 按 tag 改写）。读不到就返回 null，界面自行隐藏该行。
+     */
+    private fun appVersion(): String? = try {
+        val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            packageManager.getPackageInfo(packageName, PackageManager.PackageInfoFlags.of(0))
+        } else {
+            @Suppress("DEPRECATION")
+            packageManager.getPackageInfo(packageName, 0)
+        }
+        info.versionName
+    } catch (_: Exception) {
+        null
     }
 
     /**

@@ -477,15 +477,19 @@ app/lib/
 ├── main.dart                      # 入口：初始化存储后再 runApp（冷启动 autoConnect 依赖它）
 ├── pages/
 │   ├── home_page.dart             # 主界面：状态胶囊 + 输入卡 + 占用页 + 引导页
-│   └── scan_page.dart             # 扫码页（mobile_scanner）
+│   ├── scan_page.dart             # 扫码页（mobile_scanner）
+│   └── about_page.dart            # 关于页：图标 / 名称 / slogan / 版本 / 版权（纯展示）
 └── services/
     ├── tcp_service.dart           # TCP、分帧、请求/应答 Completer、心跳
     ├── text_sender.dart           # 编排：自动连接、配对、降级、发送
     ├── storage_service.dart       # client_id、已绑定电脑列表、设备名
-    └── discovery_service.dart     # UDP 广播发现
+    ├── discovery_service.dart     # UDP 广播发现
+    └── app_info.dart             # 读安装包版本号（走平台通道）
+
+app/assets/app_icon.png            # 关于页的品牌图标，由 scripts/build_icons.py 从母版生成
 ```
 
-平台通道 `beeptype/device`：Android 在 `MainActivity.kt` 实现 `getDeviceName`（按品牌优先级取系统设备名）与 `getHardwareId`（ANDROID_ID）；iOS 在 `AppDelegate.swift` 实现（`UIDevice.current.name` 与 Keychain 持久化 UUID）。
+平台通道 `beeptype/device`：Android 在 `MainActivity.kt` 实现 `getDeviceName`（按品牌优先级取系统设备名）与 `getHardwareId`（ANDROID_ID）；iOS 在 `AppDelegate.swift` 实现（`UIDevice.current.name` 与 Keychain 持久化 UUID）。关于页的版本号也走这条通道（`getAppVersion`：Android 读 `versionName`、iOS 读 `CFBundleShortVersionString`），**不引入 `package_info_plus`**——能少一个依赖就少一个，而这个值本来就来自平台。
 
 ### 4.2 依赖
 
@@ -632,6 +636,10 @@ app/lib/
 - **单帧误读静默忽略**：读到的内容不是 `beeptype://…` 就丢帧继续扫（二维码每约 3 分钟自动换新、扫描瞬间也可能糊），只有电脑明确拒绝才给红字提示。
 - **诊断日志**（定位"同一局域网内连不上"）：每次尝试打 `VL_CONN 尝试直连 <ip:port>` / `VL_CONN 直连结果：<status>` / `VL_CONN 广播找到 N 台：…` / `VL_CONN 用新地址补连 …`；广播前打 `VL_DISC 本机网卡：<名=地址…> → 广播目标：…`——这几行能直接回答"广播有没有发到电脑所在网段"。
 
+**页面与入口（三个页面）**：主页、扫码页、关于页。关于页是二级页（`/about`，带返回），从首页右上角「⋮」菜单进入。**不加设置页**——APP 目前没有任何设置项，放一个点进去空无一物的入口比没有入口更糟；将来真出现设置项，入口就挂在这个「⋮」里，不用返工。
+
+顶栏右上角平时是「扫码图标 + ⋮」；**未连接且没有可连目标时隐藏扫码图标**——那个状态下正文本身就是扫码引导页、中间那个大按钮就是扫码入口，同一屏里出现两个一模一样的入口只会让人犹豫。
+
 ### 4.8 语音发送时序（关键设计）
 
 ```
@@ -707,6 +715,8 @@ log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
 依赖都不需要用户安装外部命令（剪贴板走 arboard、按键走 enigo + X11 XTest），发行包不再依赖 `xdotool`/`xclip`。
 
 **Linux 任务栏图标（winicon.rs）**：Tauri 的 `window.set_icon()` 在这套 GTK/tao 栈上**实测无效**——调用返回成功，但窗口的 `_NET_WM_ICON` 属性始终不写（立即调用与延后 2 秒调用都试过）。而缺该属性的窗口在 Deepin 的任务栏里会退回通用图标（现象：显示"两个齿轮"）；同机对照，Edge / ZCode 都设了这个属性、图标正常。因此改为自己实现：连 X server，从 `_NET_CLIENT_LIST` 里按 `_NET_WM_PID` == 本进程 pid 且 `WM_CLASS` 含 `beeptype` 找到自己的窗口，把 128×128 图标按 `[宽, 高, ARGB...]` 写入该属性（带重试，失败只记日志）。仅作用于 Linux/X11；Wayland 用 app_id 关联，Windows/macOS 用可执行文件图标。
+
+**Android 启动器图标（自适应图标）**：画布 108dp，其中**只有中间 72dp 是可见区**——启动器会把这块放大到整个图标，外侧 18dp 只是视差/遮罩的溢出边。所以图形包围盒要按"可见区的比例"来定：`scripts/build_icons.py` 里的 `GLYPH_VISIBLE_RATIO = 0.67`，**顶满（1.0）就等于没有留白**（v0.5.0 之前就是这样，观感上比其它 APP 挤）。两条配套规则：① 抠图判据用**最亮通道**而不是"与底色的色差"——母版是 AI 生成的、底色带噪点，色差判据会把 82% 的底色噪点当成图形留下，留白一放大就是肉眼可见的方块痕迹；② 前景层按**图形包围盒**居中（早先是按含噪点的裁切框居中，图形实际偏左上约 2%）。legacy 图标（`ic_launcher.png` / `ic_launcher_round.png`，给 Android 8 以下）仍是满幅徽章、不缩，缩了在旧系统上会变成小方块加透明边。
 
 ---
 

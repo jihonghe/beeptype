@@ -40,6 +40,9 @@ import Security
       result(UIDevice.current.name)
     case "getHardwareId":
       result(hardwareId())
+    case "getAppVersion":
+      // 关于页显示的版本号：与 pubspec.yaml 的 version 一致（发布时由 CI 按 tag 改写）
+      result(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)
     default:
       result(FlutterMethodNotImplemented)
     }

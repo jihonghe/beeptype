@@ -23,3 +23,6 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    # 关于页里展示的品牌图标，由 scripts/build_icons.py 从母版生成
+    - assets/app_icon.png

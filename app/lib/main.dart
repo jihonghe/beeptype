@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'services/text_sender.dart';
+import 'pages/about_page.dart';
 import 'pages/home_page.dart';
 import 'pages/scan_page.dart';
 
@@ -29,6 +30,7 @@ class BeepTypeApp extends StatelessWidget {
       home: HomePage(sender: sender),
       routes: {
         '/scan': (context) => ScanPage(sender: sender),
+        '/about': (context) => const AboutPage(),
       },
     );
   }
