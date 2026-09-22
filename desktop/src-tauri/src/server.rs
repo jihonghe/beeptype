@@ -574,19 +574,14 @@ impl<R: Runtime> ServerState<R> {
     /// **只有常用设备席位能改**：这两个开关改的是电脑的全局行为，临时访客不该有权限。
     /// 不合规的请求一律忽略——但**照样回推当前值**，让手机端自己把界面纠正回来
     /// （不做静默失败）。
-    fn handle_set_prefs(
-        &self,
-        ctx: &mut ConnCtx,
-        auto_paste: Option<bool>,
-        auto_send: Option<bool>,
-    ) -> Option<Message> {
+    fn handle_set_prefs(&self, ctx: &mut ConnCtx, auto_paste: bool, auto_send: bool) -> Option<Message> {
         let allowed = ctx.authed
             && !ctx.waiting_takeover
             && self.is_session_holder(ctx)
             && ctx.identity.load(Ordering::SeqCst);
         if allowed {
-            // 落盘 + 回推一条 prefs（apply_prefs 负责）
-            self.apply_prefs(auto_paste, auto_send);
+            // 整对应用（落盘 + 回推一条 prefs + 通知电脑端自己的界面）
+            self.apply_prefs(Some(auto_paste), Some(auto_send));
         } else {
             warn!("Ignored set_prefs from a non-primary connection");
             // 改不动也要让手机看到当前值：不做静默失败，界面不会停在假状态
@@ -635,6 +630,8 @@ impl<R: Runtime> ServerState<R> {
             self.auto_send.load(Ordering::Relaxed)
         );
         self.push_prefs();
+        // 电脑端自己的设置页也立刻刷新：事件推送，不再等 1 秒轮询
+        let _ = self.app_handle.emit("settings-changed", ());
     }
 
     /// 把当前行为开关推给在线的常用手机。手机改完、电脑设置页改完、以及
@@ -1997,14 +1994,15 @@ mod integration_tests {
         assert_eq!(p0["auto_paste"], true, "默认开启自动粘贴");
         assert_eq!(p0["auto_send"], false, "默认关闭自动发送");
 
-        // 粘贴开着时，可以打开自动发送
-        sock.write_all(b"{\"type\":\"set_prefs\",\"auto_send\":true}\n")
+        // 成对同步：粘贴开着时打开发送（手机端会算出 {true,true} 整对发）
+        sock.write_all(b"{\"type\":\"set_prefs\",\"auto_paste\":true,\"auto_send\":true}\n")
             .expect("write");
         let p1 = read_until(&mut reader, "prefs");
+        assert_eq!(p1["auto_paste"], true);
         assert_eq!(p1["auto_send"], true);
 
-        // 关掉自动粘贴：自动发送必须联动关掉，并推回给手机
-        sock.write_all(b"{\"type\":\"set_prefs\",\"auto_paste\":false}\n")
+        // 关掉自动粘贴（手机端发的是整对 {false,false}）
+        sock.write_all(b"{\"type\":\"set_prefs\",\"auto_paste\":false,\"auto_send\":false}\n")
             .expect("write");
         let p2 = read_until(&mut reader, "prefs");
         assert_eq!(p2["auto_paste"], false);
@@ -2012,6 +2010,17 @@ mod integration_tests {
         {
             let cfg = state.config.lock().unwrap();
             assert!(!cfg.auto_paste && !cfg.auto_send, "要落盘");
+        }
+
+        // 防御：万一有客户端发来非法组合（粘贴关却要打开发送），电脑端也必须存成关
+        sock.write_all(b"{\"type\":\"set_prefs\",\"auto_paste\":false,\"auto_send\":true}\n")
+            .expect("write");
+        let p3 = read_until(&mut reader, "prefs");
+        assert_eq!(p3["auto_paste"], false);
+        assert_eq!(p3["auto_send"], false, "非法组合要被防御性联动纠正");
+        {
+            let cfg = state.config.lock().unwrap();
+            assert!(!cfg.auto_paste && !cfg.auto_send, "非法组合不能落盘");
         }
 
         // 临时访客：改不动，但会收到当前值（不静默失败）
@@ -2031,7 +2040,7 @@ mod integration_tests {
         // 临时访客改不动：请求被忽略、配置不变，也不会收到回推
         // （手机端在临时身份下根本不显示这两个开关，所以无需回推纠正）
         sock2
-            .write_all(b"{\"type\":\"set_prefs\",\"auto_paste\":true}\n")
+            .write_all(b"{\"type\":\"set_prefs\",\"auto_paste\":true,\"auto_send\":true}\n")
             .expect("write");
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(

@@ -355,14 +355,16 @@ class TcpService {
 
   /// 改电脑端的行为开关（自动粘贴 / 自动发送）。
   ///
-  /// **只有常用设备席位会被电脑端接受**（这两个开关改的是电脑的全局行为，
-  /// 临时访客没有权限）；电脑端改完（或被忽略）都会推一条 `prefs` 回来，
-  /// 界面据此自动纠正，所以这里不需要返回值。
-  void setPrefs({bool? autoPaste, bool? autoSend}) {
+  /// **成对发送**：这两个开关是一对（自动发送依赖自动粘贴），只发被改动的那个会留下
+  /// 依赖不一致的窗口，所以调用方要给出一对目标状态（见 `prefsAfterToggle`）。
+  ///
+  /// **只有常用设备席位会被电脑端接受**；改完（或被忽略）电脑端都会推一条 `prefs`
+  /// 回来，界面据此自动纠正，所以这里不需要返回值。
+  void setPrefs({required bool autoPaste, required bool autoSend}) {
     if (!_isConnected) return;
     _send(TcpMessage('set_prefs', {
-      if (autoPaste != null) 'auto_paste': autoPaste,
-      if (autoSend != null) 'auto_send': autoSend,
+      'auto_paste': autoPaste,
+      'auto_send': autoSend,
     }));
   }
 

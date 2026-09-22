@@ -5,6 +5,7 @@ import 'lan_check.dart';
 import 'retry_policy.dart';
 import 'package:flutter/services.dart';
 import 'tcp_service.dart';
+import 'prefs_policy.dart';
 import 'storage_service.dart';
 import 'discovery_service.dart';
 
@@ -117,9 +118,20 @@ class TextSender {
   final _prefsController = StreamController<PrefsState>.broadcast();
   Stream<PrefsState> get prefsStream => _prefsController.stream;
 
-  /// 改电脑端的行为开关（只有常用设备身份会被电脑端接受）
-  void setPrefs({bool? autoPaste, bool? autoSend}) =>
-      _tcp.setPrefs(autoPaste: autoPaste, autoSend: autoSend);
+  /// 拨动某个行为开关：按联动规则算出**整对**目标状态后成对发出
+  /// （只发被改动的那个会留下依赖不一致的窗口）。
+  /// 还没同步到值时不发（界面上也没显示开关）。
+  void setPrefs({bool? autoPaste, bool? autoSend}) {
+    final cur = _prefs;
+    if (cur == null) return;
+    final next = prefsAfterToggle(
+      autoPaste: cur.autoPaste,
+      autoSend: cur.autoSend,
+      setPaste: autoPaste,
+      setSend: autoSend,
+    );
+    _tcp.setPrefs(autoPaste: next.autoPaste, autoSend: next.autoSend);
+  }
 
   /// 保活凭证的当场同步：设置项一改，PC 立刻把结果推过来。
   /// 带 token → 落盘/续期；不带 → 清掉本地记录（保活被关了）。

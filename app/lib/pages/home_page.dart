@@ -861,8 +861,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         widget.sender.lastAuthMode == AuthMode.token) {
       // 电脑正被另一台手机使用，而本机是这台电脑的绑定手机：点「连接」即接管
       hintText = '另一台手机正在使用这台电脑；点「连接」即可立即接管';
-    } else {
+    } else if (_busy) {
+      // 正在连接/重连中：此时点打字区不生效（要停手用胶囊的「中断」），
+      // 所以不能承诺「点这里能连」，只说事实
       hintText = '连接成功后即可语音输入文字';
+    } else {
+      // 断开且可以点：把「这里可以点」和「连上后怎么说」合成一句
+      // （不再提胶囊上的连接按钮——它本身就在那儿、一眼可见，多提一次只是多一个名词）
+      hintText = '点此区域连接电脑，连上后长按键盘语音键语音输入文字';
     }
 
     return GestureDetector(

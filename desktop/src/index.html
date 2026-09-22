@@ -633,6 +633,20 @@
         }
 
         /* ---------------- 设置页（每次进入都拉最新状态） ---------------- */
+        /* 两个行为开关的显示与依赖：进入设置页时、以及电脑端/手机端改完之后都走这里。
+           抽出来是为了让"事件推送"能单独刷新这两个开关（不再靠 1 秒轮询）。 */
+        function applyAutoSwitchState(s) {
+            const ap = document.getElementById('set-autopaste');
+            const ans = document.getElementById('set-autosend');
+            const apNote = document.getElementById('ap-note');
+            const asNote = document.getElementById('as-note');
+            if (!ap || !ans) return;
+            ap.checked = !!s.autoPaste;
+            ans.checked = !!s.autoSend;
+            // 两个开关的 checked/disabled 与说明文字由 applyAutoSwitchState 统一处理
+
+        }
+
         async function renderSettings() {
             let s;
             try {
@@ -650,10 +664,9 @@
             const apNote = document.getElementById('ap-note');
             const asNote = document.getElementById('as-note');
             const ahNote = document.getElementById('ah-note');
-            ap.checked = !!s.autoPaste;
             as.checked = !!s.autostart;
-            ans.checked = !!s.autoSend;
             ah.checked = !!s.autoHide;
+            applyAutoSwitchState(s);
             ahNote.textContent = ah.checked
                 ? '手机连上电脑后，窗口自动收起到系统托盘'
                 : '窗口会一直留在桌面，方便查看状态和管理设备';
@@ -833,6 +846,12 @@
             listen('pairing-show', () => {
                 refresh();
                 forceRepaint();
+            });
+            // 行为开关变了（电脑端设置页改的，或手机端改完电脑落盘的回执）→
+            // 立刻刷新那两个开关：事件推送，不再等 1 秒轮询
+            listen('settings-changed', async () => {
+                const s = await invoke('get_settings').catch(() => null);
+                if (s) applyAutoSwitchState(s);
             });
         }
     </script>

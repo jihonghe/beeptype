@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:beeptype/services/lan_check.dart';
 import 'package:beeptype/services/retry_policy.dart';
+import 'package:beeptype/services/prefs_policy.dart';
 import 'package:beeptype/services/tcp_service.dart';
 
 /// 「不在同一个局域网」判断的护栏。
@@ -216,6 +217,39 @@ void main() {
         pillAction(connected: false, busy: false, hasTarget: false),
         PillAction.none,
       );
+    });
+
+    group('两个行为开关的联动（成对同步）', () {
+      ({bool autoPaste, bool autoSend}) t({
+        required bool paste,
+        required bool send,
+        bool? setPaste,
+        bool? setSend,
+      }) =>
+          prefsAfterToggle(
+            autoPaste: paste,
+            autoSend: send,
+            setPaste: setPaste,
+            setSend: setSend,
+          );
+
+      test('打开发送（粘贴开着）→ 两个都开', () {
+        final r = t(paste: true, send: false, setSend: true);
+        expect(r.autoPaste, true);
+        expect(r.autoSend, true);
+      });
+
+      test('关掉粘贴 → 发送同时关（整对发 {false,false}）', () {
+        final r = t(paste: true, send: true, setPaste: false);
+        expect(r.autoPaste, false);
+        expect(r.autoSend, false);
+      });
+
+      test('粘贴关着时打开发送 → 发送仍然是关（依赖）', () {
+        final r = t(paste: false, send: false, setSend: true);
+        expect(r.autoPaste, false, reason: '没动的那一项保持原值');
+        expect(r.autoSend, false, reason: '粘贴关着时发送不可能生效');
+      });
     });
 
     group('点打字区该做什么（用户定稿的边界）', () {

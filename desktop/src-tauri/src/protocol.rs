@@ -177,14 +177,16 @@ pub enum Message {
 
     /// 手机 → PC：改电脑端的行为开关（「自动粘贴」「自动发送」）。
     ///
+    /// **成对发送**：这两个开关在语义上是一对（自动发送依赖自动粘贴），只发改动的
+    /// 那个会留下"依赖不一致"的窗口，所以同步粒度就是这一对（关粘贴时直接发
+    /// `{auto_paste:false, auto_send:false}`）。电脑端仍保留防御性联动。
+    ///
     /// 这两个开关改的是**电脑的全局行为**，所以只接受**常用设备席位**发来的请求；
     /// 临时访客发来的一律忽略（但照样回推当前值，让它自行纠正界面）。
     #[serde(rename = "set_prefs")]
     SetPrefs {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        auto_paste: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        auto_send: Option<bool>,
+        auto_paste: bool,
+        auto_send: bool,
     },
 
     /// PC → 手机：当前行为开关（用户意愿值）。以下三种时刻都会推：
