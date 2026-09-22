@@ -5,7 +5,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-blue" alt="Platform">
-  <img src="https://img.shields.io/badge/mobile-Android%20%7C%20iOS-green" alt="Mobile">
+  <img src="https://img.shields.io/badge/mobile-Android-green" alt="Mobile">
   <img src="https://img.shields.io/badge/license-MIT-yellow" alt="License">
   <img src="https://img.shields.io/badge/language-Flutter%20%7C%20Rust-orange" alt="Language">
 </p>
@@ -38,14 +38,14 @@
 - **自动发送** — 粘贴后自动回车（聊天场景零手动）
 - **零账号·零云端** — 局域网 TCP 直连，数据只在手机和 PC 之间，不经任何服务器
 - **一键重启** — 装好新版本后点托盘菜单的「重启应用」即可切换，不必手动退出再打开
-- **跨平台** — PC 端 Linux（X11）/ Windows / macOS；手机端 Android（iOS 开发中）
+- **跨平台** — PC 端 Linux（X11）/ Windows / macOS；手机端 Android（iOS 见路线图）
 
 ## 🚀 快速开始
 
 ### 前置条件
 
 - **PC 端**：Linux（X11 桌面）/ Windows 10+ / macOS 12+
-- **手机端**：Android 8.0+（iOS 开发中）
+- **手机端**：Android 8.0+（iOS 未支持，见路线图）
 - **网络**：手机和 PC 在同一局域网
 
 ### PC 端
@@ -136,15 +136,18 @@ flutter install --release  # 装 release 包到真机
 | Windows 10+ | ✅ | ✅ | ✅ | |
 | macOS 12+ | ✅ | ✅ | ✅ | |
 | Android 8.0+ | ✅ | — | — | |
-| iOS | 🚧 开发中 | — | — | |
+| iOS | ⚪ 未支持 | — | — | 原生通道代码已就绪（Keychain 硬件指纹等），尚未在真机验证、也还没有分发 |
 
 ## 🛣️ 路线图
 
-- [ ] iOS 手机端适配（扫码、硬件指纹 Keychain 持久化）
-- [ ] Linux Wayland 会话：评估 RemoteDesktop 门户自动授权可行性
+- [ ] **发送延迟** — 吸收分段型输入法（搜狗/百度会在说话过程中逐段提交），让回车只在整段说完后触发一次，而不是把一整段打成碎片
+- [ ] **图片传输** — 手机选图 → 电脑剪贴板里的图片 → 在聊天框 Ctrl+V 直达（可配合自动粘贴）
+- [ ] **手机端输入控制台** — 历史记录、编辑后重发、失败不丢原文
+- [ ] **iOS 适配** — 原生通道代码已就绪（Keychain 硬件指纹、设备名、版本号），待真机验证与分发
+- [ ] **Linux Wayland 会话的自动粘贴**（探路）— 触发条件：自己的会话切到 Wayland，或出现真实用户需求
 - [x] GitHub Release 自动构建（CI）
-- [ ] 桌面通知（新手机连接、token 认证失败提示）
-- [ ] 历史文本快捷重发（手机端）
+
+> 产品定位、需求分层、竞品地图与明确**不做**的事，见 [`docs/PRODUCT.md`](docs/PRODUCT.md)。
 
 ## 🤝 贡献
 

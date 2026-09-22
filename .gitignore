@@ -22,3 +22,7 @@ key.properties
 *.pem
 id_ed25519
 id_rsa
+
+# ===== AI 工具（本地配置，不进仓库）=====
+.zcode/
+.zcodeignore

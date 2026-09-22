@@ -9,6 +9,9 @@
 
 ## 1. 竞品分析
 
+> **竞品的持续跟踪在 [`docs/PRODUCT.md`](PRODUCT.md)**（含开源同类 PhoneMic / QAA AirType / CatDB、Handy / Wispr Flow / VoiceInk、WO Mic、讯飞语音键鼠，以及每条数据的"已核实/待核实"标记）。
+> 本节保留**产品定位层面**的对比，用于说明我们占据的生态位。
+
 ### 1.1 市场背景
 
 PC 端语音输入是一个已被验证的真实需求。Windows 和 macOS 有系统级语音输入（Win+H / Dictation），但 Linux 桌面几乎没有可用的系统级语音输入方案。用户在 Deepseek 网页端、腾讯 CodeBar、各类浏览器等不具备内置语音输入的场景下，只能手动打字。
@@ -24,7 +27,7 @@ PC 端语音输入是一个已被验证的真实需求。Windows 和 macOS 有�
 | **VoicePad AI** | Win/Mac | Android/iOS | 本地 Whisper | WiFi + USB | 买断 | ❌ |
 | **Voicy** | 全平台 | Android/iOS | 云端 ASR | 账号 | $6.79/月起 | ❌ |
 | **Invoke** | Win/Mac/Linux (Python) | 无 | 本地 Whisper GPU | 无（本机） | 免费 | ✅ |
-| **BeepType（本品）** | Win/Mac/Linux (Tauri) | Android/iOS (Flutter) | 复用手机输入法 | 局域网 TCP + QR | 免费 | 计划开源 |
+| **BeepType（本品）** | Win/Mac/Linux (Tauri) | Android (Flutter) | 复用手机输入法 | 局域网 TCP + QR | 免费 | 计划开源 |
 
 ### 1.3 逐产品分析
 
@@ -103,7 +106,7 @@ PC 端语音输入是一个已被验证的真实需求。Windows 和 macOS 有�
 
 ### 1.6 市场空白结论
 
-"安卓/iOS 原生 APP → 局域网 TCP → Linux/Win/Mac 剪贴板"这个组合在现有竞品中是空白。最接近的 VoiceBridge 用浏览器（无法实现松手即发）+ xdotool（Linux 兼容性差），InsertKit 用 Tauri 但走云同步（延迟 + 隐私）。本品占据的生态位是：
+"安卓原生 APP → 局域网 TCP → Linux/Win/Mac 剪贴板"这个组合在现有竞品中是空白。最接近的 VoiceBridge 用浏览器（无法实现松手即发）+ xdotool（Linux 兼容性差），InsertKit 用 Tauri 但走云同步（延迟 + 隐私）。本品占据的生态位是：
 
 > **免费、开源、局域网、复用输入法、剪贴板同步、跨平台原生应用**
 
@@ -128,11 +131,12 @@ PC 端语音输入是一个已被验证的真实需求。Windows 和 macOS 有�
 
 **不做什么：**
 - 不做语音识别引擎——复用用户手机上已有的输入法
-- 不做文件传输
-- 不做剪贴板历史管理
+- 不做**通用文件传输**（图片传输是唯一的例外：它落在"让电脑剪贴板拿到内容"这条既有模型里，见 `docs/PRODUCT.md`；任意文件会引出落地目录、命名、覆盖等一堆决定，破坏"直达输入位置"的简洁）
+- 不做剪贴板历史管理，也不做图片历史管理
 - 不做远程控制（鼠标/键盘/屏幕）
-- 不做云端中继——纯局域网，文字不过云端
-- 不做账号体系——无需注册登录
+- 不做云端中继——纯局域网，文字不过云端；**因此也不为它引入账号与服务器**
+- 不做账号体系——无需注册登录；将来若要收费，走**离线许可证**而不是账号（只有真做云功能时，账号才有意义）
+- 不为"语音识别特性差的输入法"做按品牌适配：改进放在与输入法无关的方向上（如「发送延迟」）
 - 不把键注入当唯一路径：自动粘贴失败或平台不支持（如 Wayland）时自动降级为「仅写剪贴板 + 手动 Ctrl+V」
 
 ### 2.3 产品架构
@@ -1205,7 +1209,7 @@ token（长期凭证）
 | 平台 | 构建命令 | 产物 |
 |---|---|---|
 | Android | `flutter build apk --release --target-platform android-arm64` | `.apk` |
-| iOS | `flutter build ipa --release` | `.ipa`（适配开发中） |
+| iOS | `flutter build ipa --release` | `.ipa`（原生通道代码已就绪，尚未真机验证与分发） |
 
 #### 7.6.3 分发与 CI
 
