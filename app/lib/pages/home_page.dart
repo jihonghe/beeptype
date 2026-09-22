@@ -923,14 +923,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               tooltip: '扫码连接电脑',
               onPressed: _navigateToScan,
             ),
-          PopupMenuButton<String>(
-            tooltip: '更多',
-            onSelected: (value) {
-              if (value == 'about') Navigator.of(context).pushNamed('/about');
-            },
-            itemBuilder: (context) => const [
-              PopupMenuItem<String>(value: 'about', child: Text('关于')),
-            ],
+          // 设置：今天页里只有 APP 信息，将来加设置项就加在同一页（不再多一次点击）
+          IconButton(
+            icon: const Icon(Icons.settings_rounded),
+            tooltip: '设置',
+            onPressed: () => Navigator.of(context).pushNamed('/settings'),
           ),
         ],
       ),

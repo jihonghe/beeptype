@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'services/text_sender.dart';
-import 'pages/about_page.dart';
 import 'pages/home_page.dart';
 import 'pages/scan_page.dart';
+import 'pages/settings_page.dart';
 
 Future<void> main() async {
   // 必须在 runApp 前完成绑定与存储初始化，否则 HomePage 冷启动
@@ -30,7 +30,7 @@ class BeepTypeApp extends StatelessWidget {
       home: HomePage(sender: sender),
       routes: {
         '/scan': (context) => ScanPage(sender: sender),
-        '/about': (context) => const AboutPage(),
+        '/settings': (context) => const SettingsPage(),
       },
     );
   }

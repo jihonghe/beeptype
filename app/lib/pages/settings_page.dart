@@ -2,18 +2,20 @@ import 'package:flutter/material.dart';
 
 import '../services/app_info.dart';
 
-/// 关于页：图标 + 名称 + slogan + 版本号 + 版权。
+/// 设置页：今天的内容就是 APP 信息（图标 + 名称 + slogan + 版本号 + 版权）。
 ///
-/// 从首页右上角「⋮」进入。APP 目前没有设置项，所以这一页只做展示、
-/// 不放任何可操作的东西；将来真有设置项，入口也挂在同一个「⋮」里。
-class AboutPage extends StatefulWidget {
-  const AboutPage({super.key});
+/// 从首页右上角的齿轮一步进入。APP 目前没有设置项，所以这一页只做展示、不放
+/// 任何可操作的东西；**将来真有设置项就加在这块信息上面**（与 LocalSend 的设置页
+/// 同一种排版：上面设置项、下面 APP 信息），入口与页面名字都不用改。
+/// 今天不给信息块加小标题：小标题是用来分隔多组内容的，只有一块内容时反而突兀。
+class SettingsPage extends StatefulWidget {
+  const SettingsPage({super.key});
 
   @override
-  State<AboutPage> createState() => _AboutPageState();
+  State<SettingsPage> createState() => _SettingsPageState();
 }
 
-class _AboutPageState extends State<AboutPage> {
+class _SettingsPageState extends State<SettingsPage> {
   String _version = '';
 
   @override
@@ -29,7 +31,7 @@ class _AboutPageState extends State<AboutPage> {
     final scheme = Theme.of(context).colorScheme;
     final muted = TextStyle(fontSize: 13, color: scheme.onSurfaceVariant);
     return Scaffold(
-      appBar: AppBar(title: const Text('关于')),
+      appBar: AppBar(title: const Text('设置')),
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
