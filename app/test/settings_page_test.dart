@@ -36,6 +36,43 @@ void main() {
     expect(find.text('关于'), findsNothing, reason: '只有一块内容时不加小标题');
   });
 
+  testWidgets('进设置页再返回后，原页面的输入框能拿回焦点（别手动 unfocus）', (tester) async {
+    mockVersion('0.7.0');
+    final node = FocusNode();
+    final nav = GlobalKey<NavigatorState>();
+    await tester.pumpWidget(MaterialApp(
+      navigatorKey: nav,
+      home: Scaffold(
+        body: Column(
+          children: [
+            TextField(focusNode: node),
+            TextButton(
+              onPressed: () => Navigator.of(nav.currentContext!).push(
+                MaterialPageRoute(
+                    builder: (_) => SettingsPage(sender: TextSender())),
+              ),
+              child: const Text('去设置'),
+            ),
+          ],
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    node.requestFocus();
+    await tester.pumpAndSettle();
+    expect(node.hasFocus, isTrue);
+
+    await tester.tap(find.text('去设置'));
+    await tester.pumpAndSettle();
+    expect(node.hasFocus, isFalse, reason: '推路由本身就会让输入框失焦');
+
+    nav.currentState!.pop();
+    await tester.pumpAndSettle();
+    // 回归护栏（用户实测）：设置页若手动 unfocus，会把"这层上次聚焦的是谁"的记忆
+    // 一起清掉，返回后焦点回不来——表现为"键盘弹了但光标不在"。
+    expect(node.hasFocus, isTrue, reason: '返回后应自动恢复焦点');
+  });
+
   testWidgets('没有「电脑端设置」时，APP 信息块水平居中且贴底', (tester) async {
     mockVersion('0.7.0');
     await tester.pumpWidget(

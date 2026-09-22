@@ -35,10 +35,10 @@ class _SettingsPageState extends State<SettingsPage> {
     AppInfo.version().then((v) {
       if (mounted && v.isNotEmpty) setState(() => _version = v);
     });
-    // 收起键盘并释放焦点：首页的输入框还持着焦点，键盘会跟着进设置页，
-    // 把页面内容挤到上半屏（Scaffold 随键盘缩小）。返回首页时由首页重新聚焦。
+    // 只收起键盘、**不要手动 unfocus**：推路由本身已经让输入框失焦，而手动 unfocus
+    // 会把"这一层上次聚焦的是谁"的记忆一起清掉 → 返回首页时光标回不来（用户实测的
+    // "键盘弹了但光标不在"就是它）。返回首页时由首页重新聚焦。
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      FocusManager.instance.primaryFocus?.unfocus();
       SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
     });
     // 行为开关的值来自电脑端推送；身份变化（常用↔临时）也决定这一块显不显示

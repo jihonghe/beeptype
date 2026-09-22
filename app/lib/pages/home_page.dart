@@ -516,17 +516,26 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// TextInput.show 会被系统取消（ImeTracker: PHASE_CLIENT_ALREADY_HIDDEN，
   /// HyperOS 实测复现）。因此 show 后验证键盘是否真的弹出（viewInsets），
   /// 未弹则以 350ms 间隔重试，最多 3 次；切回前台等窗口就绪的场景首次即成功。
+  /// 把焦点与键盘交还给打字区：**聚焦是必须的，弹键盘是尽力而为**。
+  ///
+  /// 注意：判断"键盘已在显示"时**只能跳过 `TextInput.show`，绝不能整个函数返回**——
+  /// 返回瞬间若 IME 还在做关闭动画（平台还没把高度归零），一旦整体退出，就连补一次
+  /// `requestFocus()` 都不会做，光标再也回不来（用户实测：从设置页/扫码页返回后
+  /// "键盘弹了但光标不在"，且时好时坏）。
   Future<void> _requestKeyboard() async {
     if (_status != ConnectionStatus.paired) return;
     // 扫码页还在前台：别把键盘盖上去（配对成功会先把那个页面弹掉）
     if (_scanPageOpen) return;
     for (var attempt = 0; attempt < 3; attempt++) {
-      // 键盘已经在显示就不重复召唤，避免多余的收起/弹起闪动
       final views = WidgetsBinding.instance.platformDispatcher.views;
-      if (views.isNotEmpty && views.first.viewInsets.bottom > 0) return;
+      final keyboardShown =
+          views.isNotEmpty && views.first.viewInsets.bottom > 0;
       await WidgetsBinding.instance.endOfFrame;
       if (!mounted || _status != ConnectionStatus.paired) return;
+      // 无论键盘是否已在显示，都先确保焦点回到打字区
       _focusNode.requestFocus();
+      // 已经在弹了就不重复召唤，避免多余的收起/弹起闪动
+      if (keyboardShown) return;
       await SystemChannels.textInput.invokeMethod<void>('TextInput.show');
       await Future<void>.delayed(const Duration(milliseconds: 350));
     }
