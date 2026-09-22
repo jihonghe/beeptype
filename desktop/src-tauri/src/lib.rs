@@ -218,44 +218,25 @@ fn set_window_height(app: tauri::AppHandle, height: f64) {
     }
 }
 
-/// 切换自动粘贴：运行态存"用户开关 && 平台支持"，配置只存用户意愿；
-/// 关闭自动粘贴时联动关闭自动发送（Enter 没东西发了）
+/// 切换自动粘贴：落盘、联动关自动发送，并推给在线的常用手机
+/// （与手机端改开关走同一条 `apply_prefs`，两端行为不会分叉）
 #[tauri::command]
 fn set_auto_paste(
     value: bool,
     state: tauri::State<'_, Arc<Mutex<AppServerState>>>,
 ) {
     let server = state.lock().unwrap();
-    let effective = value && paste::auto_paste_supported();
-    server.auto_paste.store(effective, Ordering::Relaxed);
-    // 依赖关系：auto_paste 关 → auto_send 也必须关
-    if !value {
-        server.auto_send.store(false, Ordering::Relaxed);
-    }
-    let mut config = server.config.lock().unwrap();
-    config.auto_paste = value;
-    if !value {
-        config.auto_send = false;
-    }
-    let _ = config.save();
-    info!("Auto-paste toggled: {value} (effective: {effective})");
+    server.apply_prefs(Some(value), None);
 }
 
-/// 切换自动发送：运行态存"用户开关 && auto_paste 生效 && 平台支持"，配置存用户意愿
+/// 切换自动发送：落盘 + 推给在线的常用手机（是否真生效还看平台能力与自动粘贴）
 #[tauri::command]
 fn set_auto_send(
     value: bool,
     state: tauri::State<'_, Arc<Mutex<AppServerState>>>,
 ) {
     let server = state.lock().unwrap();
-    let paste_on = server.auto_paste.load(Ordering::Relaxed);
-    let send_supported = paste::auto_send_supported();
-    let effective = value && paste_on && send_supported;
-    server.auto_send.store(effective, Ordering::Relaxed);
-    let mut config = server.config.lock().unwrap();
-    config.auto_send = value;
-    let _ = config.save();
-    info!("Auto-send toggled: {value} (effective: {effective}, paste_on: {paste_on})");
+    server.apply_prefs(None, Some(value));
 }
 
 /// 切换「连接后自动隐藏窗口」：手机连上后是否把主窗口收起到托盘。

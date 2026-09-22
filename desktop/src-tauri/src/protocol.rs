@@ -174,6 +174,29 @@ pub enum Message {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resume_expires_in: Option<u64>,
     },
+
+    /// 手机 → PC：改电脑端的行为开关（「自动粘贴」「自动发送」）。
+    ///
+    /// 这两个开关改的是**电脑的全局行为**，所以只接受**常用设备席位**发来的请求；
+    /// 临时访客发来的一律忽略（但照样回推当前值，让它自行纠正界面）。
+    #[serde(rename = "set_prefs")]
+    SetPrefs {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auto_paste: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auto_send: Option<bool>,
+    },
+
+    /// PC → 手机：当前行为开关（用户意愿值）。以下三种时刻都会推：
+    /// ① 手机改完（回执）；② 电脑端设置页改完；③ 手机刚连上（让两端显示一致）。
+    /// 依赖关系：`auto_paste` 关着时 `auto_send` 一定是关——手机端据此把发送开关置灰。
+    #[serde(rename = "prefs")]
+    Prefs {
+        #[serde(default)]
+        auto_paste: bool,
+        #[serde(default)]
+        auto_send: bool,
+    },
 }
 
 fn ack_status_default() -> String {
@@ -187,6 +210,14 @@ impl Message {
         Message::ResumeGrant {
             resume_token: token.map(|t| t.to_string()),
             resume_expires_in: expires_in,
+        }
+    }
+
+    /// 行为开关同步（电脑 → 手机）
+    pub fn prefs(auto_paste: bool, auto_send: bool) -> Self {
+        Message::Prefs {
+            auto_paste,
+            auto_send,
         }
     }
 

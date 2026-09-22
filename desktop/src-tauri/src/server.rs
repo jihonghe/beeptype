@@ -569,6 +569,89 @@ impl<R: Runtime> ServerState<R> {
     /// 连接线程阻塞在 socket 读上，靠它发现标志要等最长 5 秒（下一次心跳/读超时），
     /// 且历史上那个"只发一次"的闩会让重复解绑彻底静默。写操作都在 writer 锁后面，
     /// 与连接线程的回复不会写交错（同 promote_current_session 的做法）。
+    /// 手机端改「自动粘贴 / 自动发送」。
+    ///
+    /// **只有常用设备席位能改**：这两个开关改的是电脑的全局行为，临时访客不该有权限。
+    /// 不合规的请求一律忽略——但**照样回推当前值**，让手机端自己把界面纠正回来
+    /// （不做静默失败）。
+    fn handle_set_prefs(
+        &self,
+        ctx: &mut ConnCtx,
+        auto_paste: Option<bool>,
+        auto_send: Option<bool>,
+    ) -> Option<Message> {
+        let allowed = ctx.authed
+            && !ctx.waiting_takeover
+            && self.is_session_holder(ctx)
+            && ctx.identity.load(Ordering::SeqCst);
+        if allowed {
+            // 落盘 + 回推一条 prefs（apply_prefs 负责）
+            self.apply_prefs(auto_paste, auto_send);
+        } else {
+            warn!("Ignored set_prefs from a non-primary connection");
+            // 改不动也要让手机看到当前值：不做静默失败，界面不会停在假状态
+            self.push_prefs();
+        }
+        // 回推已经在上面发过了：这里不再回一条重复的（否则手机要处理两条）
+        None
+    }
+
+    /// 当前行为开关（用户意愿值）的消息形式
+    fn prefs_message(&self) -> Message {
+        let config = self.config.lock().unwrap();
+        Message::prefs(config.auto_paste, config.auto_send)
+    }
+
+    /// 应用行为开关：写内存 + 落盘，并把结果推给在线的常用手机。
+    ///
+    /// 依赖关系与电脑端设置页完全一致：**auto_paste 关 → auto_send 必须同时关**
+    /// （没东西可发，发送开关只能是关）。传 None 表示这一项不动。
+    pub fn apply_prefs(&self, auto_paste: Option<bool>, auto_send: Option<bool>) {
+        {
+            let mut config = self.config.lock().unwrap();
+            if let Some(v) = auto_paste {
+                config.auto_paste = v;
+                if !v {
+                    config.auto_send = false;
+                }
+                self.auto_paste
+                    .store(v && crate::paste::auto_paste_supported(), Ordering::Relaxed);
+            }
+            if let Some(v) = auto_send {
+                let paste_on = config.auto_paste;
+                config.auto_send = v && paste_on;
+                self.auto_send.store(
+                    config.auto_send
+                        && crate::paste::auto_send_supported()
+                        && self.auto_paste.load(Ordering::Relaxed),
+                    Ordering::Relaxed,
+                );
+            }
+            let _ = config.save();
+        }
+        info!(
+            "Prefs applied: auto_paste={} auto_send={}",
+            self.auto_paste.load(Ordering::Relaxed),
+            self.auto_send.load(Ordering::Relaxed)
+        );
+        self.push_prefs();
+    }
+
+    /// 把当前行为开关推给在线的常用手机。手机改完、电脑设置页改完、以及
+    /// 手机刚连上（席位建立后）都会走这里，保证两端显示一致。
+    pub fn push_prefs(&self) {
+        let writer = {
+            let session = self.session.lock().unwrap();
+            match session.as_ref() {
+                Some(a) if a.identity.load(Ordering::SeqCst) => a.writer.clone(),
+                _ => None,
+            }
+        };
+        if let Some(w) = writer {
+            let _ = send(&w, &self.prefs_message());
+        }
+    }
+
     pub fn unbind_primary(&self) {
         // 锁顺序约定：config → session。先把 config 处理完，再去会话里取收件人，
         // 拿到就立刻放锁——签发凭证要读 config（resume_ttl），持着 session 锁会反向加锁
@@ -630,6 +713,11 @@ impl<R: Runtime> ServerState<R> {
                 peer_ip,
                 ctx,
             ),
+
+            Message::SetPrefs {
+                auto_paste,
+                auto_send,
+            } => self.handle_set_prefs(ctx, auto_paste, auto_send),
 
             Message::Text { id, text, ts: _ } => {
                 // 必须是席位持有者；等待接管/未认证连接一律拒绝
@@ -820,6 +908,7 @@ impl<R: Runtime> ServerState<R> {
                     drop(session);
                     ctx.admit(client_id, device_name, kick, identity);
                     self.publish_state();
+                    self.push_prefs(); // 刚连上：把行为开关同步给手机，两端显示一致
                     auto_hide_after_pairing(&self.app_handle);
                     info!("Primary connected via token from {}", peer_ip);
                     Some(Message::hello_ack_ok(
@@ -846,6 +935,7 @@ impl<R: Runtime> ServerState<R> {
                     drop(session);
                     ctx.admit(client_id, device_name, kick, identity);
                     self.publish_state();
+                    self.push_prefs(); // 刚连上：把行为开关同步给手机，两端显示一致
                     auto_hide_after_pairing(&self.app_handle);
                     info!("Primary replaced stale connection from {}", peer_ip);
                     Some(Message::hello_ack_ok(
@@ -952,6 +1042,7 @@ impl<R: Runtime> ServerState<R> {
 
             ctx.admit(client_id, device_name, kick, identity);
             self.publish_state();
+            self.push_prefs(); // 刚配对成功：把行为开关同步给手机，两端显示一致
             auto_hide_after_pairing(&self.app_handle);
             info!(
                 "Code pairing OK from {} ({})",
@@ -1866,6 +1957,88 @@ mod integration_tests {
         );
     }
 
+
+    /// 手机端改「自动粘贴 / 自动发送」：常用设备能改且当场落盘并回推；
+    /// 临时访客改不动电脑设置，但照样会收到当前值（界面不会停在假状态）。
+    #[test]
+    fn test_set_prefs_requires_primary_and_syncs_back() {
+        // 收齐 hello_ack 与 prefs（两者紧挨着发出，顺序不敏感）
+        fn read_ack_and_prefs(
+            reader: &mut BufReader<TcpStream>,
+        ) -> (serde_json::Value, serde_json::Value) {
+            let mut ack = None;
+            let mut prefs = None;
+            for _ in 0..8 {
+                let v = read_json(reader);
+                match v["type"].as_str() {
+                    Some("hello_ack") => ack = Some(v),
+                    Some("prefs") => prefs = Some(v),
+                    _ => {}
+                }
+                if ack.is_some() && prefs.is_some() {
+                    break;
+                }
+            }
+            (
+                ack.expect("应收到 hello_ack"),
+                prefs.expect("连上后应收到 prefs"),
+            )
+        }
+
+        let (state, code) = test_state();
+        state.set_remember_next(true);
+        let (mut sock, mut reader) = connect_as_phone(spawn_server(state.clone()));
+        send_hello(
+            &mut sock,
+            serde_json::json!({"type":"hello","code":code,"client_id":"cid-p","device_name":"小米14"}),
+        );
+        let (ack, p0) = read_ack_and_prefs(&mut reader);
+        assert_eq!(ack["session"], "primary");
+        assert_eq!(p0["auto_paste"], true, "默认开启自动粘贴");
+        assert_eq!(p0["auto_send"], false, "默认关闭自动发送");
+
+        // 粘贴开着时，可以打开自动发送
+        sock.write_all(b"{\"type\":\"set_prefs\",\"auto_send\":true}\n")
+            .expect("write");
+        let p1 = read_until(&mut reader, "prefs");
+        assert_eq!(p1["auto_send"], true);
+
+        // 关掉自动粘贴：自动发送必须联动关掉，并推回给手机
+        sock.write_all(b"{\"type\":\"set_prefs\",\"auto_paste\":false}\n")
+            .expect("write");
+        let p2 = read_until(&mut reader, "prefs");
+        assert_eq!(p2["auto_paste"], false);
+        assert_eq!(p2["auto_send"], false, "粘贴关 → 发送同时关");
+        {
+            let cfg = state.config.lock().unwrap();
+            assert!(!cfg.auto_paste && !cfg.auto_send, "要落盘");
+        }
+
+        // 临时访客：改不动，但会收到当前值（不静默失败）
+        drop(sock);
+        drop(reader);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let code2 = state.config.lock().unwrap().regenerate_code();
+        state.set_code(code2.clone());
+        state.set_remember_next(false);
+        let (mut sock2, mut reader2) = connect_as_phone(spawn_server(state.clone()));
+        send_hello(
+            &mut sock2,
+            serde_json::json!({"type":"hello","code":code2,"client_id":"cid-t","device_name":"客人手机"}),
+        );
+        let ack2 = read_until(&mut reader2, "hello_ack");
+        assert_eq!(ack2["session"], "transient", "没勾记住 → 临时身份");
+        // 临时访客改不动：请求被忽略、配置不变，也不会收到回推
+        // （手机端在临时身份下根本不显示这两个开关，所以无需回推纠正）
+        sock2
+            .write_all(b"{\"type\":\"set_prefs\",\"auto_paste\":true}\n")
+            .expect("write");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            !state.config.lock().unwrap().auto_paste,
+            "配置不能被临时访客改动"
+        );
+    }
 
     /// 反复"解绑 → 设为常用设备 → 再解绑"：每一次都必须通知到手机。
     ///

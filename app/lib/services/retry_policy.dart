@@ -77,6 +77,27 @@ String? transientTag({
   return hasTransientRecord ? '临时' : null;
 }
 
+/// 点打字区该做什么（纯逻辑，便于单测）。用户定稿的边界：
+///
+/// - **正在连接 / 正在重连**：什么都不做——那一轮已经在试了，再触发只会把 30 秒
+///   倒计时重置、还可能和轮内正在飞的尝试打架；要停手胶囊上已经有「中断」；
+/// - **被占用**：本机是这台电脑的常用设备 → 接管；临时接入没有可执行的动作
+///   （那个状态马上会清记录回扫码页）；
+/// - **其余（断开 / 主动断开）**：等同按胶囊上的「连接」。
+enum EditorTapIntent { none, connect, takeover }
+
+EditorTapIntent editorTapIntent({
+  required bool busy,
+  required bool occupied,
+  required bool bound,
+}) {
+  if (busy) return EditorTapIntent.none;
+  if (occupied) {
+    return bound ? EditorTapIntent.takeover : EditorTapIntent.none;
+  }
+  return EditorTapIntent.connect;
+}
+
 /// 胶囊右侧的按钮
 enum PillAction {
   /// 不显示按钮（还没绑定过电脑；正文就是扫码引导页）

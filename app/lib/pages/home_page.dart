@@ -46,6 +46,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 是否正处在一次主动连接尝试中（合并事件回调与收尾逻辑，避免双重排程）
   bool _connecting = false;
 
+  /// 电脑端行为开关的最近同步值（null = 还没同步过，先不显示开关）
+  PrefsState? _prefs;
+  StreamSubscription<PrefsState>? _prefsSub;
+
   /// 最近一次失败"看起来不在同一局域网"（决定打字区要不要提示检查 Wi-Fi）
   bool _offLan = false;
 
@@ -158,6 +162,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _sessionUpdatedSub = widget.sender.sessionUpdated.listen((_) {
       if (mounted) setState(() {});
     });
+    // 电脑端的行为开关（自动粘贴/自动发送）同步过来了：刷新那两个开关
+    _prefsSub = widget.sender.prefsStream.listen((p) {
+      if (mounted) setState(() => _prefs = p);
+    });
     // 网络一变（换 Wi-Fi / 切回原网络 / 开关数据）立刻重试，不干等退避周期
     _netSub = Connectivity().onConnectivityChanged.listen((_) {
       _lastNetChangeAt = DateTime.now();
@@ -181,6 +189,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _statusSub.cancel();
     _sessionEndedSub.cancel();
     _sessionUpdatedSub.cancel();
+    _prefsSub?.cancel();
     _netSub?.cancel();
     _debounce?.cancel();
     _reconnectTimer?.cancel();
@@ -777,6 +786,48 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
+  /// 点打字区（只在断开态可点）= 按胶囊上的「连接」。
+  ///
+  /// 边界交给纯函数 editorTapIntent：正在连接/重连中点了**不生效**——那一轮已经在试，
+  /// 再触发只会重置倒计时、还可能和轮内正在飞的尝试打架（要停手胶囊上有「中断」）。
+  void _onEditorTap() {
+    switch (editorTapIntent(
+      busy: _busy,
+      occupied: _status == ConnectionStatus.occupied,
+      bound: widget.sender.lastAuthMode == AuthMode.token,
+    )) {
+      case EditorTapIntent.none:
+        break;
+      case EditorTapIntent.takeover:
+        unawaited(_takeover());
+      case EditorTapIntent.connect:
+        unawaited(_manualConnect());
+    }
+  }
+
+  /// 打字卡底部的小开关（自动粘贴 / 自动发送）
+  Widget _prefsSwitch(String label, bool value, ValueChanged<bool> onChanged,
+      {bool enabled = true}) {
+    final scheme = Theme.of(context).colorScheme;
+    final color = enabled
+        ? scheme.onSurfaceVariant
+        : scheme.onSurfaceVariant.withValues(alpha: 0.4);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(label, style: TextStyle(fontSize: 12, color: color)),
+        Transform.scale(
+          scale: 0.8,
+          child: Switch(
+            value: value,
+            onChanged: enabled ? onChanged : null,
+            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+        ),
+      ],
+    );
+  }
+
   /// 胶囊右侧「连接」按钮：被占用且本机是这台电脑的绑定手机时 = 接管；其余 = 立即连接
   void _onPillConnect() {
     final takeover = _status == ConnectionStatus.occupied &&
@@ -790,6 +841,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   /// 主体输入卡：已连接可输入，其余状态同卡原位禁用，骨架不跳变。
   Widget _buildEditorCard(ColorScheme scheme, {required bool enabled}) {
+    // 两个开关的显示条件：当前是**常用设备**身份（临时访客不该改电脑的全局行为），
+    // 且已经从电脑端同步到过值（没同步过就先不显示，免得闪一下错的状态）
+    final prefs = _prefs;
+    final showPrefs = prefs != null &&
+        (widget.sender.session?.isPrimary ?? false) &&
+        (_status == ConnectionStatus.paired ||
+            _status == ConnectionStatus.occupied);
+
     // 打字区只讲"该做什么"（状态由胶囊区讲，不复述）：默认一句功能说明，
     // 能判断"不在同一个局域网"时换成那条唯一有用的建议
     final String hintText;
@@ -806,7 +865,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       hintText = '连接成功后即可语音输入文字';
     }
 
-    return Card(
+    return GestureDetector(
+      // 断开时整张卡可点 = 立刻连接；正在连接/重连中点它不生效（边界见 _onEditorTap）
+      behavior: HitTestBehavior.opaque,
+      onTap: enabled ? null : _onEditorTap,
+      child: Card(
       margin: EdgeInsets.zero,
       elevation: 0,
       // 背景/边框不随连接状态切换，避免断开瞬间卡片"变色跳一下"
@@ -815,7 +878,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         borderRadius: BorderRadius.circular(20),
         side: BorderSide(color: scheme.outlineVariant),
       ),
-      child: Padding(
+      child: AbsorbPointer(
+        // 未连接时禁用输入框：让点击落到卡片本身（否则会被文本框吃掉）
+        absorbing: !enabled,
+        child: Padding(
         padding: const EdgeInsets.fromLTRB(16, 6, 8, 6),
         child: Column(
           children: [
@@ -851,8 +917,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               ),
             ),
             Row(
-              mainAxisAlignment: MainAxisAlignment.end,
               children: [
+                if (showPrefs) ...[
+                  _prefsSwitch('自动粘贴', prefs.autoPaste,
+                      (v) => widget.sender.setPrefs(autoPaste: v)),
+                  const SizedBox(width: 14),
+                  // 依赖：自动粘贴关着时，自动发送置灰不可点（与电脑端设置页一致）
+                  _prefsSwitch('自动发送', prefs.autoSend,
+                      (v) => widget.sender.setPrefs(autoSend: v),
+                      enabled: prefs.autoPaste),
+                ],
+                const Spacer(),
                 if (_sending)
                   const Padding(
                     padding: EdgeInsets.all(10),
@@ -872,6 +947,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               ],
             ),
           ],
+          ),
+        ),
         ),
       ),
     );
@@ -948,7 +1025,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           IconButton(
             icon: const Icon(Icons.settings_rounded),
             tooltip: '设置',
-            onPressed: () => Navigator.of(context).pushNamed('/settings'),
+            onPressed: () async {
+              await Navigator.of(context).pushNamed('/settings');
+              if (!mounted) return;
+              // 回到打字区就要能直接说话：聚焦 + 弹键盘（同一个函数，已连接才做）
+              unawaited(_requestKeyboard());
+            },
           ),
         ],
       ),
@@ -1008,6 +1090,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (widget.sender.tcp.isPairedNow) _markPaired();
     }
     setState(() {});
+    // 回到打字区就把焦点和键盘交还给它（配对成功那条路 _markPaired 里已经做过一遍）
+    if (_status == ConnectionStatus.paired) unawaited(_requestKeyboard());
   }
 }
 

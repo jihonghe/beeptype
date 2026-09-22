@@ -56,6 +56,13 @@ class PromotedGrant {
 }
 
 /// 降级为临时设备时，PC 补发的续连凭证
+/// 电脑端行为开关（手机端只显示与转发；真正的落盘在电脑端）
+class PrefsState {
+  final bool autoPaste;
+  final bool autoSend;
+  const PrefsState({required this.autoPaste, required this.autoSend});
+}
+
 class ResumeGrant {
   final String token;
   final int expiresInSec;
@@ -176,6 +183,10 @@ class TcpService {
 
   final _statusController = StreamController<ConnectionStatus>.broadcast();
 
+  /// 电脑端行为开关（自动粘贴 / 自动发送）的同步流：
+  /// 手机刚连上、以及两端任一方向改完，电脑端都会推一次。
+  final _prefsController = StreamController<PrefsState>.broadcast();
+
   /// 服务端主动结束会话的事件流（reason: owner_takeover/owner_disconnect/
   /// replaced/downgraded）。除 downgraded（解绑降级，连接保持）外，
   /// 消息到达后服务端会随即关闭 TCP。
@@ -212,6 +223,9 @@ class TcpService {
   final _textCompleters = <String, Completer<AckResult>>{};
 
   Stream<ConnectionStatus> get statusStream => _statusController.stream;
+
+  /// 电脑端行为开关的同步流（自动粘贴 / 自动发送）
+  Stream<PrefsState> get prefsStream => _prefsController.stream;
   Stream<String> get sessionEndedStream => _sessionEndedController.stream;
 
   bool get isConnected => _isConnected;
@@ -337,6 +351,19 @@ class TcpService {
       _statusController.add(ConnectionStatus.disconnected);
       return HelloOutcome.networkFail();
     }
+  }
+
+  /// 改电脑端的行为开关（自动粘贴 / 自动发送）。
+  ///
+  /// **只有常用设备席位会被电脑端接受**（这两个开关改的是电脑的全局行为，
+  /// 临时访客没有权限）；电脑端改完（或被忽略）都会推一条 `prefs` 回来，
+  /// 界面据此自动纠正，所以这里不需要返回值。
+  void setPrefs({bool? autoPaste, bool? autoSend}) {
+    if (!_isConnected) return;
+    _send(TcpMessage('set_prefs', {
+      if (autoPaste != null) 'auto_paste': autoPaste,
+      if (autoSend != null) 'auto_send': autoSend,
+    }));
   }
 
   /// occupied 状态下请求接管电脑（仅认证常用设备可用）
@@ -578,6 +605,14 @@ class TcpService {
         }
         break;
 
+      case 'prefs':
+        // 电脑端推来的行为开关（自动粘贴 / 自动发送）；没同步过就一直不显示开关
+        _prefsController.add(PrefsState(
+          autoPaste: d['auto_paste'] as bool? ?? false,
+          autoSend: d['auto_send'] as bool? ?? false,
+        ));
+        break;
+
       case 'pong':
         // 心跳顺带回报权威信息；两样都没带（不持席/未认证）就什么都不做，绝不瞎猜
         final claim = d['session'] as String?;
@@ -737,6 +772,7 @@ class TcpService {
     unawaited(_subscription?.cancel());
     _socket?.destroy();
     _statusController.close();
+    _prefsController.close();
     _sessionEndedController.close();
     _downgradeGrantController.close();
     _keepaliveController.close();

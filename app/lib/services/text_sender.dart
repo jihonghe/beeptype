@@ -89,6 +89,10 @@ class TextSender {
     _identitySub = _tcp.heartbeatStream.listen(_onHeartbeat);
     // 设置项「临时连接保活」改动：PC 当场同步——带 token 就落盘，不带就清掉
     _keepaliveSub = _tcp.keepaliveStream.listen(_onKeepaliveUpdate);
+    _prefsSub = _tcp.prefsStream.listen((p) {
+      _prefs = p;
+      _prefsController.add(p);
+    });
     _initialized = true;
   }
 
@@ -96,6 +100,7 @@ class TextSender {
   StreamSubscription<PromotedGrant>? _promotedSub;
   StreamSubscription<HeartbeatInfo>? _identitySub;
   StreamSubscription<KeepaliveUpdate>? _keepaliveSub;
+  StreamSubscription<PrefsState>? _prefsSub;
 
   /// 上一次把窗口时长写回本地的时刻（节流：心跳 2 秒一次，不必每次都写盘）
   int? _lastTtlSyncMs;
@@ -103,6 +108,18 @@ class TextSender {
   /// 会话身份发生变化（例如被电脑设为常用设备）时通知界面刷新
   final _sessionUpdatedController = StreamController<void>.broadcast();
   Stream<void> get sessionUpdated => _sessionUpdatedController.stream;
+
+  /// 电脑端行为开关（自动粘贴 / 自动发送）的最近同步值：
+  /// null = 还没同步过（界面先不显示那两个开关，避免闪一下错的值）
+  PrefsState? _prefs;
+  PrefsState? get prefs => _prefs;
+
+  final _prefsController = StreamController<PrefsState>.broadcast();
+  Stream<PrefsState> get prefsStream => _prefsController.stream;
+
+  /// 改电脑端的行为开关（只有常用设备身份会被电脑端接受）
+  void setPrefs({bool? autoPaste, bool? autoSend}) =>
+      _tcp.setPrefs(autoPaste: autoPaste, autoSend: autoSend);
 
   /// 保活凭证的当场同步：设置项一改，PC 立刻把结果推过来。
   /// 带 token → 落盘/续期；不带 → 清掉本地记录（保活被关了）。
@@ -696,6 +713,7 @@ class TextSender {
     _promotedSub?.cancel();
     _identitySub?.cancel();
     _keepaliveSub?.cancel();
+    _prefsSub?.cancel();
     _sessionUpdatedController.close();
     _tcp.dispose();
   }

@@ -218,6 +218,26 @@ void main() {
       );
     });
 
+    group('点打字区该做什么（用户定稿的边界）', () {
+      EditorTapIntent intent(
+              {bool busy = false, bool occupied = false, bool bound = true}) =>
+          editorTapIntent(busy: busy, occupied: occupied, bound: bound);
+
+      test('断开 / 主动断开 → 连接', () {
+        expect(intent(), EditorTapIntent.connect);
+      });
+
+      test('正在连接 / 重连中 → 什么都不做（不重置倒计时、不与在飞的尝试打架）', () {
+        expect(intent(busy: true), EditorTapIntent.none);
+        expect(intent(busy: true, occupied: true), EditorTapIntent.none);
+      });
+
+      test('被占用：常用设备可接管，临时接入没有可执行的动作', () {
+        expect(intent(occupied: true, bound: true), EditorTapIntent.takeover);
+        expect(intent(occupied: true, bound: false), EditorTapIntent.none);
+      });
+    });
+
     group('电脑名后面的身份标注（临时才说话）', () {
       String? tag({
         bool busy = false,
