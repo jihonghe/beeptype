@@ -67,22 +67,33 @@ class _SettingsPageState extends State<SettingsPage> {
     return Scaffold(
       appBar: AppBar(title: const Text('设置')),
       body: SafeArea(
-        child: _showPcSettings
-            ? ListView(
-                padding: const EdgeInsets.fromLTRB(16, 14, 16, 28),
-                children: [
-                  _pcSettings(scheme),
-                  const SizedBox(height: 30),
-                  info,
-                ],
-              )
-            : Center(
-                child: SingleChildScrollView(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
-                  child: info,
+        // 一套布局，两种状态一致：主内容在上、APP 信息**始终贴页面底部**。
+        // 屏幕够高就把内容撑到整屏（好让信息贴底）；内容真超一屏时按自然高度滚动，
+        // 不挤压内容（小屏/大字体场景）。
+        child: LayoutBuilder(
+          builder: (context, constraints) => SingleChildScrollView(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(minHeight: constraints.maxHeight),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 20),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    if (_showPcSettings)
+                      _pcSettings(scheme)
+                    else
+                      const SizedBox.shrink(),
+                    Padding(
+                      // 与上方内容至少留出这么多，贴底时不至于挤在一起
+                      padding: const EdgeInsets.only(top: 28),
+                      child: info,
+                    ),
+                  ],
                 ),
               ),
+            ),
+          ),
+        ),
       ),
     );
   }
