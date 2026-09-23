@@ -8,6 +8,7 @@ import '../services/retry_policy.dart';
 import '../services/route_observer.dart';
 import '../services/text_sender.dart';
 import '../services/tcp_service.dart';
+import '../services/voice_send_policy.dart';
 
 class HomePage extends StatefulWidget {
   final TextSender sender;
@@ -22,15 +23,15 @@ class _HomePageState extends State<HomePage>
     with WidgetsBindingObserver, RouteAware {
   /// 语音松手提交后的发送延时（毫秒），当前为 0 = 松手即发。
   ///
-  /// 触发原理：微信输入法按住说话期间 composing 始终有效（换气停顿也有效），
-  /// 松手"最终提交"时 composing 变 OFF——下降沿本身就是松手事件，不需要
-  /// 等待静音停顿。实测微信最终提交时文本已就位、只清 composing 标记，
-  /// 故 0ms 安全：Timer(0) 仍让出当前调用栈，合并同批次内的后续通知。
-  /// 若将来发现某输入法"先清 composing、下一帧才写最终文本"，再回调到 50~100ms。
+  /// **只在读不到麦克风占用状态时才会用到**（见下面的「松手才发」一段）：
+  /// 那时退回旧行为——composing 下降沿即视为松手。微信输入法按住说话期间
+  /// composing 始终有效（换气停顿也有效），松手"最终提交"时 composing 变 OFF；
+  /// 实测最终提交时文本已就位、只清 composing 标记，故 0ms 安全：Timer(0) 仍让出
+  /// 当前调用栈，合并同批次内的后续通知。
   ///
-  /// 不适配：搜狗类"句末停顿先提交一句、随后再追加新一段"的输入法。
-  /// 其句间间隔实测 422~1689ms，只能靠秒级观察窗区分停顿与说完，
-  /// 与"松手即发"不可兼得。
+  /// 旧行为的已知缺陷：搜狗类"句末停顿先提交一句、随后再追加新一段"的输入法，
+  /// 句间间隔实测 422~1689ms，会在说话途中被当成"松手"⇒ 一整段被打成碎片。
+  /// 现在由"松手才发"（录音状态判据）解决；只有读不到录音状态的机器仍会这样。
   static const int _voiceCommitDelayMs = 0;
 
 
@@ -41,52 +42,73 @@ class _HomePageState extends State<HomePage>
   late StreamSubscription<void> _sessionUpdatedSub;
   Timer? _debounce;
 
-  // ───── 临时诊断（BT_IME）：判定"输入法中途提交"与"用户松手"能否被分辨 ─────
-  // 背景：讯飞/搜狗这类分段型输入法会在说话途中逐段提交文本（即使手指没离开语音键），
-  // 而我们把"composing 结束"当作"用户松手"⇒ 会误发。要解决就得找到"松手"的影子信号：
-  //   ① 键盘 insets 高度变化（语音面板 ↔ 普通键盘）；② 麦克风占用状态（录音结束＝松手）。
-  // 这里把三样东西打在同一时间轴上（文本长度/composing、insets、录音数），验证完即删。
-  Timer? _diagTimer;
-  int _diagLastInset = -1;
+  // ───── 松手才发：麦克风占用状态才是"用户还在不在说"的可靠信号 ─────
+  // 分段型输入法会在说话途中逐段提交文本（手指没离开语音键也会提交）。若按"composing
+  // 结束"就发送，一整段会被打成碎片。2026-09-23 真机诊断（见 voice_send_policy.dart）
+  // 确认：按住语音键期间麦克风一直被占用，松手那一刻释放 ⇒ 用录音状态当判据。
+  // 读不到麦克风状态（老系统匿名化 / iOS 未实现）⇒ 退回旧行为（composing 结束即发）。
+  Timer? _recPollTimer;
+  bool? _recAvailable; // null = 还没问出来；false = 这台机器读不到 ⇒ 旧行为
+  bool _recording = false;
+  int _lastTextChangeAtMs = 0;
+  /// 本轮文本是否还能触发发送：发过一次就落下，等文本再次变化才重新抬起。
+  /// （否则发送失败后，每 500ms 的轮询会不停重试——旧路径不会有这个问题。）
+  bool _flushArmed = true;
 
-  void _diagStart() {
-    _diagTimer?.cancel();
-    _diagTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
-      unawaited(_diagHeartbeat());
+  void _startRecPolling() {
+    _recPollTimer ??= Timer.periodic(const Duration(milliseconds: 500), (_) {
+      unawaited(_pollRecording());
     });
   }
 
-  /// 相对时间戳（毫秒取后 6 位）：只为在日志里对齐事件，不要求绝对时间
-  int _diagT() => DateTime.now().millisecondsSinceEpoch % 1000000;
-
-  int _diagInsets() {
-    final views = WidgetsBinding.instance.platformDispatcher.views;
-    return views.isEmpty ? 0 : views.first.viewInsets.bottom.toInt();
+  void _stopRecPolling() {
+    _recPollTimer?.cancel();
+    _recPollTimer = null;
   }
 
-  /// 心跳：每 500ms 记一行，给出"文本在长/不在长、面板多高、麦克风是否被占"的连续时间线
-  Future<void> _diagHeartbeat() async {
+  /// 每 500ms 问一次"麦克风是否被占用"；状态一变就记一行，并顺手判定该不该把整段发出去
+  Future<void> _pollRecording() async {
     if (!mounted) return;
-    final v = _inputController.value;
-    final composing = v.composing.isValid && v.composing.start != v.composing.end;
     int? rec;
     try {
       rec = await const MethodChannel('beeptype/device')
           .invokeMethod<int>('getActiveRecordingCount');
     } catch (_) {
-      rec = null; // iOS 或未实现：留空
+      rec = null; // iOS 或未实现
     }
-    debugPrint('BT_IME hb t=${_diagT()} len=${v.text.length} composing=$composing '
-        'insets=${_diagInsets()} rec=$rec');
+    if (!mounted) return;
+    if (rec == null) {
+      if (_recAvailable != false) {
+        _recAvailable = false;
+        debugPrint('BT_VOICE 读不到麦克风占用状态，退回"composing 结束即发"的旧行为');
+      }
+      _stopRecPolling();
+      return;
+    }
+    _recAvailable = true;
+    final was = _recording;
+    _recording = rec > 0;
+    if (was != _recording) {
+      debugPrint('BT_VOICE 录音${_recording ? "开始" : "结束"}（rec=$rec）');
+    }
+    _maybeFlush();
   }
 
-  /// 面板/键盘高度一变就记一行——"松手"最可能在这里留下痕迹
-  @override
-  void didChangeMetrics() {
-    final bottom = _diagInsets();
-    if (bottom != _diagLastInset) {
-      _diagLastInset = bottom;
-      debugPrint('BT_IME metrics t=${_diagT()} insets=$bottom');
+  /// 没在录音 + 有文本 + 安静够久 ⇒ 把输入框里的**整段**一次发出去
+  void _maybeFlush() {
+    if (!_flushArmed) return;
+    if (_status != ConnectionStatus.paired) return;
+    final text = _inputController.value.text;
+    final since = DateTime.now().millisecondsSinceEpoch - _lastTextChangeAtMs;
+    if (shouldFlushOnRecordingEnd(
+      recAvailable: _recAvailable ?? false,
+      recording: _recording,
+      textLength: text.trim().length,
+      sinceLastTextChangeMs: since,
+      quietMs: kRecordingEndQuietMs,
+    )) {
+      _flushArmed = false; // 发过就落下：失败时不自动重试（与旧行为一致）
+      _sendText(text);
     }
   }
   Timer? _reconnectTimer;
@@ -201,7 +223,7 @@ class _HomePageState extends State<HomePage>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _diagStart(); // 临时诊断，验完删（见上方 BT_IME 说明）
+    _startRecPolling(); // "松手才发"的判据：前台期间持续观察麦克风占用状态
     _inputController = TextEditingController();
     _focusNode = FocusNode();
     _inputController.addListener(_onValueChanged);
@@ -249,7 +271,7 @@ class _HomePageState extends State<HomePage>
     _reconnectTimer?.cancel();
     _transientExpiryTimer?.cancel();
     _countdownTimer?.cancel();
-    _diagTimer?.cancel(); // 临时诊断
+    _stopRecPolling();
     _inputController.dispose();
     _focusNode.dispose();
     super.dispose();
@@ -655,15 +677,27 @@ class _HomePageState extends State<HomePage>
       return;
     }
 
+    // 最后一次文本变化的时刻：松手后的静默窗口从这一刻算起
+    _lastTextChangeAtMs = DateTime.now().millisecondsSinceEpoch;
+    _flushArmed = true; // 文本又变了：允许再触发一次发送
+
+    // 能读到麦克风占用状态 ⇒ 走"松手才发"：这里的任何提交都不发，
+    // 由 _pollRecording → _maybeFlush 在录音结束且安静够久后把整段一次发出去。
+    // （这就是"所有输入法行为一致"的关键：中途提交多少次都不影响结果。）
+    if (_recAvailable == true) {
+      _wasComposing = isComposing;
+      _lastText = text;
+      return;
+    }
+
+    // 读不到录音状态（老系统匿名化 / iOS / 还没问出来）⇒ 退回旧行为
     if (isComposing) {
       _debounce?.cancel();
       _wasComposing = true;
     } else if (_wasComposing) {
       _wasComposing = false;
-      debugPrint('BT_IME commit t=${_diagT()} len=${text.length} → 按 composing 结束发送');
       _scheduleVoiceCommitSend();
     } else if (text != _lastText) {
-      debugPrint('BT_IME textChanged t=${_diagT()} len=${text.length} → 按文本变化发送');
       _scheduleSend(text);
     }
 
@@ -690,7 +724,7 @@ class _HomePageState extends State<HomePage>
     if (_sending) return;
     final trimmed = text.trim();
     if (trimmed.isEmpty) return;
-    debugPrint('BT_IME send t=${_diagT()} len=${trimmed.length}'); // 临时诊断
+    debugPrint('BT_VOICE 发送 len=${trimmed.length}');
     setState(() => _sending = true);
 
     try {
