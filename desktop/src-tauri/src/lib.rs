@@ -1,5 +1,4 @@
 mod clipboard;
-mod clipboard_x11;
 mod config;
 mod discovery;
 mod paste;

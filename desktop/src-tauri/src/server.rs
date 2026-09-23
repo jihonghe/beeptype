@@ -1202,19 +1202,9 @@ impl<R: Runtime> ServerState<R> {
         }
 
         let recv_ms = now_ms();
-        // 本轮会不会真的发粘贴键：写剪贴板时要用它决定是否接管 X11 剪贴板
-        // （自动粘贴开着时才能"在粘贴之前拒绝读取"，把内容挡在剪贴板历史之外）
-        let enabled = self.auto_paste.load(Ordering::Relaxed);
-        let own_window_focused = self
-            .app_handle
-            .get_webview_window("main")
-            .map(|w| w.is_focused().unwrap_or(false))
-            .unwrap_or(false);
-        let will_paste = enabled && crate::paste::auto_paste_supported() && !own_window_focused;
-
         // 写入 + 读回校验：把"另一个进程夺走剪贴板""写入被静默丢弃"这类
         // 机器差异变成可观测的结果，而不是假定成功（见 clipboard.rs）
-        if !crate::clipboard::write_verified(&self.app_handle, &text, will_paste) {
+        if !crate::clipboard::write_verified(&self.app_handle, &text) {
             let _ = self
                 .app_handle
                 .notification()
@@ -1236,10 +1226,13 @@ impl<R: Runtime> ServerState<R> {
         // 2. 当前平台支持全局按键模拟（X11/Windows/macOS；Wayland 回退纯剪贴板）；
         // 3. BeepType 自己的窗口没有焦点，避免文字糊进配对/状态窗口。
         let mut pasted = false;
-        if will_paste {
-            // 接管过 X11 剪贴板的话，此刻放行读取：目标应用拿得到、用户手动 Ctrl+V 也照旧可用。
-            // 放在发键之前（目标应用要等收到按键才会来要数据）。
-            crate::clipboard_x11::allow_reads();
+        let enabled = self.auto_paste.load(Ordering::Relaxed);
+        let own_window_focused = self
+            .app_handle
+            .get_webview_window("main")
+            .map(|w| w.is_focused().unwrap_or(false))
+            .unwrap_or(false);
+        if enabled && crate::paste::auto_paste_supported() && !own_window_focused {
             // 注入前记下焦点窗口：回车前复核它没变，否则回车会落到用户刚切过去的
             // 窗口里（这条检查是"给足回车余量"的前提，见 docs/TECH_DESIGN.md 第 10 节）
             let focus_before = crate::paste::focused_window_id();
