@@ -190,7 +190,7 @@
 
    - **补一档（2026-09-23 另一会话核实）：敏感标记法**——仍是剪贴板路线，但写入时**附带"机密"标记**，让系统与主流剪贴板管理器**不记录、不同步**：Windows 有三个官方格式（`ExcludeClipboardContentFromMonitorProcessing`、`CanIncludeInClipboardHistory=0`、`CanUploadToCloudClipboard=0`，见[微软文档](https://learn.microsoft.com/en-us/windows/win32/dataxchg/clipboard-formats#cloud-clipboard-and-clipboard-history-formats)；密码管理器与 Chrome 无痕模式都这么做）、macOS 有 `org.nspasteboard.ConcealedType`、X11 有 `x-kde-passwordManagerHint=secret`（Klipper 认）。**它正好把上面 B 档"挡不住剪贴板管理器 / 历史"这条补齐**（Windows/macOS 上），而且**保持剪贴板的全速与可靠、永不丢内容**（内容仍在"当前剪贴板"里，用户随时能 Ctrl+V）；**与瞬态剪贴板叠加**＝连"下一个用这台电脑的人"也挡住。⇒ 于是选择可以更简单：**标记法（覆盖历史与云同步）+ 瞬态/只服务一次（覆盖"当前剪贴板"）**，注入模式留给真正要"防取证"的场景。
      - ⚠️ **命名冲突**：本会话先前讨论的"A 档"指的是**标记法**，与本文档此处 A/B/C（注入 / 瞬态 / X11 零足迹）**不是同一套**。后续统一叫 **「标记法」「瞬态剪贴板」「注入模式」**，不再用字母档。
-     - 三平台改法、代码量、Linux 探针与实施顺序，已单独记入记忆 `beetype-traceless-clipboard-plan`。
+     - 三平台改法、代码量、Linux 探针与实施顺序，已单独记入工作区记忆（本机私有，不进仓库）。
 
 已完成（留在路线图上作记录）：GitHub Release 自动构建（CI）。
 
