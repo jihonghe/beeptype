@@ -1,6 +1,7 @@
 mod clipboard;
 mod config;
 mod discovery;
+mod image_receiver;
 mod paste;
 mod protocol;
 mod server;

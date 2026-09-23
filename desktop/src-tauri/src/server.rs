@@ -11,6 +11,7 @@ use std::thread;
 use std::time::Instant;
 use tauri::menu::MenuItem;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_notification::NotificationExt;
 
 /// 连接超时参数
@@ -160,6 +161,8 @@ struct ConnCtx {
     peer_ip: Option<IpAddr>,
     /// hello 里上报的硬件指纹
     hardware_id: Option<String>,
+    /// 图片分块接收状态（每个连接一个；连接断开即随 ctx 一起丢弃）
+    image: crate::image_receiver::ImageReceiver,
 }
 
 impl Default for ConnCtx {
@@ -177,6 +180,7 @@ impl Default for ConnCtx {
             writer: None,
             peer_ip: None,
             hardware_id: None,
+            image: crate::image_receiver::ImageReceiver::new(),
         }
     }
 }
@@ -725,6 +729,59 @@ impl<R: Runtime> ServerState<R> {
                 auto_send,
             } => self.handle_set_prefs(ctx, auto_paste, auto_send),
 
+            // ── 图片：分块收齐后解码 → 写剪贴板 → 自动粘贴（**不回车**，见 handle_image）
+            Message::ImageBegin {
+                id,
+                mime,
+                total_bytes,
+                chunks,
+            } => {
+                if let Some(reply) = self.image_guard(ctx, peer_ip, &id) {
+                    return Some(reply);
+                }
+                ctx.last_active = Instant::now();
+                match ctx.image.begin(&id, &mime, total_bytes, chunks) {
+                    crate::image_receiver::ImageProgress::Continue => None,
+                    crate::image_receiver::ImageProgress::Failed { id, code, message } => {
+                        warn!("image_begin rejected: {message}");
+                        Some(self.image_ack_fail(id, code))
+                    }
+                    crate::image_receiver::ImageProgress::Complete { .. } => None,
+                }
+            }
+
+            Message::ImageChunk { id, seq, data } => {
+                if !ctx.authed || ctx.waiting_takeover {
+                    return None; // 数据块不回话，静默丢弃（真正的结果由 image_end 的 ack 给）
+                }
+                ctx.last_active = Instant::now();
+                match ctx.image.chunk(&id, seq, &data) {
+                    crate::image_receiver::ImageProgress::Continue => None,
+                    crate::image_receiver::ImageProgress::Failed { id, code, message } => {
+                        warn!("image_chunk rejected: {message}");
+                        Some(self.image_ack_fail(id, code))
+                    }
+                    crate::image_receiver::ImageProgress::Complete { .. } => None,
+                }
+            }
+
+            Message::ImageEnd { id } => {
+                if let Some(reply) = self.image_guard(ctx, peer_ip, &id) {
+                    return Some(reply);
+                }
+                ctx.last_active = Instant::now();
+                match ctx.image.end(&id) {
+                    crate::image_receiver::ImageProgress::Complete { id, mime, bytes } => {
+                        self.handle_image(id, mime, bytes)
+                    }
+                    crate::image_receiver::ImageProgress::Failed { id, code, message } => {
+                        warn!("image_end rejected: {message}");
+                        Some(self.image_ack_fail(id, code))
+                    }
+                    crate::image_receiver::ImageProgress::Continue => None,
+                }
+            }
+
             Message::Text { id, text, ts: _ } => {
                 // 必须是席位持有者；等待接管/未认证连接一律拒绝
                 let is_holder = self.is_session_holder(ctx);
@@ -831,6 +888,7 @@ impl<R: Runtime> ServerState<R> {
 
         let caps = Capabilities {
             auto_paste: self.auto_paste.load(Ordering::Relaxed),
+            image: true,
         };
         let device_name = if device_name.trim().is_empty() {
             "手机".to_string()
@@ -1112,6 +1170,7 @@ impl<R: Runtime> ServerState<R> {
         let (device_id, pc_name) = self.device_identity();
         let caps = Capabilities {
             auto_paste: self.auto_paste.load(Ordering::Relaxed),
+            image: true,
         };
         let delivered = writer
             .as_ref()
@@ -1188,6 +1247,84 @@ impl<R: Runtime> ServerState<R> {
     }
 
     /// 文本入剪贴板 + 自动粘贴（认证通过后调用）
+    /// 图片消息的准入判定：与文本一致，必须是席位持有者（等待接管 / 未认证一律拒）
+    fn image_guard(&self, ctx: &ConnCtx, peer_ip: IpAddr, id: &str) -> Option<Message> {
+        let is_holder = self.is_session_holder(ctx);
+        if !ctx.authed || ctx.waiting_takeover || !is_holder {
+            warn!("Image message from non-session connection {peer_ip}");
+            return Some(self.image_ack_fail(id.to_string(), "not_connected"));
+        }
+        // 临时设备仍在活跃：续连窗口往后推（与文本同一条待遇）
+        if !ctx.identity.load(Ordering::SeqCst) {
+            self.touch_transient_resume(&ctx.client_id);
+        }
+        None
+    }
+
+    fn image_ack_fail(&self, id: String, code: &str) -> Message {
+        Message::Ack {
+            id,
+            ok: false,
+            code: Some(code.to_string()),
+            pasted: false,
+            srv_recv_ms: now_ms(),
+        }
+    }
+
+    /// 收到完整图片：解码 → 写系统剪贴板 → 自动粘贴。
+    ///
+    /// **刻意不自动回车**：贴完图通常还要配文字，自动回车会立刻把消息发出去。
+    /// 文本那条链路（`handle_text`）的可选回车不适用于图片。
+    fn handle_image(&self, id: String, mime: String, bytes: Vec<u8>) -> Option<Message> {
+        let recv_ms = now_ms();
+        let img = match image::load_from_memory(&bytes) {
+            Ok(i) => i,
+            Err(e) => {
+                warn!("Image decode failed ({mime}, {} bytes): {e}", bytes.len());
+                return Some(self.image_ack_fail(id, "image_decode_error"));
+            }
+        };
+        let (w, h) = (img.width(), img.height());
+        if w == 0 || h == 0 || (w as u64) * (h as u64) > crate::image_receiver::MAX_DECODED_PIXELS {
+            warn!("Image dimensions rejected: {w}x{h}");
+            return Some(self.image_ack_fail(id, "image_too_large"));
+        }
+        let rgba = img.to_rgba8();
+        let (rw, rh) = rgba.dimensions();
+        let image = tauri::image::Image::new_owned(rgba.into_raw(), rw, rh);
+        if let Err(e) = self.app_handle.clipboard().write_image(&image) {
+            warn!("Clipboard image write failed: {e}");
+            return Some(self.image_ack_fail(id, "clipboard_error"));
+        }
+
+        // 自动粘贴：与文本同样的三个条件（开关开、平台支持、我们自己的窗口没有焦点）。
+        // 这里不再走 will_paste 那套剪贴板接管逻辑——图片路径只注入 Ctrl+V。
+        let enabled = self.auto_paste.load(Ordering::Relaxed);
+        let own_window_focused = self
+            .app_handle
+            .get_webview_window("main")
+            .map(|w| w.is_focused().unwrap_or(false))
+            .unwrap_or(false);
+        let mut pasted = false;
+        if enabled && crate::paste::auto_paste_supported() && !own_window_focused {
+            match crate::paste::simulate_paste() {
+                Ok(_) => pasted = true,
+                Err(e) => warn!("Image auto-paste failed: {e}"),
+            }
+        }
+        info!(
+            "Image received: {w}x{h} ({} bytes, {mime}) pasted={pasted}",
+            bytes.len()
+        );
+        Some(Message::Ack {
+            id,
+            ok: true,
+            code: None,
+            pasted,
+            srv_recv_ms: recv_ms,
+        })
+    }
+
     fn handle_text(&self, id: String, text: String) -> Option<Message> {
         // 空文本直接拒绝，避免覆盖剪贴板
         if text.trim().is_empty() {
@@ -1420,6 +1557,22 @@ fn handle_connection<R: Runtime>(stream: TcpStream, state: ServerState<R>) {
                     if ctx.authed && ctx.last_active.elapsed().as_secs() > HEARTBEAT_TIMEOUT_SECS {
                         warn!("Heartbeat timeout from {}", peer);
                         break 'conn;
+                    }
+                    // 图片收了一半没下文：超时丢弃，并告知手机端（否则手机端只能干等）
+                    if let Some(crate::image_receiver::ImageProgress::Failed { id, code, message }) =
+                        ctx.image.tick()
+                    {
+                        warn!("image receive timeout: {message}");
+                        let reply = Message::Ack {
+                            id,
+                            ok: false,
+                            code: Some(code.to_string()),
+                            pasted: false,
+                            srv_recv_ms: now_ms(),
+                        };
+                        if !send(&writer, &reply) {
+                            break 'conn;
+                        }
                     }
                 // 未认证连接空转等待，由 TCP keepalive 与对端关闭负责
                 } else {

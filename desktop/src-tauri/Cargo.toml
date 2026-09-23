@@ -27,6 +27,7 @@ sha2 = "0.10"
 log = "0.4"
 env_logger = "0.11"
 enigo = "0.6.1"
+base64 = "0.22"
 x11rb = "0.13"
 
 [target.'cfg(unix)'.dependencies]

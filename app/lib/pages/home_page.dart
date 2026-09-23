@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'dart:async';
+import '../services/image_send.dart';
 import '../services/lan_check.dart';
 import '../services/retry_episode.dart';
 import '../services/retry_policy.dart';
@@ -121,6 +123,13 @@ class _HomePageState extends State<HomePage>
   Timer? _reconnectTimer;
   ConnectionStatus _status = ConnectionStatus.disconnected;
   bool _sending = false;
+  /// 正在选图/发图（按钮转圈、防重复点击）
+  bool _pickingImage = false;
+
+  /// 当前连接是否支持发图片：电脑端在 hello_ack 的 caps 里声明。
+  /// 旧电脑没有这个位 ⇒ 手机上干脆不显示图片入口（不需要为它做兼容逻辑）。
+  bool get _imageSupported =>
+      widget.sender.session?.capabilities['image'] == true;
   bool _hasText = false;
 
   /// 是否正处在一次主动连接尝试中（合并事件回调与收尾逻辑，避免双重排程）
@@ -729,6 +738,48 @@ class _HomePageState extends State<HomePage>
     });
   }
 
+  /// 选图并发送（可多选，逐张串行发；每张到电脑后自动粘贴）。
+  ///
+  /// 统一压到 2560px / q92：系统会重编码成 JPEG ⇒ 一举解决三件事——
+  /// ① HEIC/WebP 这类电脑端解不开的格式 ② 体积（照片通常 <1MB）③ 8MB 上限几乎不触发。
+  Future<void> _pickAndSendImage() async {
+    if (_pickingImage) return;
+    setState(() => _pickingImage = true);
+    try {
+      final files = await ImagePicker()
+          .pickMultiImage(maxWidth: 2560, imageQuality: 92);
+      if (files.isEmpty) return;
+
+      var sent = 0;
+      String? failed;
+      for (var i = 0; i < files.length; i++) {
+        final file = files[i];
+        if (!mounted) return;
+        final bytes = await file.readAsBytes();
+        if (imageTooLarge(bytes.length)) {
+          failed = '第 ${i + 1} 张超过 8MB';
+          break;
+        }
+        final ack = await widget.sender.tcp.sendImage(
+          mime: imageMimeForPath(file.path),
+          bytes: bytes,
+        );
+        if (!ack.ok) {
+          failed = '第 ${i + 1} 张失败';
+          break;
+        }
+        sent++;
+      }
+      if (failed != null) {
+        _showSnack(sent > 0 ? '已发送 $sent 张，$failed' : '图片发送失败（$failed）');
+      }
+    } catch (e) {
+      _showSnack('选择图片失败：$e');
+    } finally {
+      if (mounted) setState(() => _pickingImage = false);
+    }
+  }
+
   Future<void> _sendText(String text) async {
     if (_sending) return;
     final trimmed = text.trim();
@@ -1026,6 +1077,18 @@ class _HomePageState extends State<HomePage>
             ),
             Row(
               children: [
+                if (enabled && _imageSupported)
+                  IconButton(
+                    onPressed: _pickingImage ? null : _pickAndSendImage,
+                    tooltip: '发送图片（支持粘贴图片的输入框里会自动贴出来）',
+                    icon: _pickingImage
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2.5),
+                          )
+                        : const Icon(Icons.image_outlined, size: 22),
+                  ),
                 const Spacer(),
                 if (_sending)
                   const Padding(

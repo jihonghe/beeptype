@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 
+import 'image_send.dart';
+
 /// TCP 消息（行分隔 JSON）
 class TcpMessage {
   final String type;
@@ -403,6 +405,50 @@ class TcpService {
   }
 
   /// 发送文字（必须已持席）
+  /// 发送一张图片（分块 base64，协议见 docs/TECH_DESIGN.md）。
+  ///
+  /// 与文本共用同一套 ack 机制（按 id 配对）。分块大小/上限见 `image_send.dart`。
+  Future<AckResult> sendImage({required String mime, required List<int> bytes}) async {
+    if (!_isConnected || !_isPaired) {
+      return AckResult(ok: false, code: 'not_connected', pasted: false, srvRecvMs: 0);
+    }
+    if (imageTooLarge(bytes.length)) {
+      return AckResult(ok: false, code: 'image_too_large', pasted: false, srvRecvMs: 0);
+    }
+
+    final id = '${DateTime.now().millisecondsSinceEpoch}-${_randomHex(4)}';
+    final completer = Completer<AckResult>();
+    _textCompleters[id] = completer; // 复用同一个 ack 配对表
+
+    final chunks = chunkImageBase64(bytes);
+    _send(TcpMessage('image_begin', {
+      'id': id,
+      'mime': mime,
+      'total_bytes': bytes.length,
+      'chunks': chunks.length,
+    }));
+    for (var seq = 0; seq < chunks.length; seq++) {
+      // 电脑端可能在 image_begin 就拒了（格式/大小/权限）：那就别再发块，省流量也省时间
+      if (completer.isCompleted) break;
+      _send(TcpMessage('image_chunk', {'id': id, 'seq': seq, 'data': chunks[seq]}));
+      if (seq % 8 == 7) {
+        // 偶尔让出事件循环：失败 ack 才来得及被处理，从而中断后续分块
+        await Future<void>.delayed(Duration.zero);
+      }
+    }
+    if (!completer.isCompleted) {
+      _send(TcpMessage('image_end', {'id': id}));
+    }
+
+    return completer.future.timeout(
+      const Duration(seconds: 30),
+      onTimeout: () {
+        _textCompleters.remove(id);
+        return AckResult(ok: false, code: 'timeout', pasted: false, srvRecvMs: 0);
+      },
+    );
+  }
+
   Future<AckResult> sendText(String text) async {
     if (!_isConnected || !_isPaired) {
       return AckResult(

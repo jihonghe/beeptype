@@ -15,6 +15,7 @@ dependencies:
   connectivity_plus: ^6.0.0
   network_info_plus: ^5.0.0
   crypto: ^3.0.3
+  image_picker: ^1.0.0
 
 dev_dependencies:
   flutter_test:

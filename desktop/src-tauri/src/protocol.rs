@@ -9,6 +9,9 @@ pub const MAX_LINE_BYTES: usize = 256 * 1024;
 pub struct Capabilities {
     #[serde(default)]
     pub auto_paste: bool,
+    /// 是否支持接收图片（见了这个位，手机端才显示图片入口）。旧电脑缺省为 false。
+    #[serde(default)]
+    pub image: bool,
 }
 
 /// 消息类型
@@ -94,6 +97,31 @@ pub enum Message {
         pasted: bool,
         srv_recv_ms: u64,
     },
+
+    /// 手机端 → PC：开始发送一张图片。
+    ///
+    /// 图片不走 base64 塞进一条消息（会爆单行上限、内存翻倍），而是分块发：
+    /// `image_begin` 报元信息 → 若干 `image_chunk` → `image_end` 收尾。
+    #[serde(rename = "image_begin")]
+    ImageBegin {
+        id: String,
+        /// 只接受白名单里的类型（image/jpeg、image/png）
+        mime: String,
+        total_bytes: u64,
+        chunks: u32,
+    },
+
+    /// 手机端 → PC：图片数据块（base64，每块解码后约 135KB，加密后仍远小于单行上限）
+    #[serde(rename = "image_chunk")]
+    ImageChunk {
+        id: String,
+        seq: u32,
+        data: String,
+    },
+
+    /// 手机端 → PC：图片发送完毕。PC 校验完整后解码、写剪贴板、自动粘贴，并回 `ack`
+    #[serde(rename = "image_end")]
+    ImageEnd { id: String },
 
     /// 手机端 → PC：心跳
     #[serde(rename = "ping")]
@@ -480,7 +508,7 @@ mod tests {
             "pc",
             Some("tok".to_string()),
             None,
-            Capabilities { auto_paste: true },
+            Capabilities { auto_paste: true, image: true },
         );
         let json = ok.encode().unwrap();
         assert!(json.contains("\"session\":\"primary\""));
@@ -509,7 +537,7 @@ mod tests {
                 "primary-token",
                 "dev-1",
                 "hejiong-PC",
-                Capabilities { auto_paste: true },
+                Capabilities { auto_paste: true, image: true },
             ),
             Message::PromotedAck,
         ] {
@@ -560,7 +588,7 @@ mod tests {
             "pc",
             None,
             None,
-            Capabilities { auto_paste: true },
+            Capabilities { auto_paste: true, image: true },
         )
         .with_resume_expires_in(300);
         let json = ack.encode().unwrap();
