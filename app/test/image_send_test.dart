@@ -36,6 +36,12 @@ void main() {
     expect(imageTooLarge(kMaxImageBytes + 1), isTrue);
   });
 
+  test('只要有文字或待发图片，"发送"按钮就该在', () {
+    expect(hasSomethingToSend(hasText: true, pendingImages: 0), isTrue);
+    expect(hasSomethingToSend(hasText: false, pendingImages: 2), isTrue);
+    expect(hasSomethingToSend(hasText: false, pendingImages: 0), isFalse);
+  });
+
   test('MIME：jpg/jpeg/其他都按 jpeg 报，png 才报 png', () {
     expect(imageMimeForPath('/tmp/x.jpg'), 'image/jpeg');
     expect(imageMimeForPath('/tmp/X.JPEG'), 'image/jpeg');

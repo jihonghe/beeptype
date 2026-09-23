@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'dart:async';
+import 'dart:io';
 import '../services/image_send.dart';
 import '../services/lan_check.dart';
 import '../services/retry_episode.dart';
@@ -125,6 +126,8 @@ class _HomePageState extends State<HomePage>
   bool _sending = false;
   /// 正在选图/发图（按钮转圈、防重复点击）
   bool _pickingImage = false;
+  /// 已选好、还没发出去的图片（"先选后发"：等文字一起发，见 _flushPendingImages）
+  final List<XFile> _pendingImages = [];
 
   /// 当前连接是否支持发图片：电脑端在 hello_ack 的 caps 里声明。
   /// 旧电脑没有这个位 ⇒ 手机上干脆不显示图片入口（不需要为它做兼容逻辑）。
@@ -738,41 +741,32 @@ class _HomePageState extends State<HomePage>
     });
   }
 
-  /// 选图并发送（可多选，逐张串行发；每张到电脑后自动粘贴）。
+  /// 选图 → 放进"待发"列表（**不立即发送**）。
   ///
-  /// 统一压到 2560px / q92：系统会重编码成 JPEG ⇒ 一举解决三件事——
-  /// ① HEIC/WebP 这类电脑端解不开的格式 ② 体积（照片通常 <1MB）③ 8MB 上限几乎不触发。
-  Future<void> _pickAndSendImage() async {
+  /// 发送时机与文本一致：点右下角发送键，或说完话自动发（见 _sendText）。
+  /// 可以反复点「+」继续加，也可以逐张叉掉。
+  Future<void> _pickImages() async {
     if (_pickingImage) return;
     setState(() => _pickingImage = true);
     try {
+      // 统一压到 2560px / q92：系统会重编码成 JPEG ⇒ ① HEIC/WebP 这类电脑端解不开的
+      // 格式 ② 体积（照片通常 <1MB）③ 8MB 上限几乎不触发
       final files = await ImagePicker()
           .pickMultiImage(maxWidth: 2560, imageQuality: 92);
-      if (files.isEmpty) return;
-
-      var sent = 0;
-      String? failed;
+      if (files.isEmpty || !mounted) return;
+      final rejected = <int>[];
       for (var i = 0; i < files.length; i++) {
-        final file = files[i];
-        if (!mounted) return;
-        final bytes = await file.readAsBytes();
-        if (imageTooLarge(bytes.length)) {
-          failed = '第 ${i + 1} 张超过 8MB';
-          break;
+        final size = await files[i].length();
+        if (imageTooLarge(size)) {
+          rejected.add(i + 1);
+        } else {
+          _pendingImages.add(files[i]);
         }
-        final ack = await widget.sender.tcp.sendImage(
-          mime: imageMimeForPath(file.path),
-          bytes: bytes,
-        );
-        if (!ack.ok) {
-          failed = '第 ${i + 1} 张失败';
-          break;
-        }
-        sent++;
       }
-      if (failed != null) {
-        _showSnack(sent > 0 ? '已发送 $sent 张，$failed' : '图片发送失败（$failed）');
+      if (rejected.isNotEmpty) {
+        _showSnack('第 ${rejected.join("、")} 张超过 8MB，已跳过');
       }
+      setState(() {});
     } catch (e) {
       _showSnack('选择图片失败：$e');
     } finally {
@@ -780,9 +774,41 @@ class _HomePageState extends State<HomePage>
     }
   }
 
+  /// 把待发图片逐张发出去（**先图后文**：图片先落到光标处不回车，随后文字再贴 + 回车，
+  /// 这样它们最终落在同一条消息里）。失败的那张留在列表里，用户可再点发送重试。
+  Future<void> _flushPendingImages() async {
+    while (_pendingImages.isNotEmpty) {
+      final file = _pendingImages.first;
+      if (!mounted) return;
+      final bytes = await file.readAsBytes();
+      final ack = await widget.sender.tcp.sendImage(
+        mime: imageMimeForPath(file.path),
+        bytes: bytes,
+      );
+      if (!ack.ok) {
+        _showSnack(_pendingImages.length > 1
+            ? '图片发送失败（还剩 ${_pendingImages.length} 张），可再点发送重试'
+            : '图片发送失败，可再点发送重试');
+        return;
+      }
+      _pendingImages.removeAt(0);
+      if (mounted) setState(() {});
+    }
+  }
+
   Future<void> _sendText(String text) async {
     if (_sending) return;
     final trimmed = text.trim();
+    // 先图后文：图片先贴（不回车），文字随后（必要时回车）⇒ 落在同一条消息里
+    if (_pendingImages.isNotEmpty) {
+      setState(() => _sending = true);
+      try {
+        await _flushPendingImages();
+      } finally {
+        if (mounted) setState(() => _sending = false);
+      }
+      if (!mounted) return;
+    }
     if (trimmed.isEmpty) return;
     setState(() => _sending = true);
 
@@ -1075,12 +1101,65 @@ class _HomePageState extends State<HomePage>
                 ),
               ),
             ),
+            // 待发图片：缩略图 + 每张一个叉（后悔用）+ 末尾一个「+」继续添加
+            if (_pendingImages.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: SizedBox(
+                  height: 64,
+                  child: ListView.separated(
+                    scrollDirection: Axis.horizontal,
+                    itemCount: _pendingImages.length + 1,
+                    separatorBuilder: (_, __) => const SizedBox(width: 10),
+                    itemBuilder: (context, i) {
+                      if (i == _pendingImages.length) {
+                        return IconButton.outlined(
+                          onPressed: _pickingImage ? null : _pickImages,
+                          tooltip: '继续添加图片',
+                          icon: const Icon(Icons.add_photo_alternate_outlined,
+                              size: 20),
+                        );
+                      }
+                      return Stack(
+                        clipBehavior: Clip.none,
+                        children: [
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: Image.file(
+                              File(_pendingImages[i].path),
+                              width: 64,
+                              height: 64,
+                              fit: BoxFit.cover,
+                              errorBuilder: (_, __, ___) => const SizedBox(
+                                width: 64,
+                                height: 64,
+                                child: Icon(Icons.broken_image_outlined),
+                              ),
+                            ),
+                          ),
+                          Positioned(
+                            top: -8,
+                            right: -8,
+                            child: IconButton(
+                              visualDensity: VisualDensity.compact,
+                              tooltip: '移掉这张',
+                              onPressed: () =>
+                                  setState(() => _pendingImages.removeAt(i)),
+                              icon: const Icon(Icons.cancel, size: 18),
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                ),
+              ),
             Row(
               children: [
                 if (enabled && _imageSupported)
                   IconButton(
-                    onPressed: _pickingImage ? null : _pickAndSendImage,
-                    tooltip: '发送图片（支持粘贴图片的输入框里会自动贴出来）',
+                    onPressed: _pickingImage ? null : _pickImages,
+                    tooltip: '添加图片（选好后和文字一起发送）',
                     icon: _pickingImage
                         ? const SizedBox(
                             width: 20,
@@ -1099,11 +1178,15 @@ class _HomePageState extends State<HomePage>
                       child: CircularProgressIndicator(strokeWidth: 2.5),
                     ),
                   )
-                else if (enabled && _hasText)
+                else if (enabled &&
+                    hasSomethingToSend(
+                      hasText: _hasText,
+                      pendingImages: _pendingImages.length,
+                    ))
                   IconButton.filled(
                     onPressed: () =>
                         _sendText(_inputController.value.text),
-                    tooltip: '发送（正常松手即自动发送，此处为兜底）',
+                    tooltip: '发送（图片与文字一起发出；正常松手即自动发送，此处为兜底）',
                     icon: const Icon(Icons.send_rounded, size: 20),
                   ),
               ],

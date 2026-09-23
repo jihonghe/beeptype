@@ -33,3 +33,8 @@ String imageMimeForPath(String path) {
   if (p.endsWith('.png')) return 'image/png';
   return 'image/jpeg';
 }
+
+/// 有没有东西可发（用于决定"发送"按钮是否出现）：
+/// 有文字，或攒着待发的图片，都算。
+bool hasSomethingToSend({required bool hasText, required int pendingImages}) =>
+    hasText || pendingImages > 0;
