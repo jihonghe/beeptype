@@ -113,5 +113,4 @@
 - [enigo](https://github.com/pasce/enigo) — Rust 跨平台键盘模拟
 - [Flutter](https://flutter.dev) — 手机端
 - [Tauri](https://tauri.app) — 桌面端
-- **ZCode** — AI 编程助手：本项目的开发全程与它协作完成
 - **DeepSeek-V4.1 flash** — 开发所用的模型
