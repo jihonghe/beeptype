@@ -444,7 +444,7 @@ TCP 长连接，UTF-8，每条消息一行 JSON 以 `\n` 结尾，单行上限 2
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `ok` | bool | 是否成功 |
-| `status` | string | `ok` / `occupied` / `bad_code` / `unauthorized` / `cooldown` |
+| `status` | string | `ok` / `occupied` / `bad_code` / `unauthorized`（**限流已于 v0.3.0 移除**） |
 | `error` | string? | 人话错误描述（如「尝试过于频繁，请 60 秒后再试」） |
 | `session` | string? | `primary` / `transient`（仅成功时出现） |
 | `device_id` / `device_name` / `device_type` | string? | PC 身份，`device_type` 固定 `pc` |
@@ -548,8 +548,8 @@ app/assets/app_icon.png            # 关于页的品牌图标，由 scripts/buil
 - **续连兜底**：临时设备续连时，直连失败就广播找一次（发现服务认得窗口期内的续连凭证），找到新 IP 再连——临时设备因此也能挺过电脑换 IP。
 - **旧记录不再挡路**：常用记录网络层不可达、广播也没人应时，若还留着一条**同一台电脑**的有效临时续连记录，就改走它（"解绑后用临时设备身份重连过"就会留下这种组合，旧实现会一直死磕失效的常用记录）。
 
-凭证是否该删只认"电脑**明确拒绝**"（`unauthorized`）：被限流（`cooldown`）不算——那只是
-"尝试太频繁，等 60 秒再来"，删绑定等于"一次限流换一台好设备重扫"。
+凭证是否该删只认"电脑**明确拒绝**"（`unauthorized`）：其他失败（网络层失败、超时）一律不算
+——那可能只是"电脑暂时不在"，删绑定等于"一次网络抖动换一台好设备重扫"（**限流机制已于 v0.3.0 整体移除**）。
 
 `autoConnect()`（打开 APP 的默认路径）：
 

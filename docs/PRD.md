@@ -1203,7 +1203,7 @@ JSON 行协议：每条消息一行 UTF-8 JSON，以 `\n` 结尾，单行上限 
 - `id`：手机生成的消息 id，用于 text/ack 配对
 - `ts`：毫秒时间戳；`srv_recv_ms`：PC 收到该消息的时刻（供端到端延迟统计）
 - `ack.code` 取值：`not_connected` / `empty_text` / `clipboard_error`
-- `hello_ack.status` 取值：`ok` / `occupied` / `bad_code` / `unauthorized` / `cooldown`
+- `hello_ack.status` 取值：`ok` / `occupied` / `bad_code` / `unauthorized`（**限流已于 v0.3.0 移除**，不再有 `cooldown`）
 - 兼容性：`hello`/`hello_ack` 的新字段全部可选，旧客户端缺字段也能解析；非法 JSON 只记日志，不断连接
 
 ### 7.5 配对码与 token 安全设计
