@@ -1104,31 +1104,28 @@ class _HomePageState extends State<HomePage>
             ),
             // 待发图片区：细分隔线把"这些图属于这条消息"划出来；出现/消失带展开动效；
             // 末尾那个「添加图片」就是空态底行同一个组件（同一个视觉，用户一眼认得出）
-            AnimatedSize(
-              duration: const Duration(milliseconds: 120),
-              curve: Curves.easeOut,
-              alignment: Alignment.topCenter,
-              child: _pendingImages.isEmpty
-                  ? const SizedBox(width: double.infinity)
-                  : Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        Padding(
-                          padding: const EdgeInsets.only(top: 8),
-                          child: Divider(height: 1, color: scheme.outlineVariant),
-                        ),
-                        Padding(
-                          padding: const EdgeInsets.only(top: 10),
-                          child: PendingImageStrip(
-                            files: _pendingImages,
-                            onAdd: _pickingImage ? null : _pickImages,
-                            onRemove: (i) =>
-                                setState(() => _pendingImages.removeAt(i)),
-                          ),
-                        ),
-                      ],
+            // 注意：这里**刻意不用 AnimatedSize**——它在展开动画期间会给子项一个
+            // 从小到大的紧约束，横向 ListView 会被压扁一瞬（真机上看就是"缩略图变细缝"）。
+            // 观感让位给正确：直接出现/消失。
+            if (_pendingImages.isNotEmpty)
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Divider(height: 1, color: scheme.outlineVariant),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 10),
+                    child: PendingImageStrip(
+                      files: _pendingImages,
+                      onAdd: _pickingImage ? null : _pickImages,
+                      onRemove: (i) =>
+                          setState(() => _pendingImages.removeAt(i)),
                     ),
-            ),
+                  ),
+                ],
+              ),
             Row(
               children: [
                 // 待发状态下这个入口交给缩略图条末尾那个（同一个组件、同一个视觉）：

@@ -39,13 +39,13 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
-    // 关键断言：缩略图不是细缝
-    final images = find.byType(Image);
-    expect(images, findsNWidgets(2));
+    // 关键断言：缩略图不是细缝（瓷砖必须占满 thumbSize）
+    expect(find.byType(Image), findsNWidgets(2));
     for (var i = 0; i < 2; i++) {
-      final size = tester.getSize(images.at(i));
-      expect(size.width, moreOrLessEquals(PendingImageStrip.thumbSize));
-      expect(size.height, moreOrLessEquals(PendingImageStrip.thumbSize));
+      final tile = tester.getSize(find.byKey(ValueKey('pending-thumb-$i')));
+      expect(tile.width, moreOrLessEquals(PendingImageStrip.thumbSize));
+      expect(tile.height, moreOrLessEquals(PendingImageStrip.thumbSize),
+          reason: '缩略图被压扁过（真机上表现为两条细缝）');
     }
 
     // 两个「×」都在，点了能回调到对应的下标
@@ -87,5 +87,38 @@ void main() {
       home: Scaffold(body: PendingImageStrip(files: const [], onRemove: (_) {})),
     ));
     expect(tester.getSize(find.byType(PendingImageStrip)).height, 0);
+  });
+
+  testWidgets('在真实父容器（Column stretch + 分隔线）里也不塌', (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const SizedBox(height: 120), // 模拟上方文字区
+            Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Divider(height: 1),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 10),
+                    child: PendingImageStrip(
+                      files: [makePng('a'), makePng('b')],
+                      onRemove: (_) {},
+                    ),
+                  ),
+                ],
+            ),
+          ],
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    final tile = tester.getSize(find.byKey(const ValueKey('pending-thumb-0')));
+    final strip = tester.getSize(find.byType(PendingImageStrip));
+    debugPrint('★ 瓷砖=$tile  整条=$strip');
+    expect(tile.height, moreOrLessEquals(PendingImageStrip.thumbSize));
+    expect(strip.height, moreOrLessEquals(PendingImageStrip.thumbSize));
   });
 }

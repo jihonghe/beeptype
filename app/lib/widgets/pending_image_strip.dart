@@ -62,7 +62,7 @@ class PendingImageStrip extends StatelessWidget {
   final VoidCallback? onAdd;
 
   /// 缩略图边长
-  static const double thumbSize = 72;
+  static const double thumbSize = 64;
 
   const PendingImageStrip({
     super.key,
@@ -86,13 +86,20 @@ class PendingImageStrip extends StatelessWidget {
             return AddImageButton(onPressed: onAdd, size: thumbSize, radius: 10);
           }
           return SizedBox(
+            key: ValueKey('pending-thumb-$i'),
             width: thumbSize,
             height: thumbSize,
             child: Stack(
               children: [
-                // 缩略图本体
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(10),
+                // 缩略图本体：外面套一层浅底+描边的"瓷砖"，这样即使是白底截图
+                // （截图内容大半是白的）也能一眼看出这是一张图，而不是糊在卡片上
+                Container(
+                  decoration: BoxDecoration(
+                    color: scheme.surfaceContainerHighest,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: scheme.outlineVariant),
+                  ),
+                  clipBehavior: Clip.antiAlias,
                   child: Image.file(
                     File(files[i].path),
                     width: thumbSize,
