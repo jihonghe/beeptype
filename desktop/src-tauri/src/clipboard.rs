@@ -29,7 +29,19 @@ const WRITE_ATTEMPTS: u8 = 2;
 ///
 /// 在 X11 上，我们持有所有权时读回是本地内存读（arboard 直接返回自己的数据），
 /// 不产生额外的 X 往返；只有当所有权已被别人抢走时才会真去读一次。
-pub fn write_verified<R: Runtime>(app: &AppHandle<R>, text: &str) -> bool {
+///
+/// `gate_reads`：**本轮真的会发粘贴键吗**（自动粘贴开着 + 平台支持 + 我们自己窗口没焦点）。
+/// 只有这种时候才走 X11 主人策略（见 `clipboard_x11.rs`）——没有"粘贴时刻"可当闸门还去接管，
+/// 只会让用户之后手动 Ctrl+V 读到我们的内容，还不如普通写入。
+pub fn write_verified<R: Runtime>(app: &AppHandle<R>, text: &str, gate_reads: bool) -> bool {
+    #[cfg(target_os = "linux")]
+    if gate_reads && crate::clipboard_x11::take_ownership(text) {
+        // 我们自己持有剪贴板：数据在我们内存里，别的进程夺不走，读回校验因此没有意义
+        // （也读不到——粘贴之前我们拒绝一切读取）。粘贴键发出前调用方会调 allow_reads()。
+        return true;
+    }
+    let _ = gate_reads; // 非 Linux：只走下面的普通路径
+
     for attempt in 1..=WRITE_ATTEMPTS {
         if let Err(e) = app.clipboard().write_text(text) {
             warn!("Clipboard write failed (attempt {attempt}): {e}");

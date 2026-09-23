@@ -89,7 +89,7 @@ cd app && flutter build apk --release --target-platform android-arm64
 - **测试包用 `<下一版本>-test`**（重复打包加 `-test2`、`-test3`…）：它**不是发布版本**，只用来区分"手里装的是哪一份"，且**不动仓库里的版本字面量**；
 - **测试包要保证"与发布包能互相覆盖安装"**（2026-09-22 发 v0.7.0 时踩到）：
   - **手机**：打测试包用 `--build-name=<下一版本>-testN` 配 **`--build-number=1`**——发布包在 CI 里不传 `--build-number`，`versionCode` 恒为 `1`；两边同码才双向都能装。给测试包一个更大的码（如 `--build-number=11`）会让**发布包盖测试包时被安卓当降级拒装**；
-  - **PC**：测试包的版本串（`<下一版本>-testN`）在 **Debian 版本排序里比发布版更高**（`test3` 是 revision，空 revision 视为 `0`），而 Tauri 要求 `tauri.conf.json > version` 是**严格 semver**、用不了 Debian 的 `~` 前缀 ⇒ **装发布包请用 `sudo dpkg -i`**（只警告一句降级、照装），`apt install` 会拒绝降级（坚持要用 apt 就加 `--allow-downgrades`）。
+  - **PC**（2026-09-23 改进，取代原先的 `dpkg -i` 绕法）：`tauri.conf.json` 的 version 是**严格 semver**、用不了 Debian 的 `~` 前缀，所以**测试包的版本串保持与发布包同号**（如都用 `0.7.0`），只把 `-testN` 写在**文件名**里（`BeepType_0.7.0-clip1_amd64.deb`）。同号 ⇒ 发布包与测试包**双向都能直接装**（`dpkg -i` / `apt install` 都行），也就不用记"该用哪条命令"了。**代价**：装完后 `dpkg -l` 与 APP 里显示的版本号都无法区分测试包与发布包 ⇒ 靠**文件名**和**行为**区分（这也是为什么每次交付要说清"这份和发布包差在哪"）。
 - **版本号从不回收**：同一个号只对应同一份代码；
 - 发布节奏**攒批**：一批改动做完、真机验证通过，才 bump 版本 + 写 `docs/releases/<tag>.md` + 打 tag。
 
