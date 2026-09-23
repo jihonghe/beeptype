@@ -40,6 +40,55 @@ class _HomePageState extends State<HomePage>
   late StreamSubscription<String> _sessionEndedSub;
   late StreamSubscription<void> _sessionUpdatedSub;
   Timer? _debounce;
+
+  // ───── 临时诊断（BT_IME）：判定"输入法中途提交"与"用户松手"能否被分辨 ─────
+  // 背景：讯飞/搜狗这类分段型输入法会在说话途中逐段提交文本（即使手指没离开语音键），
+  // 而我们把"composing 结束"当作"用户松手"⇒ 会误发。要解决就得找到"松手"的影子信号：
+  //   ① 键盘 insets 高度变化（语音面板 ↔ 普通键盘）；② 麦克风占用状态（录音结束＝松手）。
+  // 这里把三样东西打在同一时间轴上（文本长度/composing、insets、录音数），验证完即删。
+  Timer? _diagTimer;
+  int _diagLastInset = -1;
+
+  void _diagStart() {
+    _diagTimer?.cancel();
+    _diagTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      unawaited(_diagHeartbeat());
+    });
+  }
+
+  /// 相对时间戳（毫秒取后 6 位）：只为在日志里对齐事件，不要求绝对时间
+  int _diagT() => DateTime.now().millisecondsSinceEpoch % 1000000;
+
+  int _diagInsets() {
+    final views = WidgetsBinding.instance.platformDispatcher.views;
+    return views.isEmpty ? 0 : views.first.viewInsets.bottom.toInt();
+  }
+
+  /// 心跳：每 500ms 记一行，给出"文本在长/不在长、面板多高、麦克风是否被占"的连续时间线
+  Future<void> _diagHeartbeat() async {
+    if (!mounted) return;
+    final v = _inputController.value;
+    final composing = v.composing.isValid && v.composing.start != v.composing.end;
+    int? rec;
+    try {
+      rec = await const MethodChannel('beeptype/device')
+          .invokeMethod<int>('getActiveRecordingCount');
+    } catch (_) {
+      rec = null; // iOS 或未实现：留空
+    }
+    debugPrint('BT_IME hb t=${_diagT()} len=${v.text.length} composing=$composing '
+        'insets=${_diagInsets()} rec=$rec');
+  }
+
+  /// 面板/键盘高度一变就记一行——"松手"最可能在这里留下痕迹
+  @override
+  void didChangeMetrics() {
+    final bottom = _diagInsets();
+    if (bottom != _diagLastInset) {
+      _diagLastInset = bottom;
+      debugPrint('BT_IME metrics t=${_diagT()} insets=$bottom');
+    }
+  }
   Timer? _reconnectTimer;
   ConnectionStatus _status = ConnectionStatus.disconnected;
   bool _sending = false;
@@ -152,6 +201,7 @@ class _HomePageState extends State<HomePage>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _diagStart(); // 临时诊断，验完删（见上方 BT_IME 说明）
     _inputController = TextEditingController();
     _focusNode = FocusNode();
     _inputController.addListener(_onValueChanged);
@@ -199,6 +249,7 @@ class _HomePageState extends State<HomePage>
     _reconnectTimer?.cancel();
     _transientExpiryTimer?.cancel();
     _countdownTimer?.cancel();
+    _diagTimer?.cancel(); // 临时诊断
     _inputController.dispose();
     _focusNode.dispose();
     super.dispose();
@@ -609,8 +660,10 @@ class _HomePageState extends State<HomePage>
       _wasComposing = true;
     } else if (_wasComposing) {
       _wasComposing = false;
+      debugPrint('BT_IME commit t=${_diagT()} len=${text.length} → 按 composing 结束发送');
       _scheduleVoiceCommitSend();
     } else if (text != _lastText) {
+      debugPrint('BT_IME textChanged t=${_diagT()} len=${text.length} → 按文本变化发送');
       _scheduleSend(text);
     }
 
@@ -637,6 +690,7 @@ class _HomePageState extends State<HomePage>
     if (_sending) return;
     final trimmed = text.trim();
     if (trimmed.isEmpty) return;
+    debugPrint('BT_IME send t=${_diagT()} len=${trimmed.length}'); // 临时诊断
     setState(() => _sending = true);
 
     try {

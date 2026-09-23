@@ -1,6 +1,8 @@
 package com.beeptype.app
 
+import android.content.Context
 import android.content.pm.PackageManager
+import android.media.AudioManager
 import android.os.Build
 import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
@@ -16,9 +18,24 @@ class MainActivity : FlutterActivity() {
                     "getDeviceName" -> result.success(deviceName())
                     "getHardwareId" -> result.success(hardwareId())
                     "getAppVersion" -> result.success(appVersion())
+                    "getActiveRecordingCount" -> result.success(activeRecordingCount())
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    /**
+     * 临时诊断（验完删）：当前有多少个"正在录音"的音频配置。
+     *
+     * 用来验证能否用"麦克风被占用"代理"输入法正在语音输入"——语音输入必然占用麦克风，
+     * 录音结束≈用户松手。**注意**：Android 10+ 对其他应用的记录配置做了匿名化/隐藏，
+     * 返回恒为 0 也是有效结论（那说明这条路不通，只能靠 insets 或显式收尾）。
+     */
+    private fun activeRecordingCount(): Int = try {
+        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        am.activeRecordingConfigurations.size
+    } catch (_: Exception) {
+        -1
     }
 
     /**
