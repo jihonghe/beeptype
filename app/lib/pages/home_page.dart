@@ -90,11 +90,7 @@ class _HomePageState extends State<HomePage>
       return;
     }
     _recAvailable = true;
-    final was = _recording;
     _recording = rec > 0;
-    if (was != _recording) {
-      debugPrint('BT_VOICE 录音${_recording ? "开始" : "结束"}（rec=$rec）');
-    }
     _maybeFlush();
   }
 
@@ -114,6 +110,10 @@ class _HomePageState extends State<HomePage>
       voiceSession: _voiceSession,
       sinceLastTextChangeMs: now - _lastTextChangeAtMs,
     )) {
+      if (composing && _voiceSession) {
+        // 只可能是"输入法迟迟不提交"的兜底（正常路径是它提交之后才发）
+        debugPrint('BT_VOICE 输入法超时未提交，先把已有文字发出去');
+      }
       _flushArmed = false; // 发过就落下：失败时不自动重试（与旧行为一致）
       _sendText(v.text);
     }
@@ -733,7 +733,6 @@ class _HomePageState extends State<HomePage>
     if (_sending) return;
     final trimmed = text.trim();
     if (trimmed.isEmpty) return;
-    debugPrint('BT_VOICE 发送 len=${trimmed.length}');
     setState(() => _sending = true);
 
     try {
