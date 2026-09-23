@@ -51,12 +51,16 @@ class _HomePageState extends State<HomePage>
   bool? _recAvailable; // null = 还没问出来；false = 这台机器读不到 ⇒ 旧行为
   bool _recording = false;
   int _lastTextChangeAtMs = 0;
+  /// 当前这段文字是不是语音说出来的：决定松手后用哪种合并窗口
+  /// （语音 80ms、打字 300ms——打字窗口更宽是为了避免逐字发送）。
+  bool _voiceSession = false;
   /// 本轮文本是否还能触发发送：发过一次就落下，等文本再次变化才重新抬起。
-  /// （否则发送失败后，每 500ms 的轮询会不停重试——旧路径不会有这个问题。）
+  /// （否则发送失败后，轮询会不停重试——旧路径不会有这个问题。）
   bool _flushArmed = true;
 
   void _startRecPolling() {
-    _recPollTimer ??= Timer.periodic(const Duration(milliseconds: 500), (_) {
+    _recPollTimer ??= Timer.periodic(
+        const Duration(milliseconds: kRecPollIntervalMs), (_) {
       unawaited(_pollRecording());
     });
   }
@@ -94,21 +98,24 @@ class _HomePageState extends State<HomePage>
     _maybeFlush();
   }
 
-  /// 没在录音 + 有文本 + 安静够久 ⇒ 把输入框里的**整段**一次发出去
+  /// 没在录音 + 该等的等到了 ⇒ 把输入框里的**整段**一次发出去
   void _maybeFlush() {
     if (!_flushArmed) return;
+    if (_recAvailable != true) return; // 读不到录音状态：本机制不启用（走旧行为）
     if (_status != ConnectionStatus.paired) return;
-    final text = _inputController.value.text;
-    final since = DateTime.now().millisecondsSinceEpoch - _lastTextChangeAtMs;
-    if (shouldFlushOnRecordingEnd(
-      recAvailable: _recAvailable ?? false,
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final v = _inputController.value;
+    final composing = v.composing.isValid && v.composing.start != v.composing.end;
+    if (shouldFlush(
+      recAvailable: true,
       recording: _recording,
-      textLength: text.trim().length,
-      sinceLastTextChangeMs: since,
-      quietMs: kRecordingEndQuietMs,
+      textLength: v.text.trim().length,
+      composingActive: composing,
+      voiceSession: _voiceSession,
+      sinceLastTextChangeMs: now - _lastTextChangeAtMs,
     )) {
       _flushArmed = false; // 发过就落下：失败时不自动重试（与旧行为一致）
-      _sendText(text);
+      _sendText(v.text);
     }
   }
   Timer? _reconnectTimer;
@@ -667,6 +674,7 @@ class _HomePageState extends State<HomePage>
       _debounce?.cancel();
       _wasComposing = false;
       _lastText = '';
+      _voiceSession = false; // 输入框空了：下一段重新判断是不是语音说的
       return;
     }
 
@@ -677,9 +685,10 @@ class _HomePageState extends State<HomePage>
       return;
     }
 
-    // 最后一次文本变化的时刻：松手后的静默窗口从这一刻算起
+    // 最后一次文本变化的时刻：合并窗口从这一刻算起
     _lastTextChangeAtMs = DateTime.now().millisecondsSinceEpoch;
     _flushArmed = true; // 文本又变了：允许再触发一次发送
+    if (_recording) _voiceSession = true; // 说话期间有过文本 ⇒ 这段是语音说的
 
     // 能读到麦克风占用状态 ⇒ 走"松手才发"：这里的任何提交都不发，
     // 由 _pollRecording → _maybeFlush 在录音结束且安静够久后把整段一次发出去。
