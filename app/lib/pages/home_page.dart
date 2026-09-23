@@ -3,7 +3,6 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'dart:async';
-import 'dart:io';
 import '../services/image_send.dart';
 import '../services/lan_check.dart';
 import '../services/retry_episode.dart';
@@ -12,6 +11,7 @@ import '../services/route_observer.dart';
 import '../services/text_sender.dart';
 import '../services/tcp_service.dart';
 import '../services/voice_send_policy.dart';
+import '../widgets/pending_image_strip.dart';
 
 class HomePage extends StatefulWidget {
   final TextSender sender;
@@ -766,6 +766,7 @@ class _HomePageState extends State<HomePage>
       if (rejected.isNotEmpty) {
         _showSnack('第 ${rejected.join("、")} 张超过 8MB，已跳过');
       }
+      if (_pendingImages.isNotEmpty) HapticFeedback.selectionClick();
       setState(() {});
     } catch (e) {
       _showSnack('选择图片失败：$e');
@@ -1101,73 +1102,51 @@ class _HomePageState extends State<HomePage>
                 ),
               ),
             ),
-            // 待发图片：缩略图 + 每张一个叉（后悔用）+ 末尾一个「+」继续添加
-            if (_pendingImages.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 10),
-                child: SizedBox(
-                  height: 64,
-                  child: ListView.separated(
-                    scrollDirection: Axis.horizontal,
-                    itemCount: _pendingImages.length + 1,
-                    separatorBuilder: (_, __) => const SizedBox(width: 10),
-                    itemBuilder: (context, i) {
-                      if (i == _pendingImages.length) {
-                        return IconButton.outlined(
-                          onPressed: _pickingImage ? null : _pickImages,
-                          tooltip: '继续添加图片',
-                          icon: const Icon(Icons.add_photo_alternate_outlined,
-                              size: 20),
-                        );
-                      }
-                      return Stack(
-                        clipBehavior: Clip.none,
-                        children: [
-                          ClipRRect(
-                            borderRadius: BorderRadius.circular(8),
-                            child: Image.file(
-                              File(_pendingImages[i].path),
-                              width: 64,
-                              height: 64,
-                              fit: BoxFit.cover,
-                              errorBuilder: (_, __, ___) => const SizedBox(
-                                width: 64,
-                                height: 64,
-                                child: Icon(Icons.broken_image_outlined),
-                              ),
-                            ),
+            // 待发图片区：细分隔线把"这些图属于这条消息"划出来；出现/消失带展开动效；
+            // 末尾那个「添加图片」就是空态底行同一个组件（同一个视觉，用户一眼认得出）
+            AnimatedSize(
+              duration: const Duration(milliseconds: 120),
+              curve: Curves.easeOut,
+              alignment: Alignment.topCenter,
+              child: _pendingImages.isEmpty
+                  ? const SizedBox(width: double.infinity)
+                  : Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: Divider(height: 1, color: scheme.outlineVariant),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.only(top: 10),
+                          child: PendingImageStrip(
+                            files: _pendingImages,
+                            onAdd: _pickingImage ? null : _pickImages,
+                            onRemove: (i) =>
+                                setState(() => _pendingImages.removeAt(i)),
                           ),
-                          Positioned(
-                            top: -8,
-                            right: -8,
-                            child: IconButton(
-                              visualDensity: VisualDensity.compact,
-                              tooltip: '移掉这张',
-                              onPressed: () =>
-                                  setState(() => _pendingImages.removeAt(i)),
-                              icon: const Icon(Icons.cancel, size: 18),
-                            ),
-                          ),
-                        ],
-                      );
-                    },
-                  ),
-                ),
-              ),
+                        ),
+                      ],
+                    ),
+            ),
             Row(
               children: [
-                if (enabled && _imageSupported)
-                  IconButton(
-                    onPressed: _pickingImage ? null : _pickImages,
-                    tooltip: '添加图片（选好后和文字一起发送）',
-                    icon: _pickingImage
-                        ? const SizedBox(
-                            width: 20,
-                            height: 20,
+                // 待发状态下这个入口交给缩略图条末尾那个（同一个组件、同一个视觉）：
+                // 同屏只留一个"加图"入口
+                if (enabled && _imageSupported && _pendingImages.isEmpty)
+                  _pickingImage
+                      ? const Padding(
+                          padding: EdgeInsets.all(11),
+                          child: SizedBox(
+                            width: 22,
+                            height: 22,
                             child: CircularProgressIndicator(strokeWidth: 2.5),
-                          )
-                        : const Icon(Icons.image_outlined, size: 22),
-                  ),
+                          ),
+                        )
+                      : AddImageButton(
+                          onPressed: _pickImages,
+                          size: 44,
+                        ),
                 const Spacer(),
                 if (_sending)
                   const Padding(
