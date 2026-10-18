@@ -2145,9 +2145,21 @@ mod integration_tests {
     #[test]
     fn test_pc_toggle_dependency_applies_to_runtime_flag() {
         let (state, _code) = test_state();
+        // 生效值 = 用户意愿 && 当前会话能不能注入。CI 是没有显示器的无头环境
+        // （injection_backend() == Unsupported）⇒ 这里必须对着能力位断言，
+        // 不能硬编码为 true——2026-10-18 CI 上就是这么挂的
+        let supported = crate::paste::auto_paste_supported();
         state.apply_prefs(Some(true), Some(true));
-        assert!(state.auto_paste.load(Ordering::Relaxed));
-        assert!(state.auto_send.load(Ordering::Relaxed), "两个都打开");
+        assert_eq!(
+            state.auto_paste.load(Ordering::Relaxed),
+            supported,
+            "自动粘贴的生效值 = 意愿 && 能力"
+        );
+        assert_eq!(
+            state.auto_send.load(Ordering::Relaxed),
+            supported,
+            "两个都打开时，自动发送同样受能力约束"
+        );
 
         // 设置页只改「自动粘贴」（apply_prefs(Some(false), None) 正是那条路径）
         state.apply_prefs(Some(false), None);
@@ -2162,7 +2174,7 @@ mod integration_tests {
 
         // 再把粘贴打开：发送应保持关，不会自己变回开（与手机端一致）
         state.apply_prefs(Some(true), None);
-        assert!(state.auto_paste.load(Ordering::Relaxed));
+        assert_eq!(state.auto_paste.load(Ordering::Relaxed), supported);
         assert!(
             !state.auto_send.load(Ordering::Relaxed),
             "粘贴重新打开后，发送仍是关"
