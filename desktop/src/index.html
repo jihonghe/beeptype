@@ -647,7 +647,7 @@
             // 自动发送依赖自动粘贴：autoPaste 关 → autoSend 也 disabled
             ans.disabled = !s.autoPaste || !s.autoSendSupported;
             if (!s.autoPasteSupported) {
-                apNote.textContent = '当前桌面会话不支持全局按键模拟（如 Wayland），自动粘贴不可用';
+                apNote.textContent = '当前桌面会话不支持全局按键模拟（如 GNOME / KDE 的 Wayland），自动粘贴不可用';
                 apNote.classList.add('bad');
             } else {
                 apNote.textContent = '模拟快捷键把剪贴板内容粘贴到当前光标处';

@@ -1360,7 +1360,8 @@ impl<R: Runtime> ServerState<R> {
 
         // 自动粘贴到光标处：
         // 1. 设置页开关已开启；
-        // 2. 当前平台支持全局按键模拟（X11/Windows/macOS；Wayland 回退纯剪贴板）；
+        // 2. 当前平台能模拟按键（X11/Windows/macOS，以及 wlroots 系 Wayland；
+        //    GNOME/KDE 的 Wayland 回退纯剪贴板）；
         // 3. BeepType 自己的窗口没有焦点，避免文字糊进配对/状态窗口。
         let mut pasted = false;
         let enabled = self.auto_paste.load(Ordering::Relaxed);

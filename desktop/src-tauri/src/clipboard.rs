@@ -10,9 +10,10 @@
 //!     "校验不了"把本来能用的粘贴挡掉）。
 //!
 //! 校验的边界要说清楚：它只能保证"我们写入的那个剪贴板后端里是正确的文字"，
-//! **不能**保证目标应用看到的内容——Wayland 会话下 arboard 可能退回 XWayland
-//! 后端，而目标应用读的是原生 Wayland 剪贴板，那种不一致这里看不出来。那部分
-//! 由"不支持自动粘贴的环境回退手动 Ctrl+V"兜底。
+//! **不能**保证目标应用看到的内容——只有在合成器不提供 data-control 而 arboard
+//! 退回 XWayland 后端时，目标应用读原生 Wayland 剪贴板的不一致才看不出来
+//! （wlroots 系走原生 data-control 后端，2026-10-18 在 Hyprland 实测：写入后别的
+//! 进程 `wl-paste` 读到的就是同一份内容）。
 
 use log::{info, warn};
 use tauri::{AppHandle, Runtime};

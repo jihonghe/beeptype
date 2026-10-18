@@ -26,9 +26,14 @@ image = "0.25"
 sha2 = "0.10"
 log = "0.4"
 env_logger = "0.11"
-enigo = "0.6.1"
+# enigo 默认只带 x11rb 后端；额外打开 wayland 后端——
+# 它是 wlroots 系（Hyprland/Sway）下唯一能做按键注入的路子：
+# 走 zwp_virtual_keyboard_manager_v1 / zwp_input_method_v2（GNOME/KDE 不暴露，运行时自然回退）
+enigo = { version = "0.6.1", features = ["wayland"] }
 base64 = "0.22"
 x11rb = "0.13"
+# 探测合成器是否提供虚拟输入协议（enigo 的 wayland 后端依赖同一个 crate，版本保持一致）
+wayland-client = "0.31"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

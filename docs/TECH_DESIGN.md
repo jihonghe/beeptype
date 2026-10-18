@@ -288,7 +288,7 @@ pub fn write_verified(app: &AppHandle, text: &str) -> bool
 
 在 X11 上，我们持有所有权时读回是**本地内存读**（arboard 直接返回自己的数据），不产生额外的 X 往返、不会阻塞；只有所有权被抢走时才会真去读一次（arboard 内部上限 4s）。
 
-边界：它只保证"我们写入的那个剪贴板后端里是正确的文字"，**不能**保证目标应用看到的内容——Wayland 会话下 arboard 可能退回 XWayland 后端，而目标应用读原生 Wayland 剪贴板，那种不一致看不出来（那类环境本就不支持自动粘贴，回退手动 Ctrl+V）。
+边界：它只保证"我们写入的那个剪贴板后端里是正确的文字"，**不能**保证目标应用看到的内容。Wayland 会话下 arboard 走 `wlr-data-control` 原生后端（2026-10-18 在 Hyprland 实测：写入后别的进程 `wl-paste` 能读到同样的内容），所以校验覆盖的与目标应用读到的通常是同一个后端；只有真正退回 XWayland 的场景（合成器不提供 data-control）才存在看不出来的不一致。
 
 ### 2.6 paste.rs — 按键模拟
 
@@ -296,14 +296,27 @@ pub fn write_verified(app: &AppHandle, text: &str) -> bool
 |---|---|
 | macOS | `Cmd+V`（终端同样是 Cmd+V） |
 | Linux 终端窗口 | `Ctrl+Shift+V` |
-| Linux 其他 / Windows | `Ctrl+V` |
+| Linux 其他 / Windows / Wayland | `Ctrl+V` |
 | 自动发送 | Enter（`Key::Unicode('\r')`） |
+
+**注入后端按会话能力选**（`InjectionBackend`，判定抽成纯函数 `decide_backend` 便于单测）：
+
+| 会话 | 后端 | 判据 |
+|---|---|---|
+| Linux X11 | `Native`（XTest） | 有 `DISPLAY` |
+| Linux Wayland（wlroots：Hyprland / Sway…） | `WlrWayland` | 合成器注册表里有 `zwp_virtual_keyboard_manager_v1` 或 `zwp_input_method_manager_v2`（`wayland_input.rs` 探测，纯读无副作用） |
+| Linux Wayland（GNOME / KDE） | `Unsupported` | 不暴露上述协议 ⇒ 回退纯剪贴板 + 手动粘贴 |
+| Windows / macOS | `Native` | 各自的 SendInput / CGEvent |
+
+- **Wayland 下只保留一个后端**：enigo 会把同一个按键发给**所有已连接的后端**，而 Hyprland 这类会话里 `DISPLAY`（XWayland）与 `WAYLAND_DISPLAY` 同时存在 ⇒ 两个后端都会连上 ⇒ 一次 `Ctrl+V` 被注入两遍（实测：XWayland 目标里文本被粘贴两次）。所以 Wayland 会话下给 enigo 传一个**连不上的 display 名**（`beeptype-wayland-only`，无 `:` ⇒ x11rb 解析即失败），只留虚拟键盘那条路。enigo 为此会打一行 `ERROR enigo::platform::x11] DisplayParsingError(..)`（实测日志原文），属**我们主动造成**，因此默认日志级别把 `enigo` 整条关掉（`info,enigo=off`）——注入真失败时由我们自己的 `Auto-paste failed: ...` 一行报告。
 
 - 终端识别（仅 Linux）：用 `x11rb` 读 X 的 `GetInputFocus`，再沿窗口树向上最多 20 层找 `WM_CLASS`（`res_name`/`res_class`）。命中判定 = 类名包含 `terminal`，或落在内置清单里（`xterm`、`kitty`、`alacritty`、`ghostty`、`wezterm`、`konsole`、`foot`、`cool-retro-term` 等异类终端）。任何检测失败都**安全回退 Ctrl+V**。
 - **同一条连接按序注入**：`simulate_paste()` 返回自己的 enigo 实例，自动发送复用它。同连接内的请求由 X server 按序处理，粘贴与回车不靠墙钟时间排序。
 - **注入回车前复核焦点**：`focused_window_id()` 在注入前与发回车前各取一次（Linux/X11，取带 `WM_CLASS` 的客户端窗口而非内部子窗口），变了就跳过回车。非 Linux 或检测不到时返回 `None`，按"无从判断"处理（fail-open：宁可漏一次检查，也不少发一条消息）。
 - **两段等待都是安全余量，不是性能参数**：写剪贴板后等 50ms（正确性由同步所有权保证，见 10.1，这 50ms 只是给目标应用的剪贴板缓存留余量）；回车前等 `250ms + 每 200 字符 1ms`（上限 +500ms）——人对这个量级无感知，而漏发的代价是消息没出去。**不按机器、不按应用做特调**（见第 10 节）。
-- Wayland 判定：`XDG_SESSION_TYPE=wayland`，或（设置了 `WAYLAND_DISPLAY` 且没有 `DISPLAY`）→ 自动粘贴/自动发送判定为不支持，回退纯剪贴板。有 `DISPLAY` 时走 XWayland，XTest 仍可用。
+- **Wayland 判定看"有没有 Wayland 显示"**（`WAYLAND_DISPLAY` 在，或 `XDG_SESSION_TYPE=wayland`），不再看"有没有 `DISPLAY`"：Hyprland 下 XWayland（`DISPLAY=:0`）与 Wayland 同时存在，而 XTest 注不到原生 Wayland 客户端 ⇒ 按 `DISPLAY` 判定会得出错误结论。
+- **终端识别只在 X11 有效**：Wayland 合成器不对外暴露"谁在焦点"，因此 Wayland 会话下**跳过 X11 检测、一律发 `Ctrl+V`**（终端里的用户需要自己按终端的粘贴键）。这是已知缺口，出口是路线图里的「自定义键位」设置项。
+- **回车前的焦点复核在 Wayland 下自动退化为"照常发送"**：`focused_window_id()` 返回 `None`（fail-open），与"检测不到就按原行为做"的既有约定一致。
 
 ### 2.7 discovery.rs — 凭证门控的 UDP 发现
 
@@ -732,7 +745,7 @@ app/assets/app_icon.png            # 关于页的品牌图标，由 scripts/buil
 - **先图后文**：图片先贴到光标处（不回车），文字随后贴并（必要时）回车 ⇒ 两者最终落在**同一条消息**里；
 - 多张 ⇒ **串行逐张**发送；某张失败就停下并保留在待发区（提示"可再点发送重试"），不会静默丢。
 
-**已知边界**：Wayland 等不支持自动粘贴的环境 ⇒ 图片也退化为"手动 Ctrl+V"；
+**已知边界**：GNOME/KDE 的 Wayland 等不支持自动粘贴的环境 ⇒ 图片也退化为"手动 Ctrl+V"；
 图片同样会进目标机器的剪贴板历史（如实告知，不做承诺——"不留痕"那两条路已证走不通，见 §10.4）。
 
 **真机自测**：手机端 `flutter test`（分块无损、单块 <256KB、上限、MIME）；电脑端 `cargo test`（`image_receiver` 的 8 条状态机单测）。
@@ -793,7 +806,8 @@ log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
 | 平台 | 剪贴板 | 粘贴快捷键 | 自动粘贴 | 备注 |
 |---|---|---|---|---|
 | Linux X11 | arboard（X11 直连） | 终端 `Ctrl+Shift+V`，其余 `Ctrl+V` | ✅ | 按键走 enigo（XTest），无需额外授权 |
-| Linux Wayland | 同上 | — | ❌ | 安全模型禁止后台注入；且无差别写剪贴板也受限，回退手动 Ctrl+V |
+| Linux Wayland（wlroots 系：Hyprland/Sway） | 同上（arboard 走 wlr-data-control，实测正常） | `Ctrl+V` | ✅ | enigo 的 wayland 后端走合成器虚拟键盘协议；Wayland 下拿不到焦点窗口 ⇒ 终端识别不可用、一律 `Ctrl+V` |
+| Linux Wayland（GNOME/KDE） | 同上 | — | ❌ | 这两个合成器不暴露虚拟输入协议 ⇒ 回退手动 Ctrl+V |
 | Windows 10+ | 原生 API | `Ctrl+V` | ✅ | SendInput；UIPI 下无法输入到更高权限窗口 |
 | macOS 12+ | 原生 API | `Cmd+V` | ✅ | CGEvent；需要在系统设置里授予辅助功能权限 |
 | Android / iOS | — | — | — | 手机端只做采集与发送 |
@@ -901,7 +915,7 @@ X11 的剪贴板是"所有者 + 按需服务"模型：粘贴时由接收方向 X
 
 ### 10.3 已知边界
 
-- **校验能覆盖的范围**：`clipboard.rs` 只验证"我们写入的后端里是正确的文字"。Wayland 下若 arboard 退回 XWayland，目标应用读原生 Wayland 剪贴板时的不一致看不出来——那类环境本就不支持自动粘贴，回退手动 Ctrl+V。
+- **校验能覆盖的范围**：`clipboard.rs` 只验证"我们写入的后端里是正确的文字"。Wayland 下 arboard 走原生 `wlr-data-control` 后端（Hyprland 实测），校验覆盖的就是目标应用读的那一份；只有在合成器不提供 data-control 而退回 XWayland 时，才可能出现看不出来的不一致。
 - **长文本**：接近 256KB 时走 X11 的 INCR 分块传输，插入更慢；回车余量按长度放宽，但仍是有界的（最坏 750ms）。
 - **目标应用自身行为**：有的应用会缓存剪贴板内容、或对粘贴做二次处理，这部分不可观测，也无法适配。
 - **用户手上的修饰键**：用户此刻若正按着 Shift，我们注入的 Ctrl+V 会变成 Ctrl+Shift+V。这是"用户手速 vs 注入"的竞态，不是剪贴板竞态。

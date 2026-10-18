@@ -5,6 +5,7 @@ mod image_receiver;
 mod paste;
 mod protocol;
 mod server;
+mod wayland_input;
 mod winicon;
 
 use config::Config;
@@ -49,7 +50,7 @@ struct SettingsInfo {
     auto_paste: bool,
     /// 自动发送是否实际生效（auto_paste 生效 && auto_send 开关 && 平台支持）
     auto_send: bool,
-    /// 当前桌面会话是否支持全局按键模拟（Wayland 等不支持）
+    /// 当前桌面会话是否支持全局按键模拟（GNOME/KDE 的 Wayland 等不支持）
     auto_paste_supported: bool,
     /// 当前会话是否支持自动发送（条件和 auto_paste 完全一致）
     auto_send_supported: bool,
@@ -320,7 +321,12 @@ fn set_autostart(
 /// Tauri 应用入口
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+    // enigo 的内部日志整条关掉：Wayland 会话下我们**故意**让它连不上 X11
+    // （否则一次 Ctrl+V 会被注入两遍，见 paste.rs），而它为此每粘贴一次就打一行
+    // `ERROR enigo::platform::x11] DisplayParsingError(...)`——那是我们自己的设计，
+    // 不是异常，放在日志里只会让人误以为出了问题。注入真失败时由我们自己的
+    // "Auto-paste failed: ..." 一行报告；需要看 enigo 内部日志时用 RUST_LOG=debug 覆盖
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,enigo=off"))
         .format_timestamp_millis()
         .init();
 
@@ -378,6 +384,10 @@ pub fn run() {
             // 创建服务端状态
             let paste_supported = paste::auto_paste_supported();
             let send_supported = paste::auto_send_supported();
+            info!(
+                "Key injection backend: {} (this decides whether auto-paste is possible)",
+                paste::injection_backend().label()
+            );
             info!("Auto-paste supported on this session: {paste_supported}");
             let effective_auto_paste = auto_paste_config && paste_supported;
             let effective_auto_send = auto_send_config && effective_auto_paste && send_supported;
