@@ -140,6 +140,36 @@ jobs:
         working-directory: desktop
         run: tauri build
 
+      # ★ AppImage 的打包缺陷修复（别删）：linuxdeploy 的 GTK 插件会把**构建机**
+      # （ubuntu-22.04）自带的 libwayland-client/cursor/egl/server（1.20）打进包里，
+      # 而 Wayland 客户端库必须与目标机的 mesa/EGL 同源。版本不匹配时 WebKit 的渲染
+      # 进程建不出 EGL display：现象是**窗口空白 + WebKitWebProcess SIGABRT**
+      # （2026-10-18 在 Omarchy/Arch（wayland 1.26）实测；包内 1.20 vs 系统 1.26）。
+      # 做法：解开 AppImage → 删掉这几个库 → 用 appimagetool 重新打包，并自检。
+      - name: Strip bundled libwayland from AppImage
+        if: matrix.platform == 'linux'
+        shell: bash
+        working-directory: desktop/src-tauri/target/release/bundle/appimage
+        run: |
+          set -euo pipefail
+          IMG="$(basename "$(ls ./*.AppImage)")"
+          ./"$IMG" --appimage-extract > /dev/null
+          echo "将从 AppImage 中移除："
+          find squashfs-root/usr/lib -maxdepth 1 -name 'libwayland-*.so*' -print -delete
+          curl -sSL -o appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run "$PWD/squashfs-root" "$PWD/$IMG"
+          rm -rf squashfs-root appimagetool
+          # 自检：重新解出来的包里不该再有这些库
+          ./"$IMG" --appimage-extract 'usr/lib/libwayland-*' > /dev/null 2>&1 || true
+          if [ -e squashfs-root/usr/lib/libwayland-client.so.0 ]; then
+            echo "::error::libwayland 仍留在 AppImage 里"
+            exit 1
+          fi
+          rm -rf squashfs-root
+          ls -la ./*.AppImage
+
       - name: Upload artifacts (Linux)
         if: matrix.platform == 'linux'
         uses: actions/upload-artifact@v6

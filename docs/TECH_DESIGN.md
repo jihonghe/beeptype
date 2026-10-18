@@ -842,6 +842,8 @@ log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
   - **版本的三层关系**（别搞混）：tag → CI 改写 → ① `pubspec.yaml` 决定 Android 包版本，② `tauri.conf.json` 决定安装包版本**且被 tauri-codegen 烘焙进二进制**，所以设置页「关于」用 `app.package_info().version` 读的就是它（与安装包一致）；③ `Cargo.toml` 的 `version` 只是 crate 版本，**不参与展示**（曾经用 `env!("CARGO_PKG_VERSION")` 取它，导致发布包的关于页一直显示旧号）。仓库里的这三个字面量都只服务本地开发构建，保持与最近一次发布一致即可，CI 每次都会按 tag 覆盖前两个。
   - Android：`flutter build apk --release --target-platform android-arm64`，签名 keystore 由 Secrets 还原并生成 `key.properties`。
   - 桌面：矩阵 `ubuntu-22.04`（GLIBC 兼容性）/ `macos-latest` / `windows-latest`，`tauri build` 后分别产出 `.deb` + `.AppImage`、`.dmg`、`.msi`。
+  - **AppImage 必须剔掉包内自带的 `libwayland-*`**（`release.yml` 里 `Strip bundled libwayland from AppImage` 那一步，2026-10-18 加）：linuxdeploy 的 GTK 插件会把构建机（ubuntu-22.04）的 `libwayland-client/cursor/egl/server`（1.20）打进包里，而 Wayland 客户端库必须与目标机的 mesa/EGL 同源。版本不匹配时 WebKit 的渲染进程建不出 EGL display，**现象是"窗口空白 + WebKitWebProcess SIGABRT"**（实测：Omarchy/Arch 的 wayland 1.26 + 包内 1.20；日志里 `Could not create default EGL display: EGL_BAD_PARAMETER`）。`.deb` 走系统库，没有这个问题。
+  - 顺带的已知行为：AppImage 的 `AppRun` 钩子（linuxdeploy-plugin-gtk）写死 `GDK_BACKEND=x11`（上游为绕开 tauri#8541），所以 AppImage 运行时窗口落在 XWayland 下（`winicon.rs` 的 X11 图标路径反而生效）；实测 X11↔Wayland 剪贴板桥接正常，粘贴不受影响。
   - Release job 汇总所有产物，`workflow_dispatch` 触发时先建 draft。
 - **本地构建**：桌面端 `cd desktop && cargo tauri build`（开发期 `cargo build` 后直接跑 `target/debug/beeptype`，前端是单文件 HTML，无需前端构建链）；手机端 `cd app && flutter build apk --release --target-platform android-arm64`。
 - 仓库根的行尾与二进制属性由 `.gitattributes` 统一（`* text=auto eol=lf`）；`.trae/`、`target/`、签名文件在 `.gitignore` 中排除。
