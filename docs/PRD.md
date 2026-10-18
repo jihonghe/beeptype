@@ -583,7 +583,7 @@ PC 端语音输入是一个已被验证的真实需求。Windows 和 macOS 有�
 - BeepType 自己的窗口处于焦点时**跳过**粘贴，避免文字糊进配对窗口
 - 粘贴失败静默降级为「仅剪贴板」，文字不丢
 - Linux Wayland 按**合成器能力**判定：wlroots 系（Hyprland / Sway 等，暴露 `zwp_virtual_keyboard_manager_v1`）自动粘贴可用；GNOME/KDE 不暴露该协议 ⇒ 判定为不支持（回退纯剪贴板手动 Ctrl+V），设置页显示「当前桌面会话不支持全局按键模拟」
-- Wayland 下终端识别用不了（合成器不暴露焦点窗口）⇒ 一律发 `Ctrl+V`，终端里由用户自己按终端的粘贴键
+- Wayland 下终端识别走 wlroots 的顶层窗口协议（`zwlr_foreign_toplevel_manager_v1`）：命中终端时粘贴键切 `Ctrl+Shift+V`（enigo 在 Wayland 下发不出 Shift ⇒ 交给 `wtype`），并且**终端里不自动回车**；`wtype` 缺失时退化为手动粘贴
 
 > 时序设计、已经规避掉的竞态（X11 所有权传播）与仍然存在的边界见 [TECH_DESIGN.md](./TECH_DESIGN.md#10-粘贴时序与残余竞态)。
 
@@ -1353,7 +1353,7 @@ token（长期凭证）
 | 编号 | 验收项 | 验证方法 | 通过标准 |
 |---|---|---|---|
 | AC-27 | Linux X11 | 在 Deepin 25 X11 下测试 | 配对、发送、剪贴板写入全部正常 |
-| AC-28 | Linux Wayland（按合成器分两种结果） | GNOME Wayland（不暴露虚拟输入协议）与 wlroots 系（Hyprland / Sway）各测一遍 | GNOME：配对、发送、剪贴板写入正常；自动粘贴/自动发送不可用（回退手动 Ctrl+V），设置页显示「当前桌面会话不支持全局按键模拟」。Hyprland：同样的基本功能之外，**自动粘贴与自动发送可用**（走合成器虚拟键盘协议）；Wayland 下终端识别不可用 ⇒ 终端里为 `Ctrl+V` |
+| AC-28 | Linux Wayland（按合成器分两种结果） | GNOME Wayland（不暴露虚拟输入协议）与 wlroots 系（Hyprland / Sway）各测一遍 | GNOME：配对、发送、剪贴板写入正常；自动粘贴/自动发送不可用（回退手动 Ctrl+V），设置页显示「当前桌面会话不支持全局按键模拟」。Hyprland：同样的基本功能之外，**自动粘贴与自动发送可用**（走合成器虚拟键盘协议）；终端识别可用 ⇒ 终端里 `Ctrl+Shift+V`（经 `wtype`）且不自动回车；回车前复核焦点未变（变了就跳过发送）|
 | AC-29 | macOS | 在 macOS 12+ 下测试 | 同上 |
 | AC-30 | Windows | 在 Windows 11 下测试 | 同上 |
 

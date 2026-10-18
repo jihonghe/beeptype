@@ -1373,23 +1373,36 @@ impl<R: Runtime> ServerState<R> {
         if enabled && crate::paste::auto_paste_supported() && !own_window_focused {
             // 注入前记下焦点窗口：回车前复核它没变，否则回车会落到用户刚切过去的
             // 窗口里（这条检查是"给足回车余量"的前提，见 docs/TECH_DESIGN.md 第 10 节）
-            let focus_before = crate::paste::focused_window_id();
+            let focus_before = crate::paste::focused_window_key();
             match crate::paste::simulate_paste() {
-                Ok(mut enigo) => {
+                Ok(enigo) => {
                     pasted = true;
                     // 自动发送：粘贴成功后模拟 Enter，复用同一条 enigo 连接
                     let auto_send = self.auto_send.load(Ordering::Relaxed);
                     if auto_send && crate::paste::auto_send_supported() {
-                        let focus_after = crate::paste::focused_window_id();
-                        if matches!((focus_before, focus_after), (Some(a), Some(b)) if a != b) {
-                            // 用户在这几十/几百毫秒里切了窗口：不发回车（文字已粘贴，
+                        // 顺序：先等满回车余量 → 再复核焦点 → 最后才按下回车。
+                        // 复核必须发生在等待之后，覆盖的才是"粘贴完成到回车落下"
+                        // 这段几百毫秒（用户最可能在这里切窗口）。
+                        crate::paste::wait_before_enter(text.chars().count());
+                        let focus_after = crate::paste::focused_window_key();
+                        log::debug!("Focus check before/after enter: {focus_before:?} / {focus_after:?}");
+                        if crate::paste::should_skip_enter(focus_before, focus_after) {
+                            // 用户在这几百毫秒里切了窗口：不发回车（文字已粘贴，
                             // 需要的话由用户自己按回车），只记日志不打扰
                             info!("Auto-send skipped: focus window changed during paste");
-                        } else {
-                            match crate::paste::simulate_enter(&mut enigo, text.chars().count()) {
+                        } else if crate::paste::focus_is_terminal() {
+                            // 终端里 Enter 是"执行命令"而不是"发送"，这条损失真实且不可逆
+                            // ⇒ 一律不自动按（要开的话等「自定义键位」里的发送键设置）
+                            info!("Auto-send skipped: focused window is a terminal");
+                        } else if let Some(mut enigo) = enigo {
+                            match crate::paste::send_enter(&mut enigo) {
                                 Ok(()) => info!("Auto-send: Enter sent"),
                                 Err(e) => warn!("Auto-send failed: {}", e),
                             }
+                        } else {
+                            // 这次不是 enigo 发的（Wayland 终端走 wtype）：没有可复用的
+                            // 连接，而且终端本来就不自动回车，正常不该走到这里
+                            info!("Auto-send skipped: no reusable key connection (wtype path)");
                         }
                     }
                 }

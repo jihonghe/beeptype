@@ -34,6 +34,8 @@ base64 = "0.22"
 x11rb = "0.13"
 # 探测合成器是否提供虚拟输入协议（enigo 的 wayland 后端依赖同一个 crate，版本保持一致）
 wayland-client = "0.31"
+# wlroots 的 foreign-toplevel 协议：Wayland 下读焦点窗口（终端识别与回车前复核都靠它）
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

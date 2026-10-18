@@ -388,6 +388,11 @@ pub fn run() {
                 "Key injection backend: {} (this decides whether auto-paste is possible)",
                 paste::injection_backend().label()
             );
+            // Wayland 下"谁在焦点"只能靠合成器的顶层窗口协议（见 wayland_input.rs）：
+            // 终端识别与回车前复核都要它，所以后端是 wlroots 时起一个常驻跟踪线程
+            if paste::injection_backend() == paste::InjectionBackend::WlrWayland {
+                wayland_input::start_focus_tracker();
+            }
             info!("Auto-paste supported on this session: {paste_supported}");
             let effective_auto_paste = auto_paste_config && paste_supported;
             let effective_auto_send = auto_send_config && effective_auto_paste && send_supported;

@@ -56,9 +56,11 @@ fn enter_delay(text_chars: usize) -> Duration {
     ENTER_BASE_DELAY + Duration::from_millis(extra_ms as u64)
 }
 
-/// WM_CLASS 精确命中这些值时视为终端（名字不含 "terminal" 的异类）。
-/// 其余终端只要类名包含 "terminal" 即自动覆盖（deepin-terminal、
-/// gnome-terminal、xfce4-terminal、terminator、tilix、ptyxis 等）。
+/// 精确命中这些值时视为终端（名字不含 "terminal" 的异类）。
+///
+/// 两个平台都用这一份：X11 拿 WM_CLASS（`xterm`、`kitty`…），Wayland 拿 app_id
+/// （`foot`、`kitty`，也可能是反向域名形式 `com.mitchellh.ghostty`、
+/// `org.wezfurlong.wezterm`）。判定顺序见 `is_terminal_name`。
 const TERMINAL_CLASSES: &[&str] = &[
     "xterm",
     "uxterm",
@@ -181,6 +183,50 @@ pub fn auto_paste_supported() -> bool {
 #[cfg(target_os = "linux")]
 const X11_DISABLED_DISPLAY: &str = "beeptype-wayland-only";
 
+/// 这次粘贴用哪条路（抽成纯函数，把"哪个平台哪个目标用哪种注入"钉进单测）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PastePlan {
+    /// 用 enigo 发快捷键（`with_shift` = 终端里的 Ctrl+Shift+V）
+    Enigo { with_shift: bool },
+    /// Wayland 终端：交给外部 `wtype` 发 Ctrl+Shift+V（见 `wtype_paste_in_terminal`）
+    WtypeTerminal,
+}
+
+fn paste_plan(backend: InjectionBackend, terminal: bool) -> PastePlan {
+    if backend == InjectionBackend::WlrWayland && terminal {
+        PastePlan::WtypeTerminal
+    } else {
+        PastePlan::Enigo { with_shift: terminal }
+    }
+}
+
+/// Wayland 会话下往终端粘贴：用 wtype 发 Ctrl+Shift+V。
+///
+/// 为什么不用 enigo：它给修饰键只发协议里那个"修饰位"请求（`modifiers`）、不发按键
+/// 事件。实测在 Hyprland 上 Shift 因此到不了应用（靶子只看到 `GDK_CONTROL_MASK`），
+/// 终端于是不粘贴；而 wtype 把修饰键当普通按键按下，实测能正确送达
+/// （靶子收到 `mods=['GDK_SHIFT_MASK','GDK_CONTROL_MASK']`，foot 里粘贴成功）。
+///
+/// wtype 不在 PATH 或执行失败时返回 Err：调用方按"没粘上"处理，文字仍在剪贴板里，
+/// 用户自己按终端的粘贴键即可（不静默假装成功）。
+#[cfg(target_os = "linux")]
+fn wtype_paste_in_terminal() -> Result<(), String> {
+    let output = std::process::Command::new("wtype")
+        .args([
+            "-M", "ctrl", "-M", "shift", "-k", "v", "-m", "shift", "-m", "ctrl",
+        ])
+        .output()
+        .map_err(|e| format!("wtype 未能启动（没装？）：{e}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "wtype 退出码 {:?}：{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
+}
+
 /// 构造 enigo 设置：Wayland 会话下只保留虚拟键盘后端（见上）
 fn enigo_settings() -> Settings {
     #[allow(unused_mut)]
@@ -194,13 +240,21 @@ fn enigo_settings() -> Settings {
     settings
 }
 
-/// 模拟 Enter 键发送（必须在 simulate_paste() 成功之后调用）。
+/// 发回车之前的等待（安全余量，见模块文档）。
+///
+/// **等待与复核的顺序是有意的**：调用方要先 `wait_before_enter()`、再复核焦点、
+/// 最后才 `send_enter()`。这样复核覆盖的正是"粘贴完成 → 回车落下"这段几百毫秒——
+/// 用户最可能在这段时间里切窗口，而早期实现在粘贴后立刻复核，等于只盯了粘贴本身
+/// 那几十毫秒，闸门形同虚设（2026-10-18 在 Wayland 上真机才发现）。
+pub fn wait_before_enter(text_chars: usize) {
+    std::thread::sleep(enter_delay(text_chars));
+}
+
+/// 模拟 Enter 键（调用方需先 `wait_before_enter()` 并完成焦点复核）。
 ///
 /// 复用 simulate_paste() 交回的 enigo 实例，让粘贴与回车走同一条连接：
-/// 同连接内的请求由 X server 按序处理，回车不会乱序跑到粘贴前面。
-/// 调用线程阻塞 `enter_delay(text_chars)` + 按键耗时。
-pub fn simulate_enter(enigo: &mut Enigo, text_chars: usize) -> Result<(), String> {
-    std::thread::sleep(enter_delay(text_chars));
+/// 同连接内的请求由 compositor/X server 按序处理，回车不会乱序跑到粘贴前面。
+pub fn send_enter(enigo: &mut Enigo) -> Result<(), String> {
     enigo
         .key(Key::Unicode('\r'), Direction::Click)
         .map_err(|e| format!("enter key: {e}"))
@@ -213,58 +267,88 @@ pub fn auto_send_supported() -> bool {
 
 /// 向当前焦点窗口发送"粘贴"快捷键：
 /// - macOS：Cmd+V；
-/// - Linux 终端窗口：Ctrl+Shift+V；
+/// - Linux 终端窗口：Ctrl+Shift+V（Wayland 下交给 wtype，见 `wtype_paste_in_terminal`）；
 /// - 其余：Ctrl+V。
 ///
 /// 必须在剪贴板写入成功之后调用；调用线程阻塞约 50ms。
 /// 任何窗口检测失败都安全回退到 Ctrl+V。
-/// 成功时交回 enigo 实例，供随后的自动发送复用同一条连接。
-pub fn simulate_paste() -> Result<Enigo, String> {
+///
+/// 成功时交回 enigo 实例，供随后的自动发送**复用同一条连接**；返回 `None` 表示这次
+/// 不是用 enigo 发的（Wayland 终端走 wtype），调用方没有可复用的连接。
+pub fn simulate_paste() -> Result<Option<Enigo>, String> {
     std::thread::sleep(PRE_PASTE_DELAY);
 
-    let mut enigo = Enigo::new(&enigo_settings()).map_err(|e| format!("Enigo init: {e}"))?;
+    #[cfg(target_os = "linux")]
+    let terminal = terminal_at_focus();
+    #[cfg(not(target_os = "linux"))]
+    let terminal = false;
 
-    #[cfg(target_os = "macos")]
-    let result = {
-        info!("Auto-paste shortcut: Cmd+V");
-        send_paste(&mut enigo, Key::Meta, false)
-    };
+    #[cfg(target_os = "linux")]
+    if injection_backend() == InjectionBackend::WlrWayland {
+        debug!("Focus at paste time: {:?} (terminal={terminal})", focused_window_key());
+    }
 
-    #[cfg(not(target_os = "macos"))]
-    let result = {
-        // 终端识别靠 X11 焦点窗口，Wayland 下拿不到（合成器不对外暴露"谁在焦点"）
-        // ⇒ 那里一律发 Ctrl+V，终端用户需要自己按终端的粘贴键
-        #[cfg(target_os = "linux")]
-        let terminal = if injection_backend() == InjectionBackend::WlrWayland {
-            debug!("Terminal detection unavailable on Wayland; sending Ctrl+V");
-            false
-        } else {
-            focus_window_is_terminal()
-        };
-        #[cfg(not(target_os = "linux"))]
-        let terminal = false;
-        info!("Auto-paste shortcut: {}", if terminal { "Ctrl+Shift+V" } else { "Ctrl+V" });
-        send_paste(&mut enigo, Key::Control, terminal)
-    };
-
-    result?;
-    Ok(enigo)
+    match paste_plan(injection_backend(), terminal) {
+        PastePlan::WtypeTerminal => {
+            info!("Auto-paste shortcut: Ctrl+Shift+V (wtype)");
+            #[cfg(target_os = "linux")]
+            wtype_paste_in_terminal()?;
+            Ok(None)
+        }
+        PastePlan::Enigo { with_shift } => {
+            let mut enigo =
+                Enigo::new(&enigo_settings()).map_err(|e| format!("Enigo init: {e}"))?;
+            #[cfg(target_os = "macos")]
+            {
+                info!("Auto-paste shortcut: Cmd+V");
+                send_paste(&mut enigo, Key::Meta, false)?;
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                info!("Auto-paste shortcut: {}", if with_shift { "Ctrl+Shift+V" } else { "Ctrl+V" });
+                send_paste(&mut enigo, Key::Control, with_shift)?;
+            }
+            Ok(Some(enigo))
+        }
+    }
 }
 
-/// 当前焦点窗口（顶层）的 id，仅 Linux/X11 有值。
+/// 当前焦点窗口的"标识"，用于注入回车前复核"用户没有切走窗口"。
 ///
-/// 用于注入回车前复核"用户没有切走窗口"。检测不到（非 Linux、焦点在根窗口、
-/// X 连接失败）返回 None，调用方按"无从判断"处理，即保持原行为照常发送
-/// （fail-open：宁可漏掉一次检查，也不因为检查不了而少发一条消息）。
-pub fn focused_window_id() -> Option<u32> {
+/// - Linux/X11：焦点客户端窗口的 id（`x11:<id>`）；
+/// - wlroots 系 Wayland：合成器报的焦点顶层窗口 `wayland:<app_id>|<title>`
+///   （`wayland_input.rs` 的跟踪器）。带上标题是有意的：同一个应用开两个窗口时，
+///   只比 app_id 会漏判"切到了同一应用的另一个窗口"，而漏判的方向是**多发**一个
+///   回车——那正是我们要防的。反过来，标题变化（如终端标题跟着命令变）只会让
+///   我们**少发**一次回车，是安全方向；
+/// - GNOME/KDE 的 Wayland、非 Linux、焦点读不到：`None`。
+///
+/// `None` 一律按"无从判断"处理，即保持原行为照常发送（fail-open：宁可漏掉一次
+/// 检查，也不因为检查不了而少发一条消息）。
+pub fn focused_window_key() -> Option<String> {
     #[cfg(target_os = "linux")]
     {
-        focus_window_id_and_classes().ok().flatten().map(|(id, _)| id)
+        if injection_backend() == InjectionBackend::WlrWayland {
+            return crate::wayland_input::current_focus()
+                .map(|w| format!("wayland:{}|{}", w.app_id, w.title));
+        }
+        focus_window_id_and_classes()
+            .ok()
+            .flatten()
+            .map(|(id, _)| format!("x11:{id}"))
     }
     #[cfg(not(target_os = "linux"))]
     {
         None
     }
+}
+
+/// 注入回车前是否应当放弃发送：前后两次焦点标识都读到了、且不一样。
+///
+/// 两边任一读不到就是"无从判断"，按既有约定照常发送（fail-open）。
+/// 抽成纯函数是为了把这条判断钉进单测——它是自动发送唯一的安全闸门。
+pub fn should_skip_enter(before: Option<String>, after: Option<String>) -> bool {
+    matches!((before, after), (Some(a), Some(b)) if a != b)
 }
 
 /// 发送 修饰键(+Shift) 按住 → V 单击 → 全部松开。
@@ -289,11 +373,40 @@ fn send_paste(enigo: &mut Enigo, modifier: Key, with_shift: bool) -> Result<(), 
     click.map_err(|e| format!("paste key: {e}"))
 }
 
-/// 判断 X11 当前焦点窗口（或其祖先）是否属于终端应用。
+/// 当前焦点窗口是不是终端（供自动发送决定要不要按回车）。
+///
+/// 与粘贴用的是同一套判定，只是**在按回车之前重新读一次**：这几十/几百毫秒里
+/// 用户如果把焦点移到了终端，那个回车就不该发（终端里 Enter 是"执行命令"）。
+pub fn focus_is_terminal() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        terminal_at_focus()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+/// 当前焦点窗口是不是终端。
+///
+/// - Linux/X11：读焦点窗口（或其祖先）的 WM_CLASS；
+/// - wlroots 系 Wayland：读跟踪器给的焦点顶层窗口 app_id；
+/// - 读不到、或平台不支持：一律 false（发默认的 Ctrl+V，不猜）。
 #[cfg(target_os = "linux")]
-fn focus_window_is_terminal() -> bool {
+fn terminal_at_focus() -> bool {
+    if injection_backend() == InjectionBackend::WlrWayland {
+        return match crate::wayland_input::current_focus() {
+            Some(window) => is_terminal_name(&window.app_id),
+            None => {
+                debug!("Focus tracker has no focus window yet; assuming not a terminal");
+                false
+            }
+        };
+    }
+
     match focus_window_id_and_classes() {
-        Ok(Some((_, classes))) => classes.iter().any(|c| class_is_terminal(c)),
+        Ok(Some((_, classes))) => classes.iter().any(|c| is_terminal_name(c)),
         Ok(None) => false,
         Err(e) => {
             warn!("Focus window detection failed, falling back to Ctrl+V: {e}");
@@ -302,10 +415,28 @@ fn focus_window_is_terminal() -> bool {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn class_is_terminal(class: &str) -> bool {
-    let c = class.to_ascii_lowercase();
-    c.contains("terminal") || c.contains("retro-term") || TERMINAL_CLASSES.contains(&c.as_str())
+/// 名字（X11 的 WM_CLASS 或 Wayland 的 app_id）是不是终端。
+///
+/// 三条判据，从宽到窄：
+/// 1. 含 "terminal" 一律算（覆盖 deepin-terminal / gnome-terminal / xfce4-terminal
+///    等一大批），含 "retro-term" 也算；
+/// 2. 整个名字精确命中清单（`xterm`、`foot`、`kitty`…）；
+/// 3. **取反向域名 app_id 的最后一段**再比对清单——Wayland 客户端习惯用
+///    `com.mitchellh.ghostty`、`org.wezfurlong.wezterm`、`app.devsuite.Ptyxis`
+///    这种名字，取末段就退化回我们熟悉的那些终端名。
+///    只在有 `.` 时才取末段，避免把 `ghostty` 这类平铺名字也切一刀。
+fn is_terminal_name(name: &str) -> bool {
+    let c = name.to_ascii_lowercase();
+    if c.contains("terminal") || c.contains("retro-term") {
+        return true;
+    }
+    if TERMINAL_CLASSES.contains(&c.as_str()) {
+        return true;
+    }
+    match c.rsplit_once('.') {
+        Some((_, last)) => TERMINAL_CLASSES.contains(&last),
+        None => false,
+    }
 }
 
 /// 读取焦点窗口链路第一个带 WM_CLASS 的窗口：返回 (窗口 id, 类名列表)。
@@ -436,5 +567,69 @@ mod tests {
     fn test_injection_backend_is_total() {
         let _ = injection_backend();
     }
-}
+    /// 终端识别要同时认两种命名：X11 的 WM_CLASS（`xterm`/`kitty`）与 Wayland 的
+    /// app_id（`foot`，或反向域名 `com.mitchellh.ghostty`）。
+    #[test]
+    fn test_is_terminal_name() {
+        // 两条平台各来一批真名
+        for name in [
+            "xterm",
+            "kitty",
+            "foot",
+            "ghostty",                    // X11 WM_CLASS
+            "com.mitchellh.ghostty",      // Wayland app_id（反向域名）
+            "org.wezfurlong.wezterm",
+            "app.devsuite.Ptyxis",
+            "com.raggesilver.BlackBox",
+            "org.gnome.Terminal",         // 靠 "terminal" 命中
+            "deepin-terminal",
+            "xfce4-terminal",
+            "cool-retro-term",
+            "XTERM",                      // 大小写不敏感
+        ] {
+            assert!(is_terminal_name(name), "{name} 应识别为终端");
+        }
 
+        // 反面：普通应用、以及"长得像"的陷阱
+        for name in [
+            "zcode",
+            "microsoft-edge",
+            "com.mitchellh.ghostty-settings", // 末段不是清单里的名字
+            "org.gnome.Nautilus",
+            "football",                       // 平铺名字只认精确匹配，不做子串
+            "com.example.termfmt",
+            "",
+        ] {
+            assert!(!is_terminal_name(name), "{name} 不应识别为终端");
+        }
+    }
+
+    /// 粘贴路由：只有"Wayland + 终端"这一格交给 wtype（enigo 在 Wayland 下发不出
+    /// Shift）；X11 终端与其它情况仍走 enigo，非终端一律不带 Shift。
+    #[test]
+    fn test_paste_plan_matrix() {
+        use InjectionBackend::*;
+        assert_eq!(
+            paste_plan(WlrWayland, true),
+            PastePlan::WtypeTerminal,
+            "Wayland 终端必须交给 wtype，否则 Shift 到不了终端"
+        );
+        assert_eq!(paste_plan(WlrWayland, false), PastePlan::Enigo { with_shift: false });
+        assert_eq!(paste_plan(Native, true), PastePlan::Enigo { with_shift: true });
+        assert_eq!(paste_plan(Native, false), PastePlan::Enigo { with_shift: false });
+        assert_eq!(paste_plan(Unsupported, true), PastePlan::Enigo { with_shift: true });
+    }
+
+    /// 回车前的安全闸门：只有"前后都读到了、且不一样"才跳过发送；
+    /// 读不到就按原行为照常发（fail-open，别因为检查不了就少发消息）。
+    #[test]
+    fn test_should_skip_enter_matrix() {
+        let a = Some("wayland:com.mitchellh.ghostty|~/code".to_string());
+        let b = Some("wayland:zcode|ZCode".to_string());
+        assert!(should_skip_enter(a.clone(), b.clone()), "切了窗口就不该发回车");
+        assert!(!should_skip_enter(a.clone(), a.clone()), "没切窗口照常发");
+        assert!(!should_skip_enter(None, b.clone()), "读不到之前 ⇒ 照常发");
+        assert!(!should_skip_enter(a.clone(), None), "读不到之后 ⇒ 照常发");
+        assert!(!should_skip_enter(None, None), "两边都读不到 ⇒ 照常发");
+    }
+}

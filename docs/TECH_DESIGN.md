@@ -297,6 +297,7 @@ pub fn write_verified(app: &AppHandle, text: &str) -> bool
 | macOS | `Cmd+V`（终端同样是 Cmd+V） |
 | Linux 终端窗口 | `Ctrl+Shift+V` |
 | Linux 其他 / Windows / Wayland | `Ctrl+V` |
+| Wayland 终端（wlroots 系） | `Ctrl+Shift+V`（经 `wtype`，见下） |
 | 自动发送 | Enter（`Key::Unicode('\r')`） |
 
 **注入后端按会话能力选**（`InjectionBackend`，判定抽成纯函数 `decide_backend` 便于单测）：
@@ -305,9 +306,15 @@ pub fn write_verified(app: &AppHandle, text: &str) -> bool
 |---|---|---|
 | Linux X11 | `Native`（XTest） | 有 `DISPLAY` |
 | Linux Wayland（wlroots：Hyprland / Sway…） | `WlrWayland` | 合成器注册表里有 `zwp_virtual_keyboard_manager_v1` 或 `zwp_input_method_manager_v2`（`wayland_input.rs` 探测，纯读无副作用） |
+| ↳ 其中**终端窗口** | `WtypeTerminal` | 同上，但粘贴键交给外部 `wtype`（见下） |
 | Linux Wayland（GNOME / KDE） | `Unsupported` | 不暴露上述协议 ⇒ 回退纯剪贴板 + 手动粘贴 |
 | Windows / macOS | `Native` | 各自的 SendInput / CGEvent |
 
+- **粘贴路由**（`paste_plan`，纯函数 + 单测）：只有"Wayland + 终端"这一格交给 `wtype`，其余都走 enigo。
+- **为什么 Wayland 终端非用 wtype 不可**：enigo 对修饰键只发协议里那个"修饰位"请求（`modifiers`）、**不发按键事件**。2026-10-18 在 Hyprland 上实测：它的 `Ctrl+Shift+V` 到不了应用（带按键日志的靶子只看到 `GDK_CONTROL_MASK`，Shift 丢了），终端因此不粘贴；而 `wtype` 把修饰键当普通按键按下，实测靶子收到 `mods=['GDK_SHIFT_MASK','GDK_CONTROL_MASK']`、foot 里粘贴成功。`wtype` 不在 PATH 或返回非零 ⇒ 本次按"没粘上"处理（文字仍在剪贴板，用户自己按终端的粘贴键），**不静默假装成功**。
+- **终端里不自动回车**（安全差异）：Enter 在终端里是"执行命令"，损失不可逆，所以检测到终端一律跳过自动发送（出口是路线图里的「自定义键位」）。
+- **焦点怎么读**（Wayland）：`wayland_input.rs` 用 `zwlr_foreign_toplevel_manager_v1` 常驻跟踪"哪个顶层窗口处于激活"，暴露 `wayland:<app_id>|<title>`；终端识别用同一个 app_id（`is_terminal_name` 认反向域名，`com.mitchellh.ghostty` → `ghostty`）。注意 `zwlr_foreign_toplevel_handle_v1` 的 `toplevel` 事件是**创建子对象**的：wayland-rs 必须在 `event_created_child` 里给出工厂，否则收到该事件就 panic（踩过，跟踪线程被打死、焦点永远读不到）。
+- **回车前的复核顺序（2026-10-18 修正的既有缺陷）**：必须是「等满回车余量 → 复核焦点 → 按下回车」。原实现是先复核再在 `simulate_enter` 里睡，等于只盯了粘贴本身那几十毫秒，"用户切了窗口"根本盖不住 ⇒ 闸门形同虚设（实测：粘贴后 250ms 切窗口，回车照发）。X11 与 Wayland 都受益于这次调整。
 - **Wayland 下只保留一个后端**：enigo 会把同一个按键发给**所有已连接的后端**，而 Hyprland 这类会话里 `DISPLAY`（XWayland）与 `WAYLAND_DISPLAY` 同时存在 ⇒ 两个后端都会连上 ⇒ 一次 `Ctrl+V` 被注入两遍（实测：XWayland 目标里文本被粘贴两次）。所以 Wayland 会话下给 enigo 传一个**连不上的 display 名**（`beeptype-wayland-only`，无 `:` ⇒ x11rb 解析即失败），只留虚拟键盘那条路。enigo 为此会打一行 `ERROR enigo::platform::x11] DisplayParsingError(..)`（实测日志原文），属**我们主动造成**，因此默认日志级别把 `enigo` 整条关掉（`info,enigo=off`）——注入真失败时由我们自己的 `Auto-paste failed: ...` 一行报告。
 
 - 终端识别（仅 Linux）：用 `x11rb` 读 X 的 `GetInputFocus`，再沿窗口树向上最多 20 层找 `WM_CLASS`（`res_name`/`res_class`）。命中判定 = 类名包含 `terminal`，或落在内置清单里（`xterm`、`kitty`、`alacritty`、`ghostty`、`wezterm`、`konsole`、`foot`、`cool-retro-term` 等异类终端）。任何检测失败都**安全回退 Ctrl+V**。

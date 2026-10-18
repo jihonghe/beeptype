@@ -427,6 +427,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-single-instance",
  "wayland-client",
+ "wayland-protocols-wlr",
  "x11rb",
 ]
 
