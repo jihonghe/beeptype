@@ -200,6 +200,43 @@ fn paste_plan(backend: InjectionBackend, terminal: bool) -> PastePlan {
     }
 }
 
+/// 终端里的自动粘贴是否可用：Wayland（wlroots）下需要外部 `wtype`（见下）。
+///
+/// 只影响"终端窗口"这一格——没装 `wtype` 时终端退化成手动粘贴（文字/图片仍在
+/// 剪贴板里，用户自己按 Ctrl+Shift+V），其它窗口的自动粘贴不受影响。
+/// 设置页据此给用户一行提示（不做弹窗/通知：它是能力说明，不是错误）。
+pub fn terminal_paste_ready() -> bool {
+    terminal_paste_ready_for(injection_backend(), wtype_in_path())
+}
+
+/// 判定抽成纯函数，便于单测覆盖（含非 Linux 分支）
+fn terminal_paste_ready_for(backend: InjectionBackend, wtype_present: bool) -> bool {
+    backend != InjectionBackend::WlrWayland || wtype_present
+}
+
+/// PATH 里有没有可执行的 `wtype`。自己走 PATH 而不是起进程/调 `which`：
+/// 只读文件元数据，零副作用。
+#[cfg(target_os = "linux")]
+fn wtype_in_path() -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        match std::fs::metadata(dir.join("wtype")) {
+            Ok(meta) => meta.is_file() && meta.permissions().mode() & 0o111 != 0,
+            Err(_) => false,
+        }
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn wtype_in_path() -> bool {
+    // 非 Linux 不走这条路（Windows/macOS 的终端粘贴用各自的注入）
+    true
+}
+
 /// Wayland 会话下往终端粘贴：用 wtype 发 Ctrl+Shift+V。
 ///
 /// 为什么不用 enigo：它给修饰键只发协议里那个"修饰位"请求（`modifiers`）、不发按键
@@ -618,6 +655,16 @@ mod tests {
         assert_eq!(paste_plan(Native, true), PastePlan::Enigo { with_shift: true });
         assert_eq!(paste_plan(Native, false), PastePlan::Enigo { with_shift: false });
         assert_eq!(paste_plan(Unsupported, true), PastePlan::Enigo { with_shift: true });
+    }
+
+    /// 终端自动粘贴的可用性：只有"Wayland + 没有 wtype"这一格不ready
+    #[test]
+    fn test_terminal_paste_ready_matrix() {
+        assert!(terminal_paste_ready_for(InjectionBackend::WlrWayland, true));
+        assert!(!terminal_paste_ready_for(InjectionBackend::WlrWayland, false));
+        // 其它后端不看 wtype
+        assert!(terminal_paste_ready_for(InjectionBackend::Native, false));
+        assert!(terminal_paste_ready_for(InjectionBackend::Unsupported, false));
     }
 
     /// 回车前的安全闸门：只有"前后都读到了、且不一样"才跳过发送；

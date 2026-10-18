@@ -312,6 +312,7 @@ pub fn write_verified(app: &AppHandle, text: &str) -> bool
 
 - **粘贴路由**（`paste_plan`，纯函数 + 单测）：只有"Wayland + 终端"这一格交给 `wtype`，其余都走 enigo。
 - **为什么 Wayland 终端非用 wtype 不可**：enigo 对修饰键只发协议里那个"修饰位"请求（`modifiers`）、**不发按键事件**。2026-10-18 在 Hyprland 上实测：它的 `Ctrl+Shift+V` 到不了应用（带按键日志的靶子只看到 `GDK_CONTROL_MASK`，Shift 丢了），终端因此不粘贴；而 `wtype` 把修饰键当普通按键按下，实测靶子收到 `mods=['GDK_SHIFT_MASK','GDK_CONTROL_MASK']`、foot 里粘贴成功。`wtype` 不在 PATH 或返回非零 ⇒ 本次按"没粘上"处理（文字仍在剪贴板，用户自己按终端的粘贴键），**不静默假装成功**。
+  **能力要告诉用户**：`paste::terminal_paste_ready()` 查一次 PATH（只读文件元数据），缺 wtype 时 ① 启动日志记一行，② 设置页在"粘贴与发送"那组下面显示一行说明（不做弹窗/通知：它是能力说明，不是错误）。`SettingsInfo.terminalPasteReady` 传给前端决定显隐。
 - **终端里不自动回车**（安全差异）：Enter 在终端里是"执行命令"，损失不可逆，所以检测到终端一律跳过自动发送（出口是路线图里的「自定义键位」）。
 - **焦点怎么读**（Wayland）：`wayland_input.rs` 用 `zwlr_foreign_toplevel_manager_v1` 常驻跟踪"哪个顶层窗口处于激活"，暴露 `wayland:<app_id>|<title>`；终端识别用同一个 app_id（`is_terminal_name` 认反向域名，`com.mitchellh.ghostty` → `ghostty`）。注意 `zwlr_foreign_toplevel_handle_v1` 的 `toplevel` 事件是**创建子对象**的：wayland-rs 必须在 `event_created_child` 里给出工厂，否则收到该事件就 panic（踩过，跟踪线程被打死、焦点永远读不到）。
 - **回车前的复核顺序（2026-10-18 修正的既有缺陷）**：必须是「等满回车余量 → 复核焦点 → 按下回车」。原实现是先复核再在 `simulate_enter` 里睡，等于只盯了粘贴本身那几十毫秒，"用户切了窗口"根本盖不住 ⇒ 闸门形同虚设（实测：粘贴后 250ms 切窗口，回车照发）。X11 与 Wayland 都受益于这次调整。

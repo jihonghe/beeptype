@@ -64,6 +64,8 @@ struct SettingsInfo {
     has_primary: bool,
     /// 已绑定常用设备名称
     primary_name: Option<String>,
+    /// 终端里的自动粘贴是否可用（Wayland 缺 wtype 时为 false，设置页据此提示）
+    terminal_paste_ready: bool,
     /// 应用版本：取自构建时的 tauri.conf.json（发布时由 CI 按 git tag 改写），
     /// 因此与安装包/发布产物一致。不要用 env!("CARGO_PKG_VERSION")——那是
     /// Cargo.toml 的 crate 版本，CI 不同步它，会一直显示旧号
@@ -201,6 +203,7 @@ fn get_settings(
         autostart,
         has_primary,
         primary_name,
+        terminal_paste_ready: paste::terminal_paste_ready(),
         version: app.package_info().version.to_string(),
     }
 }
@@ -397,6 +400,12 @@ pub fn run() {
             let effective_auto_paste = auto_paste_config && paste_supported;
             let effective_auto_send = auto_send_config && effective_auto_paste && send_supported;
             info!("Auto-send supported: {send_supported}, effective: {effective_auto_send}");
+            if !paste::terminal_paste_ready() {
+                info!(
+                    "Terminal auto-paste unavailable: wtype not found on PATH \
+                     (terminals fall back to manual paste; see settings page)"
+                );
+            }
             let server_state = AppServerState::new(
                 app.handle().clone(),
                 port,

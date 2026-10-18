@@ -490,7 +490,7 @@ PC 端语音输入是一个已被验证的真实需求。Windows 和 macOS 有�
 **描述**：PC 端支持开机自动启动，默认关闭。
 
 **实现**：Tauri autostart 插件
-- 设置页开关控制；启动时以配置为准同步系统实际状态（Linux 写 `~/.config/autostart/beeptype.desktop`）
+- 设置页开关控制；启动时以配置为准同步系统实际状态（Linux 写 `~/.config/autostart/BeepType.desktop`，文件名取 productName）
 - 启动后主窗口直接可见（不是静默托盘启动）；点叉关闭即隐藏到托盘
 
 ---

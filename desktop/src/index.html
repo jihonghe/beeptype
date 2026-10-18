@@ -345,6 +345,12 @@
                     <span class="track"></span>
                 </label>
             </div>
+            <div class="setting-row" id="term-paste-row" style="display:none">
+                <div class="setting-text">
+                    <div class="setting-title">终端里的自动粘贴需要 wtype</div>
+                    <div class="setting-sub" id="term-paste-note">系统里没找到 wtype：在终端窗口里请自己按 Ctrl+Shift+V（文字与图片都已在剪贴板里）。装好 wtype 后重开本程序即可恢复。</div>
+                </div>
+            </div>
         </div>
 
         <p class="group-label">连接行为</p>
@@ -652,6 +658,11 @@
             } else {
                 apNote.textContent = '模拟快捷键把剪贴板内容粘贴到当前光标处';
                 apNote.classList.remove('bad');
+            }
+            // 终端那格的能力说明：Wayland 下终端粘贴要外部 wtype，缺了就明说
+            const termRow = document.getElementById('term-paste-row');
+            if (termRow) {
+                termRow.style.display = s.terminalPasteReady ? 'none' : 'flex';
             }
             if (!s.autoSendSupported) {
                 asNote.textContent = '当前会话不支持自动发送';
