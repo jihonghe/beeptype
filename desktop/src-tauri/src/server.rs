@@ -1308,7 +1308,13 @@ impl<R: Runtime> ServerState<R> {
         let mut pasted = false;
         if enabled && crate::paste::auto_paste_supported() && !own_window_focused {
             match crate::paste::simulate_paste() {
-                Ok(_) => pasted = true,
+                Ok(_) => {
+                    pasted = true;
+                    // 注入成功不等于目标读到了：剪贴板只有一个槽位，而手机收到 ack
+                    // 就会发下一张 ⇒ 必须等目标把这一张读走再回 ack，否则下一张的
+                    // 写入会覆盖它（"选 3 张只到 2 张"的根因，见 paste.rs 常量注释）
+                    crate::paste::wait_image_settle(bytes.len());
+                }
                 Err(e) => warn!("Image auto-paste failed: {e}"),
             }
         }

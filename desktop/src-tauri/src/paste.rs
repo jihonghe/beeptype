@@ -46,6 +46,35 @@ const ENTER_BASE_DELAY: Duration = Duration::from_millis(250);
 /// 规律（与机器无关），因此可以放心写成公式，而不是按机型标定。
 const ENTER_EXTRA_MS_PER_CHARS: usize = 200;
 
+/// 图片粘贴后、回 ack 之前的基准余量。
+///
+/// 为什么图片需要它：**手机是一张等一个 ack 才发下一张**，而剪贴板只有一个槽位。
+/// 我们注入 Ctrl+V 只代表"消息发出去了"，目标应用（Chromium/Electron 系）读剪贴板
+/// 是异步的——若这时立刻回 ack，下一张的写入会赶在目标读完这一张之前把它覆盖掉，
+/// 结果就是"选 3 张只到 2 张"（2026-10-18 复现：三张图三次粘贴读到的全是最后一张）。
+/// 所以余量必须补在 ack 之前：它是"下一张什么时候能来"的唯一闸门。
+const IMAGE_SETTLE_BASE: Duration = Duration::from_millis(300);
+
+/// 每 100KB 追加 10ms：图越大，目标读得越慢（与文本的按字数递增同一条规律）
+const IMAGE_SETTLE_EXTRA_MS_PER_100KB: usize = 10;
+/// 100KB 的字节数
+const IMAGE_SETTLE_EXTRA_STEP_BYTES: usize = 100 * 1024;
+
+/// 追加余量的上限，避免超大图把 ack 拖得过久
+const IMAGE_SETTLE_MAX_EXTRA: Duration = Duration::from_millis(700);
+
+/// 图片粘贴余量：基准 + 按体积有界递增（上限合计 1 秒）
+pub fn image_settle_delay(image_bytes: usize) -> Duration {
+    let extra_ms = (image_bytes / IMAGE_SETTLE_EXTRA_STEP_BYTES) * IMAGE_SETTLE_EXTRA_MS_PER_100KB;
+    let extra_ms = extra_ms.min(IMAGE_SETTLE_MAX_EXTRA.as_millis() as usize);
+    IMAGE_SETTLE_BASE + Duration::from_millis(extra_ms as u64)
+}
+
+/// 等满图片余量（调用方在注入粘贴键之后、回 ack 之前调用，见 `image_settle_delay`）
+pub fn wait_image_settle(image_bytes: usize) {
+    std::thread::sleep(image_settle_delay(image_bytes));
+}
+
 /// 追加余量的上限，避免超长文本把回车拖得过久
 const ENTER_EXTRA_MAX_DELAY: Duration = Duration::from_millis(500);
 
@@ -655,6 +684,30 @@ mod tests {
         assert_eq!(paste_plan(Native, true), PastePlan::Enigo { with_shift: true });
         assert_eq!(paste_plan(Native, false), PastePlan::Enigo { with_shift: false });
         assert_eq!(paste_plan(Unsupported, true), PastePlan::Enigo { with_shift: true });
+    }
+
+    /// 图片余量：小图只取基准值，大图按体积递增但有上限，整体不超过 1 秒；
+    /// 且必须严格大于基准值的一半（太小就挡不住覆盖——这是这个闸门存在的理由）。
+    #[test]
+    fn test_image_settle_delay_is_conservative_and_bounded() {
+        assert_eq!(image_settle_delay(0), IMAGE_SETTLE_BASE);
+        assert_eq!(image_settle_delay(99 * 1024), IMAGE_SETTLE_BASE);
+        assert_eq!(
+            image_settle_delay(100 * 1024),
+            IMAGE_SETTLE_BASE + Duration::from_millis(10)
+        );
+        assert!(image_settle_delay(4 * 1024 * 1024) > IMAGE_SETTLE_BASE);
+
+        let worst = image_settle_delay(usize::MAX / 2);
+        assert_eq!(worst, IMAGE_SETTLE_BASE + IMAGE_SETTLE_MAX_EXTRA);
+        assert!(worst <= Duration::from_millis(1000));
+        assert!(worst >= Duration::from_millis(300));
+    }
+
+    #[test]
+    fn test_image_settle_delay_monotonic() {
+        assert!(image_settle_delay(0) <= image_settle_delay(200 * 1024));
+        assert!(image_settle_delay(200 * 1024) <= image_settle_delay(8 * 1024 * 1024));
     }
 
     /// 终端自动粘贴的可用性：只有"Wayland + 没有 wtype"这一格不ready
