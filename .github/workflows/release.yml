@@ -163,8 +163,9 @@ jobs:
           rm -rf squashfs-root appimagetool
           # 自检：重新解出来的包里不该再有这些库
           ./"$IMG" --appimage-extract 'usr/lib/libwayland-*' > /dev/null 2>&1 || true
-          if [ -e squashfs-root/usr/lib/libwayland-client.so.0 ]; then
-            echo "::error::libwayland 仍留在 AppImage 里"
+          left=$(find squashfs-root/usr/lib -maxdepth 1 -name 'libwayland-*.so*' 2>/dev/null | wc -l)
+          if [ "$left" -ne 0 ]; then
+            echo "::error::libwayland 仍留在 AppImage 里（$left 个）"
             exit 1
           fi
           rm -rf squashfs-root
