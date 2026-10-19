@@ -749,27 +749,30 @@
             // 用来判断"还没有绑定手机且当前是临时接入"→ 可以一键绑定
             let pair = null;
             try { pair = await invoke('get_pairing_info'); } catch (e) { /* 忽略 */ }
-            renderDeviceCard(s, pair);
+            // 取数失败时退回设置里那份常驻设备字段（来自落盘配置）：宁可显示"已绑定"，
+            // 也不要因为一次取数失败就把卡片错误地显示成"还没有绑定手机"
+            renderDeviceCard(pair || { hasPrimary: s.hasPrimary, primaryName: s.primaryName });
         }
 
         /* ---------------- 「手机绑定」卡（设置页） ---------------- */
-        // 同样按结构键增量更新：1s 轮询也会调它，因此手机断开/转正后卡片会
+        // 同样按结构键增量更新：可见时的 1s 轮询也会调它，因此手机断开/转正后卡片会
         // 立刻纠正——不然它会一直停在"临时接入 + 绑定这台手机"，用户点下去
-        // 才发现这台手机早就不在线了。
+        // 才发现这台手机早就不在线了。数据来源统一用 get_pairing_info 里那份
+        // 常驻设备字段（hasPrimary/primaryName），不额外拉一次 get_settings。
         let lastDeviceKey = '';
-        function renderDeviceCard(s, pair) {
+        function renderDeviceCard(pair) {
             const dc = document.getElementById('device-card');
             if (!dc) return;
             const canPromote = !!(pair && pair.connected && !pair.sessionIsPrimary);
-            const key = s.hasPrimary
-                ? 'primary:' + (s.primaryName || '')
+            const key = pair && pair.hasPrimary
+                ? 'primary:' + (pair.primaryName || '')
                 : (canPromote ? 'promote:' + (pair.connectedName || '') : 'empty');
             if (lastDeviceKey === key) return;
             lastDeviceKey = key;
 
-            if (s.hasPrimary) {
+            if (pair && pair.hasPrimary) {
                 dc.innerHTML =
-                    '<div class="device-name">' + escapeHtml(s.primaryName || '已绑定的手机') + '</div>' +
+                    '<div class="device-name">' + escapeHtml(pair.primaryName || '已绑定的手机') + '</div>' +
                     '<div class="setting-sub">打开手机 BeepType 即自动连接</div>' +
                     '<button class="btn-danger-block" id="btn-unbind">解除绑定</button>';
                 document.getElementById('btn-unbind').onclick = async (e) => {
@@ -814,24 +817,41 @@
         }
 
         /* ---------------- 轮询（主页数据 + 设置页「手机绑定」卡） ---------------- */
+        // 页面活着就一直轮询：**窗口隐藏即销毁**（Rust 侧 create_main_window /
+        // on_window_event），所以"页面在"与"窗口可见"是一回事，不需要再看可见性
+        // （document.hidden 在 WebKitGTK 下也不可靠）。托盘常驻期间根本没有这个页面，
+        // 自然也就没有轮询与配对码续期。
         async function refresh() {
             try {
-                const [info, s] = await Promise.all([
-                    invoke('get_pairing_info'),
-                    invoke('get_settings').catch(() => null),
-                ]);
+                // 「手机绑定」卡要的常驻设备字段就在这份数据里（hasPrimary/primaryName），
+                // 不必再捎带一次 get_settings：设置页那些能力/自启状态只在进设置页时取。
+                const info = await invoke('get_pairing_info');
                 if (!info) return;
                 renderStatus(info);
                 renderPairing(info);
                 // 设置页开着时同样即时纠正（结构键去重，不会每秒重绘）
-                if (s) renderDeviceCard(s, info);
+                renderDeviceCard(info);
             } catch (e) {
                 console.error('refresh failed:', e);
             }
         }
 
+        // 初始落点：窗口是被销毁后重建的（托盘唤起），那次点击想落的页面记在后端
+        // ——新建的 webview 还没加载完，事件会丢，所以由这里主动取走。取不到就是
+        // 启动/主页，什么都不用做。直接切、不播过渡：此刻没有"上一屏"可交叉淡化。
+        async function applyInitialView() {
+            try {
+                const view = await invoke('take_pending_view');
+                if (view !== 'settings') return;
+                document.getElementById('view-home').classList.remove('active');
+                document.getElementById('view-settings').classList.add('active');
+                renderSettings();
+            } catch (e) { /* 忽略：留在主页 */ }
+        }
+
         refresh();
         setInterval(refresh, 1000);
+        applyInitialView();
 
         // 强制合成器提交新一帧：窗口 hide→show 后部分 X11 合成器会短暂
         // 显示 unmap 前的旧 surface（即使 DOM 早已更新），用一次不透明度过渡逼它重绘

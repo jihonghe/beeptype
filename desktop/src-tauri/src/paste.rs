@@ -182,8 +182,18 @@ fn decide_backend(
     }
 }
 
-/// 当前会话可用的注入后端（Wayland 下含一次合成器能力探测）
+/// 当前会话可用的注入后端（Wayland 下含一次合成器能力探测）。
+///
+/// 结果按进程缓存：会话能力（Wayland 有没有虚拟输入协议、DISPLAY 在不在）
+/// 运行期不会变——合成器/会话换了，本进程也该重启了。缓存前 Wayland 下
+/// **每次调用都要新建一条合成器连接、把全局接口列表读一遍**，而取一次设置
+/// 就会经 auto_paste/auto_send/terminal_paste_ready 连调三次。
 pub fn injection_backend() -> InjectionBackend {
+    static CACHED: std::sync::OnceLock<InjectionBackend> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(probe_injection_backend)
+}
+
+fn probe_injection_backend() -> InjectionBackend {
     let wayland_session = session_is_wayland();
     let wayland_virtual_input = wayland_session && crate::wayland_input::virtual_input_available();
 
@@ -245,8 +255,17 @@ fn terminal_paste_ready_for(backend: InjectionBackend, wtype_present: bool) -> b
 
 /// PATH 里有没有可执行的 `wtype`。自己走 PATH 而不是起进程/调 `which`：
 /// 只读文件元数据，零副作用。
+///
+/// 结果缓存：它只用于设置页那一行能力提示，而运行期装上 wtype 的情况很少；
+/// 真装了重启应用即可（缓存前每次取设置都要把 PATH 扫一遍）。
 #[cfg(target_os = "linux")]
 fn wtype_in_path() -> bool {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(scan_wtype_in_path)
+}
+
+#[cfg(target_os = "linux")]
+fn scan_wtype_in_path() -> bool {
     use std::os::unix::fs::PermissionsExt;
 
     let Some(path) = std::env::var_os("PATH") else {

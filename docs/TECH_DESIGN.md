@@ -85,7 +85,7 @@ pub struct Config {
     pub auto_paste: bool,             // 默认 true（实际生效还需平台支持）
     #[serde(default)]
     pub auto_send: bool,              // 默认 false，依赖 auto_paste
-    pub auto_hide: bool,              // 默认 true：手机连上后自动隐藏主窗口到托盘
+    pub auto_hide: bool,              // 默认 true：手机连上后自动收回主窗口（销毁窗口，见 §2.8）
     pub resume_ttl_min: u32,          // 默认 5：临时设备断线后免扫码续连的窗口（分钟），0=关闭
     pub code_hash: Option<String>,    // SHA-256(配对码)
     pub code_expires_at: Option<u64>, // 毫秒时间戳
@@ -310,9 +310,11 @@ pub fn write_verified(app: &AppHandle, text: &str) -> bool
 | Linux Wayland（GNOME / KDE） | `Unsupported` | 不暴露上述协议 ⇒ 回退纯剪贴板 + 手动粘贴 |
 | Windows / macOS | `Native` | 各自的 SendInput / CGEvent |
 
+探测结果**按进程 `OnceLock` 缓存**（`injection_backend()`）：Wayland 下每次探测都要新建一条合成器连接并把全局接口列表读一遍，而取一次设置就会经 `auto_paste_supported`/`auto_send_supported`/`terminal_paste_ready` 连调三次；会话能力运行期不会变（合成器/会话换了本就该重启应用），缓存是安全的。
+
 - **粘贴路由**（`paste_plan`，纯函数 + 单测）：只有"Wayland + 终端"这一格交给 `wtype`，其余都走 enigo。
 - **为什么 Wayland 终端非用 wtype 不可**：enigo 对修饰键只发协议里那个"修饰位"请求（`modifiers`）、**不发按键事件**。2026-10-18 在 Hyprland 上实测：它的 `Ctrl+Shift+V` 到不了应用（带按键日志的靶子只看到 `GDK_CONTROL_MASK`，Shift 丢了），终端因此不粘贴；而 `wtype` 把修饰键当普通按键按下，实测靶子收到 `mods=['GDK_SHIFT_MASK','GDK_CONTROL_MASK']`、foot 里粘贴成功。`wtype` 不在 PATH 或返回非零 ⇒ 本次按"没粘上"处理（文字仍在剪贴板，用户自己按终端的粘贴键），**不静默假装成功**。
-  **能力要告诉用户**：`paste::terminal_paste_ready()` 查一次 PATH（只读文件元数据），缺 wtype 时 ① 启动日志记一行，② 设置页在"粘贴与发送"那组下面显示一行说明（不做弹窗/通知：它是能力说明，不是错误）。`SettingsInfo.terminalPasteReady` 传给前端决定显隐。
+  **能力要告诉用户**：`paste::terminal_paste_ready()` 查一次 PATH（只读文件元数据；结果进程内缓存——它只喂设置页那行提示，运行期装上 wtype 重启应用即可），缺 wtype 时 ① 启动日志记一行，② 设置页在"粘贴与发送"那组下面显示一行说明（不做弹窗/通知：它是能力说明，不是错误）。`SettingsInfo.terminalPasteReady` 传给前端决定显隐。
 - **终端里不自动回车**（安全差异）：Enter 在终端里是"执行命令"，损失不可逆，所以检测到终端一律跳过自动发送（出口是路线图里的「自定义键位」）。
 - **焦点怎么读**（Wayland）：`wayland_input.rs` 用 `zwlr_foreign_toplevel_manager_v1` 常驻跟踪"哪个顶层窗口处于激活"，暴露 `wayland:<app_id>|<title>`；终端识别用同一个 app_id（`is_terminal_name` 认反向域名，`com.mitchellh.ghostty` → `ghostty`）。注意 `zwlr_foreign_toplevel_handle_v1` 的 `toplevel` 事件是**创建子对象**的：wayland-rs 必须在 `event_created_child` 里给出工厂，否则收到该事件就 panic（踩过，跟踪线程被打死、焦点永远读不到）。
 - **回车前的复核顺序（2026-10-18 修正的既有缺陷）**：必须是「等满回车余量 → 复核焦点 → 按下回车」。原实现是先复核再在 `simulate_enter` 里睡，等于只盯了粘贴本身那几十毫秒，"用户切了窗口"根本盖不住 ⇒ 闸门形同虚设（实测：粘贴后 250ms 切窗口，回车照发）。X11 与 Wayland 都受益于这次调整。
@@ -372,16 +374,24 @@ SECURITY.md，并在 §8 有对应测试（有效凭证应答、错误凭证与�
 退出
 ```
 
-托盘图标左键单击也会唤起主窗口（等同「打开主窗口」）。窗口关闭按钮只是隐藏（`prevent_close` + `hide`），真正退出走托盘「退出」。
+托盘图标左键单击也会唤起主窗口（等同「打开主窗口」）。关闭按钮**销毁窗口**（不是隐藏），真正退出走托盘「退出」；第二次启动（菜单/命令行再点一次）也会唤起它。
 
-主窗口（380×520，可缩放，最小 340×120，启动即可见）：
+主窗口（380×520，可缩放，最小 340×120，启动即可见）——**它的生命周期是"用完即弃"**：
 
-- 前端每 1s 轮询 `get_pairing_info`；轮询顺带调用 `ensure_code_fresh()`——只要没连接、且配对码已过期或剩余不足 2 分钟就自动换新，保证窗口上展示的二维码永远可用（PC 长期运行时不会变成死码）。
-- 配对成功后先通知前端渲染绿色「已连接」页，0.9s 后自动隐藏到托盘；是否收回由设置项「连接后自动隐藏窗口」（`auto_hide`，默认开）决定。历史上这里用的是"窗口是否被用户手动打开"的隐形标记（`manual_window`），它会因为"为了扫码从托盘打开一次窗口"而永久禁用自动收回——v0.2.4 换成了显式设置项，该标记已删除。
+- `tauri.conf.json` 的 `app.windows` 是**空的**：窗口由代码创建（`create_main_window`），启动建一次、关闭按钮与「连接后自动收回」时销毁、下次唤起重建（实测约 0.2s）。关闭走 `close_main_window`，两步都不能省：
+  1. **先 `Webview::close()` 再 `Window::destroy()`**——窗口销毁那条消息只摘窗口自身，"这个窗口持有的 webview"仍留在运行时里（上游 `WindowWrapper.webviews` 不清），GTK 部件不析构。症状：关窗后内存一点没还，而且**每次唤起都新起一个渲染进程**（旧的那份还在），来回几次内存翻倍。
+  2. **再主动终止 WebKit 的子进程**（`reap_webkit_children`）——WebKitGTK 的渲染/网络进程是**跟着应用进程活的**：真机上销毁窗口、乃至一个最小 GTK+WebKit 程序里销毁 webview 并 gc 掉全部引用，它们都不退（进程池在应用存活期间一直持有）。合计约 150MB，正是"关窗省内存"的大头。WebKit 本就是 out-of-process、按"进程随时可能死"设计，下次建 webview 会自己起新进程。只对本进程的子进程动手（`/proc` 里 ppid == 自己且 comm 以 `WebKit` 开头），不按名字全局杀；收之前复核窗口没被重新打开。
+  ⇒ 实测：开窗合计 PSS 约 250MB，关窗后约 110MB；连开连关 5 轮不累积。
+- 前端轮询只跟"页面在不在"绑定（页面活着就每秒取一次 `get_pairing_info`）：窗口关了就销毁，**页面根本不存在**，自然没有轮询、没有配对码续期、也没有 `config.json` 落盘，所以不需要再看可见性（`document.hidden` 在 WebKitGTK 下也不可靠）。
+- 轮询顺带调用 `ensure_code_fresh()`——只要没连接、且配对码已过期或剩余不足 2 分钟就自动换新。窗口关着时码会过期，但重新打开窗口的第一次刷新就会续上（同一次刷新里先换码再渲染），所以窗口上展示的二维码永远可用。
+- 每次取数都命中缓存的几处探测（缓存前这些是每秒重算的）：`lan_ip()`（§2.4，5 秒 TTL，网络切换后二维码地址仍能自己纠正）、二维码 SVG（§2.8，按 `ip+port+code` 内容缓存，只有换码或换 IP 才重新编码）、`injection_backend()` 与 `wtype` 探测（§2.6，进程内 `OnceLock`；运行期改了 PATH/装了 wtype 需重启应用生效）。
+- 配对成功后先通知前端渲染绿色「已连接」页，0.9s 后销毁窗口回托盘；是否收回由设置项「连接后自动隐藏窗口」（`auto_hide`，默认开）决定。历史上这里用的是"窗口是否被用户手动打开"的隐形标记（`manual_window`），它会因为"为了扫码从托盘打开一次窗口"而永久禁用自动收回——v0.2.4 换成了显式设置项，该标记已删除。
+- 重建窗口时"托盘这次点击要落的页面"用 `pending_view` + `take_pending_view` 交接：新建的 webview 还没加载完，那时候 emit 事件一定丢，所以后端先记下、前端加载后主动取走。
 - QR 内容格式 `beeptype://<ip>:<port>?code=<code>`，由 `qrcode` 渲染成 SVG 内联返回，无需前端构建链。
+- **空闲占用的实测口径**（2026-10-19，Omarchy/Hyprland，窗口关闭＝托盘常驻的常态）：PSS 合计约 110MB（只剩主进程；关窗前约 250MB）。CPU 空闲约 0.03%、唤醒 0.1 次/秒（WebKit 那两个进程一收，它们的 `PressureMonitor`（约 165 次 1 字节读/秒）也随之消失）。历史对照：改造前是 0.6% CPU、6.7 次唤醒/秒、PSS 约 320MB（含 AppImage 运行时 23MB）。剩下的约 110MB 是 GTK+WebKit 库与 Mesa 在**主进程**里的常驻开销：其中 WebKit 家族占 51MB（`webkit2gtk` 19 + `javascriptcore` 12 + 它的分配器 `WKFastMalloc` 13 + JIT 代码堆 3 + `glycin` 3）——**WebKit 加载了就付钱**，窗口全关也不退；GTK 本体只有 2MB、glibc 堆 23MB（实测非 arena 碎片）。**PRD 的 NFR-4 已据此改成"PSS ≤120MB"**（原 80MB 无口径且是 Tauri 选型前拍的；按匿名口径 58MB 本来就是达标的）。再往下只有"去掉 WebView 换原生 UI"一条路（估 45–60MB），**已决定不做**——周级重写换一个数字，不划算。
 - TCP 绑定 `0.0.0.0:<port>`；`lan_ip()` 仅是取默认路由网卡的 IPv4（`UdpSocket::connect` 只做路由选择，**不发包**）用于生成二维码里的地址。
 
-Tauri commands（13 个）：
+Tauri commands（14 个）：
 
 | command | 作用 |
 |---|---|
@@ -398,19 +408,20 @@ Tauri commands（13 个）：
 | `disconnect_session` | 托盘/窗口断开当前手机 |
 | `unbind_primary` | 解绑常用设备（在线会话降级为临时，不断开） |
 | `set_window_height` | 前端启动时量一次真实高度后固定窗口高度 |
+| `take_pending_view` | 取出"重建窗口时这次要落的页面"（`show_main_window` 记下、前端加载后取走） |
 
 ### 2.9 前端（desktop/src/index.html）
 
 - 主页与设置页**绝对定位叠放**，切换只改 `opacity`/`visibility`（交叉淡化），元素几何全程不变——规避 WebKitGTK 层重建导致的标题闪烁。
 - 窗口高度在启动时用离屏克隆渲染「等待态」量出真实高度（两种勾选文案取高者）后固定，之后不再随状态跳变：主页内容裁切、设置页内部滚动。
-- 渲染做了结构键缓存（`lastStatusKey`/`lastPairKey`/`lastDeviceKey`），避免 1s 轮询全量重绘导致 hover/勾选态丢失；只有「无连接 → 有连接」这类跨状态切换才播入场动画。轮询同时刷新设置页的「常用设备」卡（手机断开/转正后卡片立刻纠正，不会停在已被踢下线的旧卡片上、点下去才报错）。
+- 渲染做了结构键缓存（`lastStatusKey`/`lastPairKey`/`lastDeviceKey`），避免轮询全量重绘导致 hover/勾选态丢失；只有「无连接 → 有连接」这类跨状态切换才播入场动画。轮询同时刷新设置页的「常用设备」卡（手机断开/转正后卡片立刻纠正，不会停在已被踢下线的旧卡片上、点下去才报错）——它要的常驻设备字段就在 `get_pairing_info` 里，**不再每秒捎带一次 `get_settings`**（那些能力/自启状态只在进设置页时取）。
 - **每次唤起窗口都是"重新进入"**：托盘「打开主窗口」/「设置」带 payload 发 `view-request`，前端据此落到对应页面，并在 `showView()` 里把目标视图的 `scrollTop` 归零——不沿用上一次停留在哪一页、滚到哪里（`showView` 的"已在该视图"提前返回之前就要重置，否则托盘重复唤起会留在上次的滚动位置）。
 **重启应用**（托盘菜单 →「重启应用」）：用于"装好新版本后一键切换"。两个要点：
 
 1. **必须延迟启动**：单实例插件在检测到已有实例时会直接 `exit(0)`。若新旧进程重叠，新进程会自杀、旧进程也在退出——应用凭空消失。因此先起一个"等 1 秒再 exec"的启动器（unix：`sh -c 'sleep 1; exec "$0"' <exe>`，Windows 经环境变量交给 `cmd`），**确认 spawn 成功后才退出自己**；失败则返回错误、留在界面提示。
 2. **路径在启动时捕获**（`exe_path`，setup 里写入）：装新版本后 `/proc/self/exe` 会变成 "… (deleted)"，运行时再取就找不到可执行文件；启动时捕获则正好指向**新装**的那个二进制。
 
-- 前端监听两个托盘事件：`view-request`（payload = `"home"`/`"settings"`，唤起窗口后落到指定页面 + 立即刷新一次，不等 1s 轮询）与 `pairing-show`（后端状态变化——配对成功、自动隐藏前——让前端立刻重绘）。
+- 前端监听两个后端事件：`view-request`（payload = `"home"`/`"settings"`，唤起窗口后落到指定页面 + 立即刷新一次，不等下一个轮询周期）与 `pairing-show`（后端状态变化——配对成功、自动收回前——让前端立刻重绘）。窗口是重建出来的时候，`view-request` 一定丢（webview 还没加载完），落点改由 `take_pending_view` 交接（见 §2.8）。
 - 设置失败一类提示走**页内浮动提示**（`.notice`，`textContent` 写入、4 秒自隐），不用 `alert()`：系统弹窗会带出页面 URL/标题等实现细节，而且要用户点掉才继续。错误文案经 `errText()` 剥掉 `Error:` 这类实现前缀。
 - 设置页每次进入都拉一次 `get_settings`；分区顺序是**定死的规则**：**粘贴与发送 → 连接行为 → 启动 → 手机绑定 → 关于**。新增设置项按这条线归位，不要再"就近插入"——之前"临时设备断线后自动续连"被插到开机自启前面，就是随手追加造成的排序漂移（用户反馈过）。
   - 粘贴与发送：接收后自动粘贴 / 粘贴后自动发送
@@ -607,7 +618,7 @@ app/assets/app_icon.png            # 关于页的品牌图标，由 scripts/buil
 - **焦点与键盘**：连上、回到前台、以及**从设置页/扫码页返回且已连接**时，都走 `_requestKeyboard()`（聚焦 + 弹键盘，缺一不可——没有焦点语音的字进不了打字区）。
 - **断开态那句提示**：「点此区域连接电脑，连上后长按键盘语音键语音输入文字」——把"这里可以点"和"连上后怎么说"合成一句；**不再提胶囊上的连接按钮**（它本身就在那儿、一眼可见）。已连接时仍是「长按键盘语音键即可语音输入文字」；"不在同一网络""被占用"两格保持原样（它们本身就是可执行的建议，不该被通用文案盖掉）。
 
-**设置页的刷新方式**：电脑端自己的设置页靠**事件推送**（`settings-changed`，与 `view-request` / `pairing-show` 同一套机制）即时更新那两个开关，不再等 1 秒轮询；轮询仍负责主页状态、配对信息与「手机绑定」卡。彻底事件化（含二维码的时间驱动部分改用本地计时器）列为后续可选优化。
+**设置页的刷新方式**：电脑端自己的设置页靠**事件推送**（`settings-changed`，与 `view-request` / `pairing-show` 同一套机制）即时更新那两个开关，不再等 1 秒轮询；轮询（窗口开着才有页面）负责主页状态、配对信息与「手机绑定」卡。剩余的可选优化：把配对码续期从"轮询顺带做"改成前端本地计时器驱动（现在是：窗口开着时靠 1s 轮询顺带续，窗口关着时靠重新打开后的第一次刷新补上）。
 
 `home_page.dart` 的 UI 骨架不随连接状态跳变，只有顶部状态胶囊变色与标签、主体区换视图：
 
@@ -828,7 +839,7 @@ log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
 
 依赖都不需要用户安装外部命令（剪贴板走 arboard、按键走 enigo + X11 XTest），发行包不再依赖 `xdotool`/`xclip`。
 
-**Linux 任务栏图标（winicon.rs）**：Tauri 的 `window.set_icon()` 在这套 GTK/tao 栈上**实测无效**——调用返回成功，但窗口的 `_NET_WM_ICON` 属性始终不写（立即调用与延后 2 秒调用都试过）。而缺该属性的窗口在 Deepin 的任务栏里会退回通用图标（现象：显示"两个齿轮"）；同机对照，Edge / ZCode 都设了这个属性、图标正常。因此改为自己实现：连 X server，从 `_NET_CLIENT_LIST` 里按 `_NET_WM_PID` == 本进程 pid 且 `WM_CLASS` 含 `beeptype` 找到自己的窗口，把 128×128 图标按 `[宽, 高, ARGB...]` 写入该属性（带重试，失败只记日志）。仅作用于 Linux/X11；Wayland 用 app_id 关联，Windows/macOS 用可执行文件图标。
+**Linux 任务栏图标（winicon.rs）**：Tauri 的 `window.set_icon()` 在这套 GTK/tao 栈上**实测无效**——调用返回成功，但窗口的 `_NET_WM_ICON` 属性始终不写（立即调用与延后 2 秒调用都试过）。而缺该属性的窗口在 Deepin 的任务栏里会退回通用图标（现象：显示"两个齿轮"）；同机对照，Edge / ZCode 都设了这个属性、图标正常。因此改为自己实现：连 X server，从 `_NET_CLIENT_LIST` 里按 `_NET_WM_PID` == 本进程 pid 且 `WM_CLASS` 含 `beeptype` 找到自己的窗口，把 128×128 图标按 `[宽, 高, ARGB...]` 写入该属性（带重试，失败只记日志）。仅作用于 Linux/X11（**判据是 GDK 实际后端**，不是 `WAYLAND_DISPLAY`——AppImage 强制 `GDK_BACKEND=x11`，见 §7 的 AppImage 小节）；Wayland 用 app_id 关联，Windows/macOS 用可执行文件图标。窗口现在是"一次唤起建一次"（§2.8），所以非 X11 会话**必须提前返回**，否则每次唤起都要白等 5 秒重试。
 
 **Android 启动器图标（自适应图标）**：画布 108dp，其中**只有中间 72dp 是可见区**——启动器会把这块放大到整个图标，外侧 18dp 只是视差/遮罩的溢出边。所以图形包围盒要按"可见区的比例"来定：`scripts/build_icons.py` 里的 `GLYPH_VISIBLE_RATIO = 0.67`，**顶满（1.0）就等于没有留白**（v0.5.0 之前就是这样，观感上比其它 APP 挤）。两条配套规则：① 抠图判据用**最亮通道**而不是"与底色的色差"——母版是 AI 生成的、底色带噪点，色差判据会把 82% 的底色噪点当成图形留下，留白一放大就是肉眼可见的方块痕迹；② 前景层按**图形包围盒**居中（早先是按含噪点的裁切框居中，图形实际偏左上约 2%）。legacy 图标（`ic_launcher.png` / `ic_launcher_round.png`，给 Android 8 以下）仍是满幅徽章、不缩，缩了在旧系统上会变成小方块加透明边。
 
@@ -843,7 +854,7 @@ log::info!("ack sent id={} ok={} non_text={}", id, ok, non_text);
   - Android：`flutter build apk --release --target-platform android-arm64`，签名 keystore 由 Secrets 还原并生成 `key.properties`。
   - 桌面：矩阵 `ubuntu-22.04`（GLIBC 兼容性）/ `macos-latest` / `windows-latest`，`tauri build` 后分别产出 `.deb` + `.AppImage`、`.dmg`、`.msi`。
   - **AppImage 必须剔掉包内自带的 `libwayland-*`**（`release.yml` 里 `Strip bundled libwayland from AppImage` 那一步，2026-10-18 加）：linuxdeploy 的 GTK 插件会把构建机（ubuntu-22.04）的 `libwayland-client/cursor/egl/server`（1.20）打进包里，而 Wayland 客户端库必须与目标机的 mesa/EGL 同源。版本不匹配时 WebKit 的渲染进程建不出 EGL display，**现象是"窗口空白 + WebKitWebProcess SIGABRT"**（实测：Omarchy/Arch 的 wayland 1.26 + 包内 1.20；日志里 `Could not create default EGL display: EGL_BAD_PARAMETER`）。`.deb` 走系统库，没有这个问题。
-  - 顺带的已知行为：AppImage 的 `AppRun` 钩子（linuxdeploy-plugin-gtk）写死 `GDK_BACKEND=x11`（上游为绕开 tauri#8541），所以 AppImage 运行时窗口落在 XWayland 下（`winicon.rs` 的 X11 图标路径反而生效）；实测 X11↔Wayland 剪贴板桥接正常，粘贴不受影响。
+  - 顺带的已知行为：AppImage 的 `AppRun` 钩子（linuxdeploy-plugin-gtk）写死 `GDK_BACKEND=x11`（上游为绕开 tauri#8541），所以 AppImage 运行时窗口落在 XWayland 下（`winicon.rs` 的 X11 图标路径反而生效）；实测 X11↔Wayland 剪贴板桥接正常，粘贴不受影响。⇒ `winicon.rs` 判断"要不要走 X11 图标这条路"**必须看 `GDK_BACKEND`**（`x11_from_env`），只看 `WAYLAND_DISPLAY` 会把 AppImage 这格误判成 Wayland、把图标跳掉。
   - Release job 汇总所有产物，`workflow_dispatch` 触发时先建 draft。
 - **本地构建**：桌面端 `cd desktop && cargo tauri build`（开发期 `cargo build` 后直接跑 `target/debug/beeptype`，前端是单文件 HTML，无需前端构建链）；手机端 `cd app && flutter build apk --release --target-platform android-arm64`。
 - 仓库根的行尾与二进制属性由 `.gitattributes` 统一（`* text=auto eol=lf`）；`.trae/`、`target/`、签名文件在 `.gitignore` 中排除。

@@ -30,22 +30,53 @@ const RETRY_INTERVAL: Duration = Duration::from_millis(500);
 /// 在后台线程里给主窗口设置 `_NET_WM_ICON`（失败只记日志）
 pub fn apply_to_main_window() {
     #[cfg(target_os = "linux")]
-    std::thread::spawn(|| {
-        for attempt in 1..=ATTEMPTS {
-            match try_set_icon() {
-                Ok(true) => {
-                    info!("Set _NET_WM_ICON on main window (attempt {attempt})");
-                    return;
-                }
-                Ok(false) => std::thread::sleep(RETRY_INTERVAL),
-                Err(e) => {
-                    warn!("Set _NET_WM_ICON failed: {e}");
-                    return; // X 相关错误重试也没用（例如 Wayland 下没有可用的 X server）
+    {
+        // 窗口不是 X11 窗口就直接跳过：那种情况它不会出现在 `_NET_CLIENT_LIST` 里，
+        // 只会白重试 5 秒再放弃（每次唤起都要重建窗口，这个白等不能留在热路径上）。
+        if !windows_are_x11() {
+            return;
+        }
+        std::thread::spawn(|| {
+            for attempt in 1..=ATTEMPTS {
+                match try_set_icon() {
+                    Ok(true) => {
+                        info!("Set _NET_WM_ICON on main window (attempt {attempt})");
+                        return;
+                    }
+                    Ok(false) => std::thread::sleep(RETRY_INTERVAL),
+                    Err(e) => {
+                        warn!("Set _NET_WM_ICON failed: {e}");
+                        return; // X 相关错误重试也没用（例如没有可用的 X server）
+                    }
                 }
             }
-        }
-        warn!("Set _NET_WM_ICON gave up after {ATTEMPTS} attempts");
-    });
+            warn!("Set _NET_WM_ICON gave up after {ATTEMPTS} attempts");
+        });
+    }
+}
+
+/// 本进程的窗口会落在 X11 上吗？
+///
+/// 判据必须是 **GDK 实际用的后端**，不能只看 `WAYLAND_DISPLAY`：AppImage 的 AppRun
+/// 钩子（linuxdeploy-plugin-gtk）会写死 `GDK_BACKEND=x11`，那时窗口其实在 XWayland 下
+/// ——`_NET_WM_ICON` 那条路是生效的，按"有 WAYLAND_DISPLAY 就跳过"会把图标一起跳掉。
+#[cfg(target_os = "linux")]
+fn windows_are_x11() -> bool {
+    x11_from_env(
+        std::env::var("GDK_BACKEND").ok(),
+        std::env::var_os("WAYLAND_DISPLAY").is_some(),
+    )
+}
+
+/// 判定抽成纯函数（含 AppImage 在 Wayland 会话下强制 x11 这一格）
+#[cfg(target_os = "linux")]
+fn x11_from_env(gdk_backend: Option<String>, has_wayland_display: bool) -> bool {
+    match gdk_backend {
+        // GDK_BACKEND 可以是逗号分隔的候选列表，命中 x11 即可能走 X11
+        Some(b) if !b.trim().is_empty() => b.split(',').any(|x| x.trim() == "x11"),
+        // 没显式指定时 GDK 自己挑：有 Wayland 就用 Wayland，否则用 X11
+        _ => !has_wayland_display,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -145,5 +176,20 @@ mod tests {
         assert_eq!(data.len(), 2 + (w * h) as usize);
         // 至少有一个不透明像素（图标不会是全透明）
         assert!(data[2..].iter().any(|px| px >> 24 != 0));
+    }
+
+    /// 走不走 X11 图标那条路：关键是 AppImage 在 Wayland 会话下强制 x11 这一格
+    /// （写死 GDK_BACKEND=x11 时窗口其实在 XWayland 下，图标路径是生效的）
+    #[test]
+    fn test_x11_from_env() {
+        // 没指定 GDK_BACKEND：有 Wayland 就 Wayland，没有才 X11
+        assert!(!x11_from_env(None, true));
+        assert!(x11_from_env(None, false));
+        // 显式指定优先于会话类型（AppImage 的 AppRun 就是这一格）
+        assert!(x11_from_env(Some("x11".into()), true));
+        assert!(!x11_from_env(Some("wayland".into()), false));
+        // 空串按"没指定"处理；候选列表里含 x11 即可能走 X11
+        assert!(!x11_from_env(Some("  ".into()), true));
+        assert!(x11_from_env(Some("wayland,x11".into()), true));
     }
 }

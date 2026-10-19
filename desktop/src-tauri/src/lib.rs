@@ -15,7 +15,7 @@ use qrcode::QrCode;
 use serde::Serialize;
 use server::{lan_ip, qr_content, serve, AppServerState, ConnState};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
@@ -72,6 +72,32 @@ struct SettingsInfo {
     version: String,
 }
 
+/// 二维码 SVG：按内容缓存。
+///
+/// 前端每秒取一次配对信息，而二维码内容只在换码（约 3 分钟一次）或换 IP 时变；
+/// 缓存前每秒都要重新做一次 QR 编码 + SVG 字符串渲染。
+fn qr_svg_for(content: &str) -> String {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<Option<(String, String)>>> = OnceLock::new();
+    let mut cache = CACHE.get_or_init(|| Mutex::new(None)).lock().unwrap();
+    if let Some((key, svg)) = cache.as_ref() {
+        if key == content {
+            return svg.clone();
+        }
+    }
+    let svg = QrCode::new(content.as_bytes())
+        .map(|qr| {
+            qr.render::<svg::Color>()
+                .min_dimensions(220, 220)
+                .dark_color(svg::Color("#1a1a2e"))
+                .light_color(svg::Color("#ffffff"))
+                .build()
+        })
+        .unwrap_or_default();
+    *cache = Some((content.to_string(), svg.clone()));
+    svg
+}
+
 fn build_pairing_info(server: &AppServerState) -> PairingInfo {
     let ip = lan_ip().unwrap_or_else(|| "127.0.0.1".to_string());
     let (connected, connected_name, session_is_primary) = server.session_summary();
@@ -97,19 +123,11 @@ fn build_pairing_info(server: &AppServerState) -> PairingInfo {
         };
     }
 
-    // 窗口轮询（1s）时顺带续期：保证展示的二维码/配对码始终在有效期内
+    // 窗口可见时前端每秒取一次；隐藏时轮询已停，重新打开后的第一次取会顺带续期
     server.ensure_code_fresh();
     let code = server.get_code();
     let content = qr_content(&ip, server.port, &code);
-    let qr_svg = QrCode::new(content.as_bytes())
-        .map(|qr| {
-            qr.render::<svg::Color>()
-                .min_dimensions(220, 220)
-                .dark_color(svg::Color("#1a1a2e"))
-                .light_color(svg::Color("#ffffff"))
-                .build()
-        })
-        .unwrap_or_default();
+    let qr_svg = qr_svg_for(&content);
 
     PairingInfo {
         ip,
@@ -124,17 +142,181 @@ fn build_pairing_info(server: &AppServerState) -> PairingInfo {
     }
 }
 
-/// 显示并聚焦主窗口（托盘菜单/托盘左键共用）。
+/// 主窗口的创建参数。
+///
+/// tauri.conf.json 的 `app.windows` 是**空的**：窗口不再由 Tauri 在启动时预建，
+/// 生命周期完全由代码管——启动建一次（见 setup），关闭按钮与"连接后自动收回"
+/// 时**销毁**（见 on_window_event / server.rs 的 auto_hide_after_pairing），
+/// 下次唤起再建（实测约 0.2s）。托盘常驻期间因此不存在 WebKit 渲染/网络进程
+/// （两者合计约 150MB）。启动与唤起共用这一处参数，两边不会分叉。
+fn create_main_window<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> tauri::Result<tauri::WebviewWindow<R>> {
+    tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
+        .title("BeepType")
+        .inner_size(380.0, 520.0)
+        .min_inner_size(340.0, 120.0)
+        .resizable(true)
+        .center()
+        .build()
+}
+
+/// 重建窗口时"这次要落的页面"。
+///
+/// 新建的 webview 还没加载完，这时候发 `view-request` 一定丢——所以先把目标页面
+/// 记在这里，前端加载完成后主动取走（`take_pending_view`）。
+fn pending_view() -> &'static Mutex<Option<String>> {
+    static SLOT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// 前端启动时取走"这次唤起要落的页面"（取完即清空；没有则为 None，留在主页）
+#[tauri::command]
+fn take_pending_view() -> Option<String> {
+    pending_view().lock().unwrap().take()
+}
+
+/// 销毁主窗口（关闭按钮 / 连接后自动收回共用），随后把我们自己的 WebKit 进程收掉。
+///
+/// 两步都不能省：
+/// 1. **先 `Webview::close()` 再 `Window::destroy()`**：窗口销毁那条消息只摘掉窗口自身，
+///    运行时里"这个窗口持有的 webview"还挂着 ⇒ GTK 部件不析构。症状：关窗后内存一点
+///    没还，而且**每次唤起都新起一个渲染进程**（旧的那份还在）——来回几次内存翻倍。
+/// 2. **再主动终止 WebKit 的渲染/网络进程**：WebKitGTK 的这两个进程是**跟着应用进程
+///    活的**——真机上销毁窗口、乃至一个最小 GTK+WebKit 程序里销毁 webview 并释放全部
+///    引用（gc 过），它们都不退（进程池在应用存活期间一直持有）。而它们合计约 150MB，
+///    正是"关窗省内存"的大头。WebKit 本就是 out-of-process、按"进程随时可能死"设计，
+///    下次建 webview 会自己起新进程——真机实测：关窗→收进程→再唤起 0.2s 打开，
+///    页面与二维码都正常。
+///
+/// 只对本进程的子进程动手（/proc 里 ppid == 自己且 comm 以 WebKit 开头），
+/// **不按名字全局杀**；收进程前还会再看一眼窗口是不是又被开出来了。
+fn close_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("main") {
+        // WebviewWindow 实现了 AsRef<Webview>：拿它调 webview 级的 close，
+        // 不能用 WebviewWindow::close——那个是"窗口级关闭"（会再发一次
+        // CloseRequested，等于自己触发自己）
+        let _ = window.as_ref().close();
+        if let Err(e) = window.destroy() {
+            log::warn!("Destroy main window failed: {e}");
+        }
+    }
+    reap_webkit_children(app.clone());
+}
+
+/// 稍等片刻（让窗口销毁走完）再收掉 WebKit 的子进程。
+/// 收之前复核一次"主窗口仍然不存在"：用户可能在几百毫秒内又把窗口开出来了，
+/// 那时新起的进程不归这次收拾。
+#[cfg(target_os = "linux")]
+fn reap_webkit_children<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if app.get_webview_window("main").is_some() {
+            return;
+        }
+        let victims = webkit_child_pids();
+        if victims.is_empty() {
+            return;
+        }
+        for &pid in &victims {
+            // SAFETY: 只给本进程的子进程发信号（pid 来自 /proc 里的 ppid 比对）
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        let mut forced = 0;
+        for &pid in &victims {
+            if process_alive(pid) && webkit_child_pids().contains(&pid) {
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                forced += 1;
+            }
+        }
+        info!(
+            "Reaped {} WebKit child process(es) after closing the window{}{}",
+            victims.len(),
+            if forced > 0 {
+                format!(" ({forced} forced)")
+            } else {
+                String::new()
+            },
+            " — they are spawned again on the next open"
+        );
+    });
+}
+
+/// 非 Linux 不做这件事：macOS 的 WKWebView 进程由系统按站点隔离管理、Windows 的
+/// WebView2 进程跟着用户数据目录共享，都没有在这台机器上实测过——不猜着杀。
+#[cfg(not(target_os = "linux"))]
+fn reap_webkit_children<R: tauri::Runtime>(_app: tauri::AppHandle<R>) {}
+
+/// 本进程的 WebKit 子进程（comm 前 15 字符会被截断，所以只比前缀）
+#[cfg(target_os = "linux")]
+fn webkit_child_pids() -> Vec<i32> {
+    let me = std::process::id();
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut pids = Vec::new();
+    for entry in dir.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) else {
+            continue;
+        };
+        if !comm.trim().starts_with("WebKit") {
+            continue;
+        }
+        // /proc/<pid>/stat 的 comm 字段带括号且可能含空格 ⇒ 从最后一个 ')' 之后切
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        let ppid = stat
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().nth(1))
+            .and_then(|s| s.parse::<u32>().ok());
+        if ppid == Some(me) {
+            pids.push(pid);
+        }
+    }
+    pids
+}
+
+#[cfg(target_os = "linux")]
+fn process_alive(pid: i32) -> bool {
+    // kill(pid, 0) 只探测存在性，不发信号
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// 显示并聚焦主窗口（托盘菜单/托盘左键/第二次启动共用）。窗口已被销毁时重建。
 /// view 指定这次唤起要落到的页面（"home" 主页 / "settings" 设置页）：每次唤起
-/// 都是"重新进入"，不沿用上一次停留的页面与滚动位置（前端收到 view-request 后重置）。
+/// 都是"重新进入"，不沿用上一次停留的页面与滚动位置。
 /// 窗口是否在连接后自动收回由设置项「连接后自动隐藏窗口」决定（见 server.rs）。
 fn show_main_window(app: &tauri::AppHandle, view: &str) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-        let _ = window.emit("view-request", view);
-    }
+    let app = app.clone();
+    let view = view.to_string();
+    // 窗口只能在主线程创建，而调用方线程不固定（托盘菜单在主线程、单实例回调在
+    // zbus 线程）⇒ 统一排到主线程执行
+    let _ = app.clone().run_on_main_thread(move || {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+            let _ = window.emit("view-request", view);
+            return;
+        }
+        *pending_view().lock().unwrap() = Some(view);
+        match create_main_window(&app) {
+            Ok(window) => {
+                let _ = window.set_focus();
+                winicon::apply_to_main_window();
+            }
+            Err(e) => log::error!("Create main window failed: {e}"),
+        }
+    });
 }
 
 #[tauri::command]
@@ -334,21 +516,32 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|_app, _args, _cwd| {}))
+        // 第二次启动（菜单/命令行再点一次）＝唤起主窗口：窗口可能已被销毁，交给
+        // show_main_window 决定是"显示已有的"还是"重新建一个"
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main_window(app, "home");
+        }))
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
         .plugin(tauri_plugin_notification::init())
-        // 托盘常驻：关闭按钮只隐藏窗口，真正退出走托盘菜单"退出"
+        // 托盘常驻：关闭按钮 = **销毁窗口**（不是隐藏），真正退出走托盘菜单"退出"。
+        // 销毁而不是隐藏是为了把那套 WebKit 进程还给系统（约 150MB），代价是下次
+        // 唤起要重建 webview（实测约 0.2~0.3s）——托盘常驻的应用里这笔账划算。
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                close_main_window(window.app_handle());
             }
         })
         .setup(|app| {
+            // 主窗口：启动即建（tauri.conf.json 的 app.windows 为空，窗口生命周期
+            // 完全由代码管，见 create_main_window）
+            let main_window = create_main_window(app.handle())?;
+            let _ = main_window.set_focus();
+
             // 任务栏/dock 图标：tauri 的 window.set_icon() 在这套 GTK/tao 栈上实测
             // 无效（调用成功但 _NET_WM_ICON 属性不写），而缺这个属性的窗口在 Deepin
             // 等桌面的任务栏里会显示通用图标。改为自己把属性写上去（见 winicon.rs）。
@@ -522,8 +715,40 @@ pub fn run() {
             set_resume_ttl,
             set_autostart,
             promote_session,
-            set_window_height
+            set_window_height,
+            take_pending_view
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running BeepType application");
+        .build(tauri::generate_context!())
+        .expect("error while building BeepType application")
+        .run(|_app, event| {
+            // 托盘常驻：**窗口全被销毁 ≠ 退出**。关闭按钮就是销毁窗口（见上），
+            // 不拦住的话 Tauri 会在最后一个窗口消失时退出整个应用——托盘里的
+            // 服务端也就跟着没了。
+            // `code` 只有 `app.exit()` / `app.restart()` 才带值（托盘「退出」、
+            // 「重启应用」走的就是它）⇒ 那时放行，其余一律留下。
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                if code.is_none() {
+                    api.prevent_exit();
+                }
+            }
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 二维码按内容缓存：同内容重复取要一致（第二次命中缓存），
+    /// 换码或换 IP 后必须重新编码——二维码里带着地址，换网络时只认码会留下旧地址
+    #[test]
+    fn test_qr_svg_cache_hits_and_invalidates() {
+        let a = qr_svg_for("beeptype://192.168.1.2:8765?code=aaa");
+        let b = qr_svg_for("beeptype://192.168.1.2:8765?code=aaa");
+        assert_eq!(a, b, "同内容应命中缓存、结果一致");
+        assert!(a.contains("<svg"), "应渲染成 SVG");
+        let c = qr_svg_for("beeptype://192.168.1.2:8765?code=bbb");
+        assert_ne!(a, c, "换码后必须重新编码");
+        let d = qr_svg_for("beeptype://192.168.1.9:8765?code=bbb");
+        assert_ne!(c, d, "换 IP 后必须重新编码");
+    }
 }

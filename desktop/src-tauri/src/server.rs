@@ -1451,9 +1451,9 @@ fn auto_hide_after_pairing<R: Runtime>(app: &AppHandle<R>) {
             .auto_hide
             .load(Ordering::Relaxed);
         if enabled {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.hide();
-            }
+            // 销毁而不是隐藏：把 WebKit 进程还给系统，下次唤起再重建
+            // （先关 webview 再销毁窗口，顺序不能反——见 lib.rs 的 close_main_window）
+            crate::close_main_window(&app);
         }
     });
 }
@@ -1675,8 +1675,28 @@ fn spawn_relaunch(exe: &Path) -> Result<(), String> {
         .map_err(|e| format!("启动新进程失败：{e}"))
 }
 
-/// 获取局域网 IP（优先 IPv4）
+/// 获取局域网 IP（优先 IPv4）。
+///
+/// 结果缓存 5 秒：窗口可见时前端每秒取一次配对信息，而每次都要新建 socket、
+/// 做一次路由选择。不能永久缓存——Wi-Fi↔有线切换后二维码里的地址必须自己纠正。
 pub fn lan_ip() -> Option<String> {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    const TTL: Duration = Duration::from_secs(5);
+    static CACHE: OnceLock<Mutex<Option<(Instant, Option<String>)>>> = OnceLock::new();
+    let mut cache = CACHE.get_or_init(|| Mutex::new(None)).lock().unwrap();
+    if let Some((at, ip)) = cache.as_ref() {
+        if at.elapsed() < TTL {
+            return ip.clone();
+        }
+    }
+    let fresh = detect_lan_ip();
+    *cache = Some((Instant::now(), fresh.clone()));
+    fresh
+}
+
+fn detect_lan_ip() -> Option<String> {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.connect("8.8.8.8:80").ok()?;
     let addr = socket.local_addr().ok()?;
