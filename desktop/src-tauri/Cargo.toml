@@ -2,7 +2,7 @@
 name = "beeptype"
 # crate 版本；**应用展示的版本不读这里**——运行时取 tauri.conf.json 的 version
 # （发布时由 CI 按 git tag 改写）。此处保持与最近一次发布一致，便于人工核对
-version = "0.9.0"
+version = "0.9.1"
 edition = "2021"
 description = "BeepType - 手机说话，电脑落字"
 
