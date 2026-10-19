@@ -155,24 +155,25 @@ jobs:
           IMG="$(basename "$(ls ./*.AppImage)")"
           ./"$IMG" --appimage-extract > /dev/null
           echo "将从 AppImage 中移除："
-          # 整棵树扫，不限定 usr/lib：剔除范围必须 ≥ 自检范围，否则会漏掉换过落点的库
-          find squashfs-root -name 'libwayland-*' -print -delete
+          # 整棵树扫（剔除范围必须 ≥ 自检范围），但**只匹配共享库**：全树 `libwayland-*`
+          # 会命中 usr/share/doc/libwayland-* 这些目录，-delete 删不掉非空目录 ⇒ 报错
+          find squashfs-root -name 'libwayland-*.so*' -print -delete
           curl -sSL -o appimagetool \
             https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool
           ARCH=x86_64 ./appimagetool --appimage-extract-and-run "$PWD/squashfs-root" "$PWD/$IMG"
           rm -rf squashfs-root appimagetool
-          # 自检：整包解出来扫一遍，确认一个 libwayland-* 都不剩。
-          # 这里有两个坑（v0.9.1 首次发版踩过：剔除成功反而 exit 1）：
+          # 自检：整包解出来扫一遍，确认一个 libwayland-*.so* 都不剩。
+          # 两个坑（v0.9.1 首次发版各踩了一次）：
           # ① 带 pattern 的 `--appimage-extract` 在"一个都没匹配到"时不会生成目录，
           #    此时 find 因 ENOENT 失败，set -e + pipefail 直接把脚本带崩
-          #    ⇒ 不传 pattern、整包解，扫全树；
+          #    ⇒ 不传 pattern、整包解；
           # ② find 一律 `|| true`，让成败只由下面的计数决定。
           ./"$IMG" --appimage-extract > /dev/null 2>&1
-          left=$( (find squashfs-root -name 'libwayland-*' 2>/dev/null || true) | wc -l )
+          left=$( (find squashfs-root -name 'libwayland-*.so*' 2>/dev/null || true) | wc -l )
           if [ "$left" -ne 0 ]; then
             echo "::error::libwayland 仍留在 AppImage 里（$left 个）"
-            find squashfs-root -name 'libwayland-*'
+            find squashfs-root -name 'libwayland-*.so*'
             exit 1
           fi
           rm -rf squashfs-root
