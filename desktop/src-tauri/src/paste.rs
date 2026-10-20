@@ -83,17 +83,23 @@ pub fn wait_image_settle(image_bytes: usize) {
 ///
 /// **量纲是像素，不是手机发来的字节数**：剪贴板里必须是位图（arboard 编成 PNG），
 /// 而 Chromium/Electron 只接受 `image/png`（2026-10-21 实测 jpeg/webp/bmp/tiff 全被
-/// 忽略）⇒ 应用吞的是"像素数换算出来的 PNG"，与源 JPEG 的压缩率无关。实测吞吐
-/// ≈ 8MB/s、照片类 PNG ≈ 2 字节/像素 ⇒ ≈0.25µs/像素；这里取 0.3µs/像素并留固定余量。
+/// 忽略）⇒ 应用吞的是"像素数换算出来的 PNG"，与源 JPEG 的压缩率无关。
+///
+/// **必须按"端到端"算，不能只按上传那一段**（2026-10-21 踩过：第一版按上传速率
+/// 8MB/s 取了 300ms/百万像素，结果真机上又变回换行）。应用是**先把剪贴板数据读走、
+/// 再上传/入库**，两段加起来才是它不能收回车的时间。实测三次（ZCode）：
+/// 剪贴板 1.5MB→0.32s、5.49MB→1.32s、9.5MB→2.25s ⇒ **端到端 ≈4.2MB/s**。
+/// 照片类 PNG ≈2 字节/像素 ⇒ ≈0.48µs/像素；这里取 0.7µs/像素（+45% 余量），
+/// 因为估小了就会重演"换行、没发出去"。
 ///
 /// 为什么是时间而不是"等应用就绪"：没有可感知的信号。剪贴板不提供"数据被读走"
 /// 事件（见 docs/TECH_DESIGN.md 10.2），应用的内部状态对外不可见；读无障碍树
 /// 或盯进程 I/O 都要按应用/按平台猜，成本和脆弱性远超一个按像素算的余量。
 ///
 /// 2026-10-21 起剪贴板侧还把长边压到 1920（`image_receiver::CLIPBOARD_MAX_EDGE`），
-/// 所以这个预算实际是 0.1~1s 量级；上限仍保留 4s，兜住更慢的应用。
+/// 所以这个预算实际是 1~2.5s 量级；上限仍保留 4s，兜住更慢的应用。
 const IMAGE_DIGEST_BASE: Duration = Duration::from_millis(100);
-const IMAGE_DIGEST_PER_MP: Duration = Duration::from_millis(300);
+const IMAGE_DIGEST_PER_MP: Duration = Duration::from_millis(700);
 const IMAGE_DIGEST_MAX_WAIT: Duration = Duration::from_secs(4);
 
 /// 追加余量的上限，避免超长文本把回车拖得过久
@@ -799,11 +805,12 @@ mod tests {
             image_digest_delay(1_000_000),
             IMAGE_DIGEST_BASE + IMAGE_DIGEST_PER_MP
         );
-        // 2026-10-21 实测：1920x1440（2.76MP）的 PNG 在 ZCode 里从 Begin 到 Commit
-        // 0.48s，加剪贴板读走约 0.1~0.3s ⇒ 预算必须 ≥0.6s，否则回车又会提前
+        // 2026-10-21 实测：1920x1440（2.76MP）从 Ctrl+V 到目标应用 commit 是 **1.32s**
+        // （读剪贴板 + 上传两段之和）。预算必须盖住这个端到端值，否则回车会提前
+        // ——第一版用 300ms/百万像素（只算了上传那一段）就在真机上翻车了
         assert!(
-            image_digest_delay(2_764_800) >= Duration::from_millis(600),
-            "1920 长边的图实测要 ~0.5s 才吞完，预算不能比它短"
+            image_digest_delay(2_764_800) >= Duration::from_millis(1320),
+            "1920 长边的照片实测端到端 1.32s，预算不能比它短"
         );
         assert!(image_digest_delay(1000) <= image_digest_delay(20_000_000));
     }

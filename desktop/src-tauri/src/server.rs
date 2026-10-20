@@ -2654,11 +2654,10 @@ mod integration_tests {
         let t = std::time::Instant::now();
         state.wait_for_image_digest();
         let waited = t.elapsed();
-        // 预算 ≈ 100ms + 300ms/MP × 2.76 ≈ 0.93s；只断言"确实等了足够久"，
-        // 上界放宽一点，避免慢机器抖动
+        // 预算 ≈ 100ms + 700ms/MP × 2.76 ≈ 2.0s；实测端到端 1.32s ⇒ 必须真的等够
         assert!(
-            waited >= Duration::from_millis(700),
-            "1920 的图必须等 ~0.9s，实际只等了 {waited:?}"
+            waited >= Duration::from_millis(1320),
+            "1920 的照片实测端到端 1.32s，等待不能比它短（实际 {waited:?}）"
         );
         assert!(waited <= crate::paste::image_digest_delay(1920 * 1440) + Duration::from_millis(500));
 
