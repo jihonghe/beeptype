@@ -24,7 +24,7 @@
 
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use log::{debug, info, warn};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// 写剪贴板后、发送快捷键前的等待。
 ///
@@ -75,6 +75,24 @@ pub fn wait_image_settle(image_bytes: usize) {
     std::thread::sleep(image_settle_delay(image_bytes));
 }
 
+/// 目标应用"消化"一张刚粘贴的图片所需的时间（从粘贴那一刻算起）。
+///
+/// 为什么需要它：图片粘进输入框后，应用还要异步把这份图读走、再上传/入库
+/// （2026-10-21 在 ZCode 3.16.2 + Hyprland 上实测：1.83MB 从粘贴到可发送约 2.1s，
+/// 181KB 约 0.22s，上传分块数 39:4 正好对上体积比）。在这个窗口里按回车，
+/// 应用**不当作"发送"**，而是当普通换行 ⇒ 表现为"图文消息变成换行、没发出去"，
+/// 且随图片大小忽有忽无（小图赶得上，大图赶不上，看着像"不稳定复现"）。
+///
+/// 为什么是时间而不是"等应用就绪"：没有可感知的信号。剪贴板不提供"数据被读走"
+/// 事件（见 docs/TECH_DESIGN.md 10.2），应用的内部状态对外不可见；读无障碍树
+/// 或盯进程 I/O 都要按应用/按平台猜，成本和脆弱性远超一个按体积算的余量。
+///
+/// 取值＝实测吞吐（≈1.2s/MB）再留一段固定余量，**宁可多等一会儿，也不能让整条
+/// 消息没发出去**；单次最多等 `IMAGE_DIGEST_MAX_WAIT`，避免超大图把发送无限推迟。
+const IMAGE_DIGEST_BASE: Duration = Duration::from_millis(800);
+const IMAGE_DIGEST_PER_MB: Duration = Duration::from_millis(1200);
+const IMAGE_DIGEST_MAX_WAIT: Duration = Duration::from_secs(4);
+
 /// 追加余量的上限，避免超长文本把回车拖得过久
 const ENTER_EXTRA_MAX_DELAY: Duration = Duration::from_millis(500);
 
@@ -83,6 +101,44 @@ fn enter_delay(text_chars: usize) -> Duration {
     let cap_ms = ENTER_EXTRA_MAX_DELAY.as_millis() as usize;
     let extra_ms = (text_chars / ENTER_EXTRA_MS_PER_CHARS).min(cap_ms);
     ENTER_BASE_DELAY + Duration::from_millis(extra_ms as u64)
+}
+
+/// 单张图片的消化时长：基准余量 + 按体积递增（不设上限，上限在等待端统一收口）
+pub fn image_digest_delay(image_bytes: usize) -> Duration {
+    let per_mb = (image_bytes as u128 * IMAGE_DIGEST_PER_MB.as_millis()) / (1024 * 1024) as u128;
+    IMAGE_DIGEST_BASE + Duration::from_millis(per_mb as u64)
+}
+
+/// 把"又粘了一张图"接到消化队列上，返回队列预计清空的时刻。
+///
+/// 模型是**串行**的：应用同时消化多张图时按顺序做，所以每张图的起点取
+/// "它被粘贴的时刻"与"上一张消化完的时刻"里较晚的那个。手机是一张等一个 ack
+/// 才发下一张，真实场景里两者相差不大；这里宁可高估（多等）也不低估（漏发）。
+///
+/// `ready_at` 为 `None`（还没贴过图，或队列早已清空）时就是"从这一刻开始算一张"。
+pub fn queue_image_digest(
+    ready_at: Option<Instant>,
+    pasted_at: Instant,
+    image_bytes: usize,
+) -> Instant {
+    let start = match ready_at {
+        Some(ready) if ready > pasted_at => ready,
+        _ => pasted_at,
+    };
+    start + image_digest_delay(image_bytes)
+}
+
+/// 距离"图片消化完"还要等多久：已经消化完（或压根没贴过图）返回 `None`。
+///
+/// **这就是"纯文字消息不受影响"的保证点**：没贴过图 ⇒ `ready_at` 是 `None`；
+/// 贴过但已经等过了 ⇒ 目标时刻在过去 ⇒ 同样返回 `None`。两种情况下调用方都不睡。
+pub fn remaining_digest_wait(ready_at: Option<Instant>, now: Instant) -> Option<Duration> {
+    let left = ready_at?.saturating_duration_since(now);
+    if left.is_zero() {
+        None
+    } else {
+        Some(left.min(IMAGE_DIGEST_MAX_WAIT))
+    }
 }
 
 /// 精确命中这些值时视为终端（名字不含 "terminal" 的异类）。
@@ -727,6 +783,83 @@ mod tests {
     fn test_image_settle_delay_monotonic() {
         assert!(image_settle_delay(0) <= image_settle_delay(200 * 1024));
         assert!(image_settle_delay(200 * 1024) <= image_settle_delay(8 * 1024 * 1024));
+    }
+
+    /// 图片消化时长：小图只取基准值，按体积线性递增，且必须**明显长于**实测吞吐
+    /// （1.83MB 在 ZCode 上要 2.1s ⇒ 不能给出比这更短的预算），否则回车会继续撞上
+    /// "应用还在上传"的窗口。
+    #[test]
+    fn test_image_digest_delay_covers_measured_ingest() {
+        assert_eq!(image_digest_delay(0), IMAGE_DIGEST_BASE);
+        assert_eq!(image_digest_delay(1024 * 1024), IMAGE_DIGEST_BASE + IMAGE_DIGEST_PER_MB);
+        assert!(image_digest_delay(181 * 1024) >= Duration::from_millis(220));
+        assert!(
+            image_digest_delay(1_830_761) >= Duration::from_millis(2100),
+            "1.83MB 的实测消化时间约 2.1s，预算不能比它短"
+        );
+        assert!(image_digest_delay(1024) <= image_digest_delay(8 * 1024 * 1024));
+    }
+
+    /// 消化队列：串行累加。第二张图若在上一张还没消化完时到达，它的起点顺延；
+    /// 隔得够久就是"从这一刻重新开始"。
+    #[test]
+    fn test_queue_image_digest_is_serial() {
+        let t = Instant::now();
+        let one_mb = 1024 * 1024;
+
+        // 队列空：从粘贴时刻开始算
+        let after_first = queue_image_digest(None, t, one_mb);
+        assert_eq!(after_first, t + image_digest_delay(one_mb));
+
+        // 第二张在第一张消化完之前到达 ⇒ 顺延，而不是覆盖
+        let second_pasted = t + Duration::from_millis(100);
+        let after_second = queue_image_digest(Some(after_first), second_pasted, one_mb);
+        assert_eq!(after_second, after_first + image_digest_delay(one_mb));
+        assert_eq!(
+            after_second - t,
+            image_digest_delay(one_mb) + image_digest_delay(one_mb)
+        );
+
+        // 队列已经清空 ⇒ 不影响这一次
+        let late = t + Duration::from_secs(60);
+        assert_eq!(
+            queue_image_digest(Some(after_second), late, one_mb),
+            late + image_digest_delay(one_mb)
+        );
+    }
+
+    /// **纯文字不受影响**：没贴过图 ⇒ 永远不睡；贴过但已过期 ⇒ 也不睡。
+    /// 这条是产品对用户的承诺，钉成回归测试。
+    #[test]
+    fn test_remaining_digest_wait_is_none_for_text_only() {
+        let t = Instant::now();
+        assert_eq!(remaining_digest_wait(None, t), None, "没贴过图不能等");
+        assert_eq!(
+            remaining_digest_wait(Some(t - Duration::from_millis(1)), t),
+            None,
+            "图片早就消化完了，不能再等"
+        );
+        assert_eq!(
+            remaining_digest_wait(Some(t), t),
+            None,
+            "正好等于当下算已就绪"
+        );
+    }
+
+    /// 还要等：给剩余时长；超大图/超长队列一律封顶，不把发送无限推迟。
+    #[test]
+    fn test_remaining_digest_wait_is_bounded() {
+        let t = Instant::now();
+        assert_eq!(
+            remaining_digest_wait(Some(t + Duration::from_millis(120)), t),
+            Some(Duration::from_millis(120))
+        );
+        assert_eq!(
+            remaining_digest_wait(Some(t + Duration::from_secs(60)), t),
+            Some(IMAGE_DIGEST_MAX_WAIT),
+            "上限必须生效"
+        );
+        assert!(IMAGE_DIGEST_MAX_WAIT <= Duration::from_secs(4));
     }
 
     /// 终端自动粘贴的可用性：只有"Wayland + 没有 wtype"这一格不ready

@@ -277,6 +277,10 @@ pub struct ServerState<R: Runtime> {
     pub auto_hide: Arc<AtomicBool>,
     /// 临时会话的续连记录（仅内存，只留最近一条；窗口期 0 = 关闭续连）
     pub transient_resume: Arc<Mutex<Option<TransientResume>>>,
+    /// 图片"消化队列"预计清空的时刻：贴完图后目标应用还要把图读走、上传/入库，
+    /// 这段窗口里回车不算"发送"（见 `paste::image_digest_delay`）。
+    /// 文字消息按回车前会等它；**没贴过图或已清空时为 None ⇒ 纯文字时序不变**。
+    pub image_ready_at: Arc<Mutex<Option<Instant>>>,
     /// 本进程的可执行文件路径，**启动时捕获**（setup 里写入）。
     /// 重启功能必须用它而不是运行时再取：装新版本后 /proc/self/exe 会变成
     /// "… (deleted)"，那时再取就找不到可执行文件了。
@@ -299,6 +303,7 @@ impl<R: Runtime> Clone for ServerState<R> {
             auto_send: self.auto_send.clone(),
             auto_hide: self.auto_hide.clone(),
             transient_resume: self.transient_resume.clone(),
+            image_ready_at: self.image_ready_at.clone(),
             exe_path: self.exe_path.clone(),
         }
     }
@@ -333,6 +338,7 @@ impl<R: Runtime> ServerState<R> {
             auto_send: Arc::new(AtomicBool::new(auto_send)),
             auto_hide: Arc::new(AtomicBool::new(auto_hide)),
             transient_resume: Arc::new(Mutex::new(None)),
+            image_ready_at: Arc::new(Mutex::new(None)),
             exe_path: Arc::new(Mutex::new(None)),
         }
     }
@@ -1271,6 +1277,32 @@ impl<R: Runtime> ServerState<R> {
         }
     }
 
+    /// 记下"刚向目标应用粘了一张图"（只有真的注入成功才记，没粘就没得消化）。
+    ///
+    /// 多张图按**串行**累加，理由见 `paste::queue_image_digest`：应用是一张一张
+    /// 处理的，第二张要排在第一张后面。
+    fn note_image_pasted(&self, bytes: usize) {
+        let now = Instant::now();
+        let mut ready_at = self.image_ready_at.lock().unwrap();
+        *ready_at = Some(crate::paste::queue_image_digest(*ready_at, now, bytes));
+    }
+
+    /// 图文消息按回车前，等目标应用把刚粘进去的图消化完。
+    ///
+    /// 这段窗口里按回车，应用只会当换行用（2026-10-21 真机：图片越大越容易
+    /// "没发出去"，见 `paste::image_digest_delay`）。**纯文字消息这里恒为 None
+    /// ⇒ 不睡，时序与以前完全一致**。
+    ///
+    /// 调用点必须在 `wait_before_enter()` 之后、焦点复核之前：复核要盖住
+    /// "所有等待结束 → 回车落下"这段，才防得住用户中途切窗口。
+    fn wait_for_image_digest(&self) {
+        let ready_at = *self.image_ready_at.lock().unwrap();
+        if let Some(wait) = crate::paste::remaining_digest_wait(ready_at, Instant::now()) {
+            info!("Auto-send waits {wait:?}: the pasted image is still being ingested");
+            thread::sleep(wait);
+        }
+    }
+
     /// 收到完整图片：解码 → 写系统剪贴板 → 自动粘贴。
     ///
     /// **刻意不自动回车**：贴完图通常还要配文字，自动回车会立刻把消息发出去。
@@ -1310,6 +1342,10 @@ impl<R: Runtime> ServerState<R> {
             match crate::paste::simulate_paste() {
                 Ok(_) => {
                     pasted = true;
+                    // 记账：目标应用接下来还要把这张图读走、上传/入库，这段时间里
+                    // 它能接受粘贴，但不接受"回车发送"（紧随其后的文字消息要等它，
+                    // 见 wait_for_image_digest）
+                    self.note_image_pasted(bytes.len());
                     // 注入成功不等于目标读到了：剪贴板只有一个槽位，而手机收到 ack
                     // 就会发下一张 ⇒ 必须等目标把这一张读走再回 ack，否则下一张的
                     // 写入会覆盖它（"选 3 张只到 2 张"的根因，见 paste.rs 常量注释）
@@ -1386,10 +1422,14 @@ impl<R: Runtime> ServerState<R> {
                     // 自动发送：粘贴成功后模拟 Enter，复用同一条 enigo 连接
                     let auto_send = self.auto_send.load(Ordering::Relaxed);
                     if auto_send && crate::paste::auto_send_supported() {
-                        // 顺序：先等满回车余量 → 再复核焦点 → 最后才按下回车。
-                        // 复核必须发生在等待之后，覆盖的才是"粘贴完成到回车落下"
-                        // 这段几百毫秒（用户最可能在这里切窗口）。
+                        // 顺序：先等满回车余量 → 再等图片被消化（图文消息）→ 复核焦点
+                        // → 最后才按下回车。复核必须发生在**所有**等待之后，覆盖的才是
+                        // "粘贴完成到回车落下"这段（用户最可能在这里切窗口）；图文消息
+                        // 把这段拉长到 1~3 秒，所以这一步比纯文字更依赖那条复核。
                         crate::paste::wait_before_enter(text.chars().count());
+                        // 图文消息：刚贴进去的图还在被目标应用消化，这段时间按回车
+                        // 只会变成换行（纯文字消息这里不睡，见 wait_for_image_digest）
+                        self.wait_for_image_digest();
                         let focus_after = crate::paste::focused_window_key();
                         log::debug!("Focus check before/after enter: {focus_before:?} / {focus_after:?}");
                         if crate::paste::should_skip_enter(focus_before, focus_after) {
@@ -1848,6 +1888,7 @@ mod integration_tests {
     use super::*;
     use std::io::{BufRead, BufReader, Write};
     use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::time::Duration;
 
     type TestState = ServerState<tauri::test::MockRuntime>;
 
@@ -2561,5 +2602,53 @@ mod integration_tests {
         assert_eq!(ack["ok"], false);
         assert_eq!(ack["status"], "unauthorized");
         assert!(state.session.lock().unwrap().is_none(), "不应占用席位");
+    }
+
+    /// **纯文字不受影响**：没贴过图时，回车前的图片等待必须是零——
+    /// 这条是"加这个机制不拖慢原有链路"的产品承诺，用状态层实测时长钉住。
+    #[test]
+    fn test_wait_for_image_digest_is_noop_without_image() {
+        let (state, _code) = test_state();
+
+        let t = std::time::Instant::now();
+        state.wait_for_image_digest();
+        assert!(
+            t.elapsed() < Duration::from_millis(50),
+            "没贴过图不该等，实际等了 {:?}",
+            t.elapsed()
+        );
+
+        // 贴过、但队列早已清空（比如过了几分钟再发纯文字）同样不等
+        *state.image_ready_at.lock().unwrap() =
+            Some(std::time::Instant::now() - Duration::from_secs(5));
+        let t = std::time::Instant::now();
+        state.wait_for_image_digest();
+        assert!(t.elapsed() < Duration::from_millis(50), "过期队列不该等");
+    }
+
+    /// 图文消息：贴过图之后，文字消息确实会等到"消化完"再按回车
+    #[test]
+    fn test_wait_for_image_digest_waits_after_image() {
+        let (state, _code) = test_state();
+        state.note_image_pasted(1024 * 1024);
+
+        let ready = *state.image_ready_at.lock().unwrap();
+        assert!(ready.is_some(), "贴过图必须记账");
+
+        let t = std::time::Instant::now();
+        state.wait_for_image_digest();
+        let waited = t.elapsed();
+        // 1MB ⇒ 800ms + 1.2s = 2s（单次上限 4s）；这里只断言"确实等了足够久"，
+        // 不把上界钉死，避免在慢机器上抖动
+        assert!(
+            waited >= Duration::from_millis(1500),
+            "1MB 图必须等 ~2s，实际只等了 {waited:?}"
+        );
+        assert!(waited <= crate::paste::image_digest_delay(1024 * 1024) + Duration::from_millis(500));
+
+        // 等过一次之后就清空了：再来一条纯文字不等（视频率：连着发两段话）
+        let t = std::time::Instant::now();
+        state.wait_for_image_digest();
+        assert!(t.elapsed() < Duration::from_millis(50), "已就绪后不该再等");
     }
 }
