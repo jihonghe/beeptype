@@ -77,20 +77,23 @@ pub fn wait_image_settle(image_bytes: usize) {
 
 /// 目标应用"消化"一张刚粘贴的图片所需的时间（从粘贴那一刻算起）。
 ///
-/// 为什么需要它：图片粘进输入框后，应用还要异步把这份图读走、再上传/入库
-/// （2026-10-21 在 ZCode 3.16.2 + Hyprland 上实测：1.83MB 从粘贴到可发送约 2.1s，
-/// 181KB 约 0.22s，上传分块数 39:4 正好对上体积比）。在这个窗口里按回车，
-/// 应用**不当作"发送"**，而是当普通换行 ⇒ 表现为"图文消息变成换行、没发出去"，
-/// 且随图片大小忽有忽无（小图赶得上，大图赶不上，看着像"不稳定复现"）。
+/// 为什么需要它：图片粘进输入框后，应用还要异步把这份图读走、再上传/入库。
+/// 在这个窗口里按回车，应用**不当作"发送"**，而是当普通换行 ⇒ 表现为"图文消息
+/// 变成换行、没发出去"，且随图片大小忽有忽无（看着像"不稳定复现"）。
+///
+/// **量纲是像素，不是手机发来的字节数**：剪贴板里必须是位图（arboard 编成 PNG），
+/// 而 Chromium/Electron 只接受 `image/png`（2026-10-21 实测 jpeg/webp/bmp/tiff 全被
+/// 忽略）⇒ 应用吞的是"像素数换算出来的 PNG"，与源 JPEG 的压缩率无关。实测吞吐
+/// ≈ 8MB/s、照片类 PNG ≈ 2 字节/像素 ⇒ ≈0.25µs/像素；这里取 0.3µs/像素并留固定余量。
 ///
 /// 为什么是时间而不是"等应用就绪"：没有可感知的信号。剪贴板不提供"数据被读走"
 /// 事件（见 docs/TECH_DESIGN.md 10.2），应用的内部状态对外不可见；读无障碍树
-/// 或盯进程 I/O 都要按应用/按平台猜，成本和脆弱性远超一个按体积算的余量。
+/// 或盯进程 I/O 都要按应用/按平台猜，成本和脆弱性远超一个按像素算的余量。
 ///
-/// 取值＝实测吞吐（≈1.2s/MB）再留一段固定余量，**宁可多等一会儿，也不能让整条
-/// 消息没发出去**；单次最多等 `IMAGE_DIGEST_MAX_WAIT`，避免超大图把发送无限推迟。
-const IMAGE_DIGEST_BASE: Duration = Duration::from_millis(800);
-const IMAGE_DIGEST_PER_MB: Duration = Duration::from_millis(1200);
+/// 2026-10-21 起剪贴板侧还把长边压到 1920（`image_receiver::CLIPBOARD_MAX_EDGE`），
+/// 所以这个预算实际是 0.1~1s 量级；上限仍保留 4s，兜住更慢的应用。
+const IMAGE_DIGEST_BASE: Duration = Duration::from_millis(100);
+const IMAGE_DIGEST_PER_MP: Duration = Duration::from_millis(300);
 const IMAGE_DIGEST_MAX_WAIT: Duration = Duration::from_secs(4);
 
 /// 追加余量的上限，避免超长文本把回车拖得过久
@@ -103,10 +106,11 @@ fn enter_delay(text_chars: usize) -> Duration {
     ENTER_BASE_DELAY + Duration::from_millis(extra_ms as u64)
 }
 
-/// 单张图片的消化时长：基准余量 + 按体积递增（不设上限，上限在等待端统一收口）
-pub fn image_digest_delay(image_bytes: usize) -> Duration {
-    let per_mb = (image_bytes as u128 * IMAGE_DIGEST_PER_MB.as_millis()) / (1024 * 1024) as u128;
-    IMAGE_DIGEST_BASE + Duration::from_millis(per_mb as u64)
+/// 单张图片的消化时长：基准余量 + 按**写进剪贴板的像素数**递增
+/// （不设上限，上限在等待端统一收口）
+pub fn image_digest_delay(pixels: u64) -> Duration {
+    let per_mp = (pixels as u128 * IMAGE_DIGEST_PER_MP.as_millis()) / 1_000_000;
+    IMAGE_DIGEST_BASE + Duration::from_millis(per_mp as u64)
 }
 
 /// 把"又粘了一张图"接到消化队列上，返回队列预计清空的时刻。
@@ -119,13 +123,13 @@ pub fn image_digest_delay(image_bytes: usize) -> Duration {
 pub fn queue_image_digest(
     ready_at: Option<Instant>,
     pasted_at: Instant,
-    image_bytes: usize,
+    pixels: u64,
 ) -> Instant {
     let start = match ready_at {
         Some(ready) if ready > pasted_at => ready,
         _ => pasted_at,
     };
-    start + image_digest_delay(image_bytes)
+    start + image_digest_delay(pixels)
 }
 
 /// 距离"图片消化完"还要等多久：已经消化完（或压根没贴过图）返回 `None`。
@@ -791,13 +795,17 @@ mod tests {
     #[test]
     fn test_image_digest_delay_covers_measured_ingest() {
         assert_eq!(image_digest_delay(0), IMAGE_DIGEST_BASE);
-        assert_eq!(image_digest_delay(1024 * 1024), IMAGE_DIGEST_BASE + IMAGE_DIGEST_PER_MB);
-        assert!(image_digest_delay(181 * 1024) >= Duration::from_millis(220));
-        assert!(
-            image_digest_delay(1_830_761) >= Duration::from_millis(2100),
-            "1.83MB 的实测消化时间约 2.1s，预算不能比它短"
+        assert_eq!(
+            image_digest_delay(1_000_000),
+            IMAGE_DIGEST_BASE + IMAGE_DIGEST_PER_MP
         );
-        assert!(image_digest_delay(1024) <= image_digest_delay(8 * 1024 * 1024));
+        // 2026-10-21 实测：1920x1440（2.76MP）的 PNG 在 ZCode 里从 Begin 到 Commit
+        // 0.48s，加剪贴板读走约 0.1~0.3s ⇒ 预算必须 ≥0.6s，否则回车又会提前
+        assert!(
+            image_digest_delay(2_764_800) >= Duration::from_millis(600),
+            "1920 长边的图实测要 ~0.5s 才吞完，预算不能比它短"
+        );
+        assert!(image_digest_delay(1000) <= image_digest_delay(20_000_000));
     }
 
     /// 消化队列：串行累加。第二张图若在上一张还没消化完时到达，它的起点顺延；
@@ -805,26 +813,26 @@ mod tests {
     #[test]
     fn test_queue_image_digest_is_serial() {
         let t = Instant::now();
-        let one_mb = 1024 * 1024;
+        let one_mp = 1_000_000;
 
         // 队列空：从粘贴时刻开始算
-        let after_first = queue_image_digest(None, t, one_mb);
-        assert_eq!(after_first, t + image_digest_delay(one_mb));
+        let after_first = queue_image_digest(None, t, one_mp);
+        assert_eq!(after_first, t + image_digest_delay(one_mp));
 
         // 第二张在第一张消化完之前到达 ⇒ 顺延，而不是覆盖
         let second_pasted = t + Duration::from_millis(100);
-        let after_second = queue_image_digest(Some(after_first), second_pasted, one_mb);
-        assert_eq!(after_second, after_first + image_digest_delay(one_mb));
+        let after_second = queue_image_digest(Some(after_first), second_pasted, one_mp);
+        assert_eq!(after_second, after_first + image_digest_delay(one_mp));
         assert_eq!(
             after_second - t,
-            image_digest_delay(one_mb) + image_digest_delay(one_mb)
+            image_digest_delay(one_mp) + image_digest_delay(one_mp)
         );
 
         // 队列已经清空 ⇒ 不影响这一次
         let late = t + Duration::from_secs(60);
         assert_eq!(
-            queue_image_digest(Some(after_second), late, one_mb),
-            late + image_digest_delay(one_mb)
+            queue_image_digest(Some(after_second), late, one_mp),
+            late + image_digest_delay(one_mp)
         );
     }
 

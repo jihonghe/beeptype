@@ -26,6 +26,33 @@ pub const RECV_TIMEOUT: Duration = Duration::from_secs(30);
 /// 解码后的像素尺寸上限（防解码炸弹：小文件也能解出天文数字的像素）
 pub const MAX_DECODED_PIXELS: u64 = 8000 * 8000;
 
+/// 写进系统剪贴板前，图片长边的上限。
+///
+/// 为什么限制在"剪贴板这一环"而不是手机端：手机发来的 JPEG 只有 1~2MB，但剪贴板里
+/// 必须是位图，arboard 统一编码成 PNG；而 **Chromium/Electron 系只接受 `image/png`**
+/// （2026-10-21 在 Edge 上实测：`image/jpeg`、`image/webp`、`image/bmp`、`image/tiff`
+/// 全部被忽略，粘贴事件里什么都读不到）。PNG 体积正比于像素数 ⇒ 不设上限时，一张
+/// 2560px 的照片到目标应用手里是 10~16MB，它读走 / 上传这段时间里按回车只会变成
+/// 换行（见 [`crate::paste::image_digest_delay`]）。
+///
+/// 1920 把这份数据降到 4~5MB，实测目标应用吞图 0.48s，落回"粘贴 → 回车"的既有
+/// 余量之内；再大只是送进更慢的通道，肉眼几乎看不出差别。
+pub const CLIPBOARD_MAX_EDGE: u32 = 1920;
+
+/// 按长边等比缩到 `max_edge` 以内；本来就不超、或尺寸为 0 时原样返回（**不放大**）。
+///
+/// 抽成纯函数便于单测：它决定"用户最终看到的分辨率"，是需要被钉住的行为。
+pub fn fit_long_edge(w: u32, h: u32, max_edge: u32) -> (u32, u32) {
+    let long = w.max(h);
+    if long == 0 || max_edge == 0 || long <= max_edge {
+        return (w, h);
+    }
+    let scale = max_edge as f64 / long as f64;
+    let nw = ((w as f64 * scale).round() as u32).max(1);
+    let nh = ((h as f64 * scale).round() as u32).max(1);
+    (nw, nh)
+}
+
 /// 只接受这两种格式（手机端统一转 JPEG；PNG 留给"截图原样传"的将来）
 const ALLOWED_MIME: [&str; 2] = ["image/jpeg", "image/png"];
 
@@ -331,4 +358,37 @@ mod tests {
         assert!(matches!(r.end("i1"), ImageProgress::Complete { .. }));
     }
 
+    /// 剪贴板长边上限：超了就等比缩、比例不歪；不超就原样、绝不放大。
+    /// 这条直接决定"用户最终看到的分辨率"，也决定目标应用要吞多少数据。
+    #[test]
+    fn 剪贴板缩放按长边等比且不放大() {
+        // 横图、竖图都按长边缩
+        assert_eq!(fit_long_edge(2560, 1920, 1920), (1920, 1440));
+        assert_eq!(fit_long_edge(1920, 2560, 1920), (1440, 1920));
+        // 正方形
+        assert_eq!(fit_long_edge(4000, 4000, 1920), (1920, 1920));
+        // 本来就不超 ⇒ 原样
+        assert_eq!(fit_long_edge(1920, 1080, 1920), (1920, 1080));
+        assert_eq!(fit_long_edge(800, 600, 1920), (800, 600));
+        // 极端窄图：短边不能缩成 0
+        assert_eq!(fit_long_edge(4000, 1, 1920), (1920, 1));
+        // 退化输入不 panic
+        assert_eq!(fit_long_edge(0, 0, 1920), (0, 0));
+        assert_eq!(fit_long_edge(100, 100, 0), (100, 100));
+    }
+
+    /// 缩放后必须落在长边上限上，且长宽比偏差不超过 1px（避免把图压歪）
+    #[test]
+    fn 剪贴板缩放保持长宽比() {
+        for (w, h) in [(2560u32, 3413u32), (3000, 2000), (1001, 3003), (5000, 1234)] {
+            let (nw, nh) = fit_long_edge(w, h, CLIPBOARD_MAX_EDGE);
+            assert_eq!(nw.max(nh), CLIPBOARD_MAX_EDGE, "{w}x{h} 缩放后长边不对");
+            let before = w as f64 / h as f64;
+            let after = nw as f64 / nh as f64;
+            assert!(
+                (before - after).abs() < 0.01,
+                "{w}x{h} → {nw}x{nh} 长宽比歪了（{before} vs {after}）"
+            );
+        }
+    }
 }
